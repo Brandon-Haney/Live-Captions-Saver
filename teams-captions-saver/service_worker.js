@@ -4,9 +4,6 @@
 // https://stackoverflow.com/questions/66618136/persistent-service-worker-in-chrome-extension/66618269#66618269
 
 // This code is not used. But without it, the extension does not work
-let isTranscribing = false;
-let transcriptArray = [];
-
 function jsonToYaml(json) {
     return json.map(entry => {
         return `Name: ${entry.Name}\nText: ${entry.Text}\nTime: ${entry.Time}\n----`;
@@ -15,85 +12,52 @@ function jsonToYaml(json) {
 
 function saveTranscripts(meetingTitle, transcriptArray) {
     const yaml = jsonToYaml(transcriptArray);
-    console.log(yaml);
-
     chrome.downloads.download({
-        url: 'data:text/plain,' + yaml,
+        url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(yaml),
         filename: meetingTitle + ".txt",
         saveAs: true
     });
 }
 
+function saveAiTranscript(meetingTitle, transcriptArray) {
+    if (!transcriptArray || transcriptArray.length === 0) return;
+
+    const mergedTranscript = [];
+    transcriptArray.forEach(current => {
+        const lastEntry = mergedTranscript[mergedTranscript.length - 1];
+        if (lastEntry && lastEntry.Name === current.Name) {
+            lastEntry.Text += ' ' + current.Text;
+            lastEntry.Time = current.Time;
+        } else {
+            mergedTranscript.push({ ...current });
+        }
+    });
+
+    const formattedText = mergedTranscript.map(entry => 
+        `[${entry.Time}] ${entry.Name}: ${entry.Text}`
+    ).join('\n\n');
+
+    chrome.downloads.download({
+        url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(formattedText),
+        filename: `${meetingTitle}-AI.txt`,
+        saveAs: true
+    });
+}
+
 function createViewerTab(transcriptArray) {
-    // Create a data URL containing the HTML content for viewing captions
-    const htmlContent = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>MS Teams Captions Viewer</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    line-height: 1.6;
-                    margin: 0;
-                    padding: 20px;
-                    background-color: #f5f5f5;
-                }
-                .container {
-                    max-width: 800px;
-                    margin: 0 auto;
-                    background-color: white;
-                    padding: 20px;
-                    border-radius: 5px;
-                    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-                }
-                h1 {
-                    color: #333;
-                    text-align: center;
-                }
-                .caption {
-                    border-bottom: 1px solid #eee;
-                    padding: 10px 0;
-                    margin-bottom: 10px;
-                }
-                .name {
-                    font-weight: bold;
-                    color: #0078d4;
-                }
-                .text {
-                    margin: 5px 0;
-                }
-                .time {
-                    color: #666;
-                    font-size: 0.85em;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>MS Teams Captions</h1>
-                <div id="captions-container">
-                    ${transcriptArray.map(item => `
-                        <div class="caption">
-                            <div class="name">${item.Name}</div>
-                            <div class="text">${item.Text}</div>
-                            <div class="time">${item.Time}</div>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        </body>
-        </html>
-    `;
-    
-    // Create a new tab with this HTML content
-    chrome.tabs.create({
-        url: 'data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent)
+    chrome.storage.local.set({ captionsToView: transcriptArray }, function() {
+        if (chrome.runtime.lastError) {
+            console.error("Error saving captions to storage:", chrome.runtime.lastError);
+            return;
+        }
+        chrome.tabs.create({
+            url: chrome.runtime.getURL('viewer.html')
+        });
     });
 }
 
 chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
-    console.log("Service worker received message:", message);
+    console.log("Service worker received message:", message.message);
     
     switch (message.message) {
         case 'download_captions': // message from Content script
@@ -105,8 +69,10 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
             console.log('display_captions triggered!', message);
             createViewerTab(message.transcriptArray);
             break;
-
-        default:
+        
+        case 'download_ai_captions':
+            console.log('download_ai triggered!', message);
+            saveAiTranscript(message.meetingTitle, message.transcriptArray);
             break;
     }
 });
