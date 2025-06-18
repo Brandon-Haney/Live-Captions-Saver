@@ -74,12 +74,78 @@
             margin-top: 15px;
             height: 20px;
         }
+
+        .settings-container {
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #ddd;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .setting-item {
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .sub-setting .setting-label {
+            padding-left: 20px; 
+        }
+        .setting-item.disabled .setting-label {
+            color: #999;
+        }
+        .setting-label {
+            font-size: 14px;
+            color: #333;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 25px;
+            flex-shrink: 0;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 25px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 19px;
+            width: 19px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #28a745;
+        }
+        input:checked + .slider:before {
+            transform: translateX(25px);
+        }
     </style>
     <script src="popup.js" defer></script>
 </head>
 
 <body>
-    <h2>Captions Saver v3.9</h2>
+    <h2>Captions Saver v4.0</h2>
     <p class="subtitle">New Teams Only</p>
     
     <p class="info-text">To start, click More > Language and Speech > Turn on live captions in your Teams meeting.</p>
@@ -90,6 +156,23 @@
         <button id="saveButton" disabled>Save Captions</button>
         <button id="viewButton" disabled>View Captions</button>
         <button id="saveAiButton" disabled>Save for AI</button>
+    </div>
+
+    <div class="settings-container">
+        <div class="setting-item">
+            <label for="autoSaveToggle" class="setting-label">Automatically save when meeting ends</label>
+            <label class="toggle-switch">
+                <input type="checkbox" id="autoSaveToggle">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="setting-item sub-setting">
+            <label for="autoSaveAiToggle" class="setting-label">Also save AI version</label>
+            <label class="toggle-switch">
+                <input type="checkbox" id="autoSaveAiToggle">
+                <span class="slider"></span>
+            </label>
+        </div>
     </div>
 </body>
 </html>

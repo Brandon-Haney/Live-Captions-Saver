@@ -6,6 +6,37 @@ document.addEventListener('DOMContentLoaded', function () {
     const viewButton = document.getElementById('viewButton');
     const saveAiButton = document.getElementById('saveAiButton');
     const statusMessage = document.getElementById('status-message');
+    const autoSaveToggle = document.getElementById('autoSaveToggle');
+    const autoSaveAiToggle = document.getElementById('autoSaveAiToggle');
+
+    function handleToggleDependency() {
+        const subSettingItem = autoSaveAiToggle.closest('.setting-item');
+
+        if (autoSaveToggle.checked) {
+            autoSaveAiToggle.disabled = false;
+            subSettingItem.classList.remove('disabled');
+        } else {
+            autoSaveAiToggle.disabled = true;
+            autoSaveAiToggle.checked = false;
+            chrome.storage.sync.set({ autoSaveAiVersion: false });
+            subSettingItem.classList.add('disabled');
+        }
+    }
+
+    chrome.storage.sync.get(['autoSaveOnLeave', 'autoSaveAiVersion'], function(result) {
+        autoSaveToggle.checked = !!result.autoSaveOnLeave;
+        autoSaveAiToggle.checked = !!result.autoSaveAiVersion;
+        handleToggleDependency();
+    });
+
+    autoSaveToggle.addEventListener('change', function() {
+        chrome.storage.sync.set({ autoSaveOnLeave: this.checked });
+        handleToggleDependency();
+    });
+
+    autoSaveAiToggle.addEventListener('change', function() {
+        chrome.storage.sync.set({ autoSaveAiVersion: this.checked });
+    });
 
     function updatePopupUI(status) {
         saveButton.disabled = true;
@@ -25,6 +56,7 @@ document.addEventListener('DOMContentLoaded', function () {
             viewButton.disabled = false;
             saveAiButton.disabled = false;
         }
+    }
 
     chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
         if (tabs.length === 0 || !tabs[0].url.startsWith("https://teams.microsoft.com")) {
@@ -45,25 +77,24 @@ document.addEventListener('DOMContentLoaded', function () {
 
     saveButton.addEventListener('click', function () {
         console.log('save_captions clicked!');
-        
         // Get active tab and send message
-        chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+        chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
             chrome.tabs.sendMessage(tabs[0].id, {message: "return_transcript"});
         });
     });
 
     viewButton.addEventListener('click', function () {
         console.log('view_captions clicked!');
-        
         // Get active tab and send message
-        chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+        chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
             chrome.tabs.sendMessage(tabs[0].id, {message: "get_captions_for_viewing"});
         });
     });
-
+    
     saveAiButton.addEventListener('click', function () {
-        console.log('AI_transscript clicked!');
-        chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+        console.log('AI_transcript clicked!');
+        // Get active tab and send message
+        chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
             chrome.tabs.sendMessage(tabs[0].id, {message: "return_transcript_for_ai"});
         });
     });

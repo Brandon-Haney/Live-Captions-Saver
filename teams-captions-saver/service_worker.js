@@ -10,16 +10,27 @@ function jsonToYaml(json) {
     }).join('\n');
 }
 
-function saveTranscripts(meetingTitle, transcriptArray) {
+function saveTranscripts(meetingTitle, transcriptArray, saveAsPrompt = true) {
     const yaml = jsonToYaml(transcriptArray);
+    
+    let sanitizedTitle = meetingTitle.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim() || "Meeting";
+
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const datePrefix = `${year}-${month}-${day}`;
+
+    const filename = `${datePrefix} - ${sanitizedTitle}.txt`;
+
     chrome.downloads.download({
         url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(yaml),
-        filename: meetingTitle + ".txt",
-        saveAs: true
+        filename: filename,
+        saveAs: saveAsPrompt
     });
 }
 
-function saveAiTranscript(meetingTitle, transcriptArray) {
+function saveAiTranscript(meetingTitle, transcriptArray, saveAsPrompt = true) {
     if (!transcriptArray || transcriptArray.length === 0) return;
 
     const mergedTranscript = [];
@@ -37,10 +48,23 @@ function saveAiTranscript(meetingTitle, transcriptArray) {
         `[${entry.Time}] ${entry.Name}: ${entry.Text}`
     ).join('\n\n');
 
+    let sanitizedTitle = meetingTitle.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim() || "Meeting";
+
+    // Create a YYYY-MM-DD formatted date string
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const datePrefix = `${year}-${month}-${day}`;
+
+    // Construct the final filename with the date prefix and -AI suffix
+    const filename = `${datePrefix} - ${sanitizedTitle}-AI.txt`;
+
+
     chrome.downloads.download({
         url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(formattedText),
-        filename: `${meetingTitle}-AI.txt`,
-        saveAs: true
+        filename: filename, 
+        saveAs: saveAsPrompt
     });
 }
 
@@ -61,17 +85,30 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
     
     switch (message.message) {
         case 'download_captions': // message from Content script
-            console.log('download_captions triggered!', message);
-            saveTranscripts(message.meetingTitle, message.transcriptArray);
+            saveTranscripts(message.meetingTitle, message.transcriptArray, true);
+            break;
+
+        case 'save_on_leave':
+            console.log('Auto-saving transcript on leave...');
+            // Always save the default version without a prompt
+            saveTranscripts(message.meetingTitle, message.transcriptArray, false);
+            
+            // Also, check if we should save the AI version
+            chrome.storage.sync.get(['autoSaveAiVersion'], function(result) {
+                if (result.autoSaveAiVersion) {
+                    console.log('Also auto-saving AI version as per user setting.');
+                    // The 'saveAs' prompt for the AI version is true by default, but we can override to false for auto-save
+                    saveAiTranscript(message.meetingTitle, message.transcriptArray, false);
+                }
+            });
             break;
 
         case 'display_captions': // message from Content script with captions for viewing
-            console.log('display_captions triggered!', message);
             createViewerTab(message.transcriptArray);
             break;
         
         case 'download_ai_captions':
-            console.log('download_ai triggered!', message);
+            // Manual AI save will still prompt the user
             saveAiTranscript(message.meetingTitle, message.transcriptArray);
             break;
     }

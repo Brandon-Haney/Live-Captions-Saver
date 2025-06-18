@@ -85,6 +85,65 @@ function startTranscription() {
     setInterval(ensureObserverIsActive, 10000);
 }
 
+function setupLeaveButtonListener() {
+    // A prioritized list of selectors for the "Leave" button.
+    // The script will try them in order to find a match.
+    const LEAVE_BUTTON_SELECTORS = [
+        "button[data-tid='call-leave-button']",
+        "div#hangup-button button",
+        "button[data-tid='hangup-main-btn']",
+        "#hangup-button"
+    ];
+
+    let listenerAttached = false;
+
+    const intervalId = setInterval(() => {
+        // If chrome.runtime.id doesn't exist, the extension has been reloaded or uninstalled.
+        // This is the "zombie" check.
+        if (!chrome.runtime || !chrome.runtime.id) {
+            console.log("Extension context invalidated. Stopping leave button listener.");
+            clearInterval(intervalId);
+            return;
+        }
+        
+        chrome.storage.sync.get(['autoSaveOnLeave'], function(result) {
+            if (!result.autoSaveOnLeave) {
+                if (listenerAttached) listenerAttached = false;
+                return;
+            }
+
+            if (listenerAttached) {
+                return;
+            }
+
+            let leaveButton = null;
+            for (const selector of LEAVE_BUTTON_SELECTORS) {
+                leaveButton = document.querySelector(selector);
+                if (leaveButton) {
+                    console.log(`Found Leave button with selector: "${selector}"`);
+                    break;
+                }
+            }
+            
+            if (leaveButton) {
+                console.log("Attaching resilient auto-save listener to Leave button.");
+                leaveButton.addEventListener('click', () => {
+                    if (capturing && transcriptArray.length > 0) {
+                        const cleanTranscript = transcriptArray.map(({ key, ...rest }) => rest);
+                        chrome.runtime.sendMessage({
+                            message: "save_on_leave",
+                            transcriptArray: cleanTranscript,
+                            meetingTitle: document.title.replace("__Microsoft_Teams", '').replace(/[^a-z0-9 ]/gi, '')
+                        });
+                    }
+                }, { once: true });
+                
+                listenerAttached = true;
+            }
+        });
+    }, 3000);
+}
+
 startTranscription();
 
 // Listen for messages from the popup.js or service_worker.js
@@ -147,5 +206,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     return true; 
 });
+
+setupLeaveButtonListener();
 
 console.log("content_script.js is running");
