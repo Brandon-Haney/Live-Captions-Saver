@@ -3,6 +3,20 @@
 // Service worker script will be forcefully terminated after about 30 seconds of inactivity, and restarted when it's next needed.
 // https://stackoverflow.com/questions/66618136/persistent-service-worker-in-chrome-extension/66618269#66618269
 
+function getMeetingNameFromTitle(fullTitle) {
+    const parts = fullTitle.split('|');
+    let meetingName;
+
+    if (parts.length > 1) {
+        // If the title is like "Location | Meeting Name | App Name", there will be 3+ parts. We want the middle one.
+        // If it's "Meeting Name | App Name", there will be 2 parts. We want the first one.
+        meetingName = (parts.length > 2) ? parts[1] : parts[0];
+    } else {
+        meetingName = parts[0];
+    }
+    return meetingName.replace('Microsoft Teams', '').trim();
+}
+
 // This code is not used. But without it, the extension does not work
 function jsonToYaml(json) {
     return json.map(entry => {
@@ -13,7 +27,8 @@ function jsonToYaml(json) {
 function saveTranscripts(meetingTitle, transcriptArray, saveAsPrompt = true) {
     const yaml = jsonToYaml(transcriptArray);
     
-    let sanitizedTitle = meetingTitle.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim() || "Meeting";
+    const meetingName = getMeetingNameFromTitle(meetingTitle);
+    let sanitizedTitle = meetingName.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim() || "Meeting";
 
     const now = new Date();
     const year = now.getFullYear();
@@ -30,8 +45,14 @@ function saveTranscripts(meetingTitle, transcriptArray, saveAsPrompt = true) {
     });
 }
 
-function saveAiTranscript(meetingTitle, transcriptArray, saveAsPrompt = true) {
+async function saveAiTranscript(meetingTitle, transcriptArray, saveAsPrompt = true) {
     if (!transcriptArray || transcriptArray.length === 0) return;
+
+    const meetingName = getMeetingNameFromTitle(meetingTitle);
+
+    // Fetch AI instructions from storage
+    const storageResult = await chrome.storage.sync.get(['aiInstructions']);
+    const aiInstructions = storageResult.aiInstructions || '';
 
     const mergedTranscript = [];
     transcriptArray.forEach(current => {
@@ -44,25 +65,32 @@ function saveAiTranscript(meetingTitle, transcriptArray, saveAsPrompt = true) {
         }
     });
 
-    const formattedText = mergedTranscript.map(entry => 
+    const transcriptText = mergedTranscript.map(entry => 
         `[${entry.Time}] ${entry.Name}: ${entry.Text}`
     ).join('\n\n');
-
-    let sanitizedTitle = meetingTitle.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim() || "Meeting";
-
-    // Create a YYYY-MM-DD formatted date string
+    
     const now = new Date();
+    const currentDateTime = now.toLocaleString();
+    const metadataHeader = `Meeting Title: ${meetingName}\nDate: ${currentDateTime}`;
+
+    let finalContent = '';
+    if (aiInstructions) {
+        finalContent += `${aiInstructions}\n\n---\n\n`;
+    }
+    finalContent += `${metadataHeader}\n\n---\n\n`;
+    finalContent += transcriptText;
+
+    let sanitizedTitle = meetingName.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim() || "Meeting";
+
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
     const day = String(now.getDate()).padStart(2, '0');
     const datePrefix = `${year}-${month}-${day}`;
 
-    // Construct the final filename with the date prefix and -AI suffix
     const filename = `${datePrefix} - ${sanitizedTitle}-AI.txt`;
 
-
     chrome.downloads.download({
-        url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(formattedText),
+        url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(finalContent),
         filename: filename, 
         saveAs: saveAsPrompt
     });
@@ -80,7 +108,7 @@ function createViewerTab(transcriptArray) {
     });
 }
 
-chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
+chrome.runtime.onMessage.addListener(async (message, sender) => {
     console.log("Service worker received message:", message.message);
     
     switch (message.message) {
@@ -90,17 +118,17 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
 
         case 'save_on_leave':
             console.log('Auto-saving transcript on leave...');
-            // Always save the default version without a prompt
-            saveTranscripts(message.meetingTitle, message.transcriptArray, false);
             
-            // Also, check if we should save the AI version
-            chrome.storage.sync.get(['autoSaveAiVersion'], function(result) {
-                if (result.autoSaveAiVersion) {
-                    console.log('Also auto-saving AI version as per user setting.');
-                    // The 'saveAs' prompt for the AI version is true by default, but we can override to false for auto-save
-                    saveAiTranscript(message.meetingTitle, message.transcriptArray, false);
-                }
-            });
+            const result = await chrome.storage.sync.get(['autoSaveStandard', 'autoSaveAi']);
+            
+            if (result.autoSaveStandard) {
+                console.log('Auto-saving Standard version as per user setting.');
+                saveTranscripts(message.meetingTitle, message.transcriptArray, false);
+            }
+            if (result.autoSaveAi) {
+                console.log('Auto-saving AI version as per user setting.');
+                await saveAiTranscript(message.meetingTitle, message.transcriptArray, false);
+            }
             break;
 
         case 'display_captions': // message from Content script with captions for viewing
@@ -109,7 +137,7 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
         
         case 'download_ai_captions':
             // Manual AI save will still prompt the user
-            saveAiTranscript(message.meetingTitle, message.transcriptArray);
+            await saveAiTranscript(message.meetingTitle, message.transcriptArray, true);
             break;
     }
 });

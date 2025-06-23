@@ -68,6 +68,11 @@
             color: #6c757d;
             margin-top: 15px;
         }
+        
+        .small-info-text {
+             font-size: 12px;
+             color: #6c757d;
+        }
 
         #status-message {
             font-weight: bold;
@@ -82,24 +87,37 @@
             width: 100%;
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 15px;
         }
+        .settings-header {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin: 0 0 5px 0;
+            text-align: left;
+        }
+        .settings-subheader {
+            font-size: 14px;
+            font-weight: 600;
+            color: #555;
+            margin: 10px 0 5px 0;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 5px;
+        }
+
         .setting-item {
             width: 100%;
             display: flex;
             justify-content: space-between;
             align-items: center;
-        }
-        .sub-setting .setting-label {
-            padding-left: 20px; 
-        }
-        .setting-item.disabled .setting-label {
-            color: #999;
+            margin-top: 5px;
         }
         .setting-label {
             font-size: 14px;
             color: #333;
         }
+
         .toggle-switch {
             position: relative;
             display: inline-block;
@@ -140,6 +158,16 @@
         input:checked + .slider:before {
             transform: translateX(25px);
         }
+        textarea {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-family: inherit;
+            font-size: 13px;
+            resize: vertical;
+        }
     </style>
     <script src="popup.js" defer></script>
 </head>
@@ -159,19 +187,44 @@
     </div>
 
     <div class="settings-container">
-        <div class="setting-item">
-            <label for="autoSaveToggle" class="setting-label">Automatically save when meeting ends</label>
-            <label class="toggle-switch">
-                <input type="checkbox" id="autoSaveToggle">
-                <span class="slider"></span>
-            </label>
+        <h3 class="settings-header">Settings</h3>
+
+        <div class="settings-group">
+            <p class="settings-subheader">Meeting Features</p>
+            <div class="setting-item">
+                <label for="autoEnableCaptionsToggle" class="setting-label">Auto-start Live Captions</label>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="autoEnableCaptionsToggle">
+                    <span class="slider"></span>
+                </label>
+            </div>
         </div>
-        <div class="setting-item sub-setting">
-            <label for="autoSaveAiToggle" class="setting-label">Also save AI version</label>
-            <label class="toggle-switch">
-                <input type="checkbox" id="autoSaveAiToggle">
-                <span class="slider"></span>
-            </label>
+
+        <div class="settings-group">
+            <p class="settings-subheader">Auto-Save on Meeting End</p>
+            <div class="setting-item">
+                <label for="autoSaveStandardToggle" class="setting-label">Save Standard Version</label>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="autoSaveStandardToggle">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="setting-item">
+                <label for="autoSaveAiToggle" class="setting-label">Save AI Version</label>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="autoSaveAiToggle">
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+
+        <div class="settings-group">
+             <p class="settings-subheader">AI Customization</p>
+             <label for="aiInstructions" class="setting-label" style="margin-bottom: 5px;">Custom AI Instructions</label>
+             <p class="small-info-text" style="margin: 0 0 8px 0; width: 100%; text-align: left;">
+                This text will be added to the start of the 'Save for AI' file.
+             </p>
+             <textarea id="aiInstructions" rows="4" placeholder="Example: Summarize this meeting transcript into key action items..."></textarea>
         </div>
     </div>
 </body>

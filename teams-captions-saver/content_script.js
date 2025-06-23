@@ -3,8 +3,21 @@ let capturing = false;
 let observer = null;
 let observedElement = null;
 
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function isUserInMeeting() {
+    const LEAVE_BUTTON_SELECTORS = [
+        "button[data-tid='hangup-main-btn']",
+        "button[data-tid='hangup-leave-button']",
+        "button[data-tid='hangup-end-meeting-button']",
+        "div#hangup-button button",
+        "#hangup-button"
+    ];
+    // If any of these buttons exist on the page, we're in a meeting.
+    return document.querySelector(LEAVE_BUTTON_SELECTORS.join(',')) !== null;
+}
+
 function checkCaptions() {
-    console.log("Checking for captions...");
     // Teams v2 - Updated for new HTML structure
     const closedCaptionsContainer = document.querySelector("[data-tid='closed-captions-renderer']");
     if (!closedCaptionsContainer) {
@@ -71,31 +84,28 @@ function ensureObserverIsActive() {
     }
 }
 
-function startTranscription() {
-    const captionsContainer = document.querySelector("[data-tid='closed-captions-renderer']");
-    if (!captionsContainer) {
-        console.log("Waiting for Live Captions to be turned on...");
-        setTimeout(startTranscription, 2000); 
-        return;
-    }
-
-    console.log("Live Captions are ON. Starting capture process.");
-    capturing = true;
-    ensureObserverIsActive();
-    setInterval(ensureObserverIsActive, 10000);
-}
-
 function setupLeaveButtonListener() {
     // A prioritized list of selectors for the "Leave" button.
     // The script will try them in order to find a match.
     const LEAVE_BUTTON_SELECTORS = [
-        "button[data-tid='call-leave-button']",
-        "div#hangup-button button",
         "button[data-tid='hangup-main-btn']",
+        "button[data-tid='hangup-leave-button']",
+        "button[data-tid='hangup-end-meeting-button']",
+        "div#hangup-button button",
         "#hangup-button"
     ];
 
-    let listenerAttached = false;
+    const handleLeaveClick = () => {
+        if (capturing && transcriptArray.length > 0) {
+            console.log("Leave button clicked, triggering auto-save.");
+            const cleanTranscript = transcriptArray.map(({ key, ...rest }) => rest);
+            chrome.runtime.sendMessage({
+                message: "save_on_leave",
+                transcriptArray: cleanTranscript,
+                meetingTitle: document.title
+            });
+        }
+    };
 
     const intervalId = setInterval(() => {
         // If chrome.runtime.id doesn't exist, the extension has been reloaded or uninstalled.
@@ -106,45 +116,80 @@ function setupLeaveButtonListener() {
             return;
         }
         
-        chrome.storage.sync.get(['autoSaveOnLeave'], function(result) {
-            if (!result.autoSaveOnLeave) {
-                if (listenerAttached) listenerAttached = false;
+        chrome.storage.sync.get(['autoSaveStandard', 'autoSaveAi'], function(result) {
+            if (!result.autoSaveStandard && !result.autoSaveAi) {
                 return;
             }
 
-            if (listenerAttached) {
-                return;
-            }
-
-            let leaveButton = null;
-            for (const selector of LEAVE_BUTTON_SELECTORS) {
-                leaveButton = document.querySelector(selector);
-                if (leaveButton) {
-                    console.log(`Found Leave button with selector: "${selector}"`);
-                    break;
-                }
-            }
-            
-            if (leaveButton) {
-                console.log("Attaching resilient auto-save listener to Leave button.");
-                leaveButton.addEventListener('click', () => {
-                    if (capturing && transcriptArray.length > 0) {
-                        const cleanTranscript = transcriptArray.map(({ key, ...rest }) => rest);
-                        chrome.runtime.sendMessage({
-                            message: "save_on_leave",
-                            transcriptArray: cleanTranscript,
-                            meetingTitle: document.title.replace("__Microsoft_Teams", '').replace(/[^a-z0-9 ]/gi, '')
-                        });
-                    }
-                }, { once: true });
-                
-                listenerAttached = true;
-            }
+            const buttons = document.querySelectorAll(LEAVE_BUTTON_SELECTORS.join(', '));
+            buttons.forEach(button => {
+                if (button.dataset.listenerAttached) return;
+                console.log('Found new leave button, attaching listener:', button);
+                button.addEventListener('click', handleLeaveClick, { once: true });
+                button.dataset.listenerAttached = 'true';
+            });
         });
     }, 3000);
 }
 
-startTranscription();
+
+async function main() {
+    if (!isUserInMeeting()) {
+        setTimeout(main, 2000); 
+        return;
+    }
+    
+    const captionsOn = document.querySelector("[data-tid='closed-captions-renderer']");
+    if (captionsOn) {
+        console.log("Live Captions are ON. Initializing capture process.");
+        capturing = true;
+        
+        ensureObserverIsActive();
+        setInterval(ensureObserverIsActive, 10000);
+        setupLeaveButtonListener();
+        return; 
+    }
+
+    const settings = await chrome.storage.sync.get(['autoEnableCaptions']);
+    if (settings.autoEnableCaptions) {
+        console.log("Auto-enable setting is on. Attempting to turn on captions...");
+        try {
+            const moreButton = document.querySelector("button[data-tid='more-button'], button[id='callingButtons-showMoreBtn']");
+            
+            if (moreButton) {
+                moreButton.click();
+                await delay(400);
+
+                const langAndSpeechButton = document.querySelector("div[id='LanguageSpeechMenuControl-id']");
+                if (langAndSpeechButton) {
+                    langAndSpeechButton.click();
+                    await delay(400);
+
+                    const turnOnCaptionsButton = document.querySelector("div[id='closed-captions-button']");
+                    if (turnOnCaptionsButton) {
+                        turnOnCaptionsButton.click();
+                    } else {
+                        console.error("Auto-enable FAILED: Could not find 'Turn on live captions' button after clicking 'Language and speech'.");
+                    }
+                } else {
+                     console.error("Auto-enable FAILED: Could not find 'Language and speech' button after clicking 'More'.");
+                }
+                
+                // Try to close the menu again
+                const moreButtonAfter = document.querySelector("button[data-tid='more-button'][aria-expanded='true'], button[id='callingButtons-showMoreBtn'][aria-expanded='true']");
+                if (moreButtonAfter) moreButtonAfter.click();
+            } else {
+                console.error("Auto-enable FAILED: Could not find any 'More' button.");
+            }
+        } catch (e) {
+            console.error("Error during auto-enable attempt:", e);
+        }
+    }
+
+    setTimeout(main, 5000);
+}
+
+main();
 
 // Listen for messages from the popup.js or service_worker.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -166,7 +211,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             chrome.runtime.sendMessage({
                 message: "download_captions",
                 transcriptArray: transcriptArray.map(({ key, ...rest }) => rest), // Remove ID property
-                meetingTitle: document.title.replace("__Microsoft_Teams", '').replace(/[^a-z0-9 ]/gi, '')
+                meetingTitle: document.title
             });
             break;
 
@@ -195,7 +240,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             chrome.runtime.sendMessage({
                 message: "download_ai_captions",
                 transcriptArray: transcriptArray.map(({ key, ...rest }) => rest), // Remove ID property
-                meetingTitle: document.title.replace("__Microsoft_Teams", '').replace(/[^a-z0-9 ]/gi, '')
+                meetingTitle: document.title
             });
             break;
 
@@ -206,7 +251,5 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     return true; 
 });
-
-setupLeaveButtonListener();
 
 console.log("content_script.js is running");

@@ -6,36 +6,34 @@ document.addEventListener('DOMContentLoaded', function () {
     const viewButton = document.getElementById('viewButton');
     const saveAiButton = document.getElementById('saveAiButton');
     const statusMessage = document.getElementById('status-message');
-    const autoSaveToggle = document.getElementById('autoSaveToggle');
+    const autoSaveStandardToggle = document.getElementById('autoSaveStandardToggle');
     const autoSaveAiToggle = document.getElementById('autoSaveAiToggle');
+    const aiInstructions = document.getElementById('aiInstructions');
+    const autoEnableCaptionsToggle = document.getElementById('autoEnableCaptionsToggle');
 
-    function handleToggleDependency() {
-        const subSettingItem = autoSaveAiToggle.closest('.setting-item');
-
-        if (autoSaveToggle.checked) {
-            autoSaveAiToggle.disabled = false;
-            subSettingItem.classList.remove('disabled');
-        } else {
-            autoSaveAiToggle.disabled = true;
-            autoSaveAiToggle.checked = false;
-            chrome.storage.sync.set({ autoSaveAiVersion: false });
-            subSettingItem.classList.add('disabled');
-        }
-    }
-
-    chrome.storage.sync.get(['autoSaveOnLeave', 'autoSaveAiVersion'], function(result) {
-        autoSaveToggle.checked = !!result.autoSaveOnLeave;
-        autoSaveAiToggle.checked = !!result.autoSaveAiVersion;
-        handleToggleDependency();
+    // Load saved settings from storage
+    chrome.storage.sync.get(['autoSaveStandard', 'autoSaveAi', 'aiInstructions', 'autoEnableCaptions'], function(result) {
+        autoSaveStandardToggle.checked = !!result.autoSaveStandard;
+        autoSaveAiToggle.checked = !!result.autoSaveAi;
+        autoEnableCaptionsToggle.checked = !!result.autoEnableCaptions;
+        aiInstructions.value = result.aiInstructions || '';
     });
 
-    autoSaveToggle.addEventListener('change', function() {
-        chrome.storage.sync.set({ autoSaveOnLeave: this.checked });
-        handleToggleDependency();
+    autoSaveStandardToggle.addEventListener('change', function() {
+        chrome.storage.sync.set({ autoSaveStandard: this.checked });
     });
 
     autoSaveAiToggle.addEventListener('change', function() {
-        chrome.storage.sync.set({ autoSaveAiVersion: this.checked });
+        chrome.storage.sync.set({ autoSaveAi: this.checked });
+    });
+    
+    autoEnableCaptionsToggle.addEventListener('change', function() {
+        chrome.storage.sync.set({ autoEnableCaptions: this.checked });
+    });
+
+    aiInstructions.addEventListener('change', function() {
+        console.log("AI instructions changed and saved.");
+        chrome.storage.sync.set({ aiInstructions: this.value });
     });
 
     function updatePopupUI(status) {
