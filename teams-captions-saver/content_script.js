@@ -2,6 +2,8 @@ const transcriptArray = [];
 let capturing = false;
 let observer = null;
 let observedElement = null;
+let meetingTitleOnStart = '';
+let recordingStartTime = null;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -102,7 +104,8 @@ function setupLeaveButtonListener() {
             chrome.runtime.sendMessage({
                 message: "save_on_leave",
                 transcriptArray: cleanTranscript,
-                meetingTitle: document.title
+                meetingTitle: meetingTitleOnStart,
+                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
             });
         }
     };
@@ -132,6 +135,24 @@ function setupLeaveButtonListener() {
     }, 3000);
 }
 
+function resetCaptureState() {
+    console.log("Resetting transcript data after save/view.");
+    transcriptArray.length = 0; // Clear array
+    capturing = false;
+    meetingTitleOnStart = '';
+    recordingStartTime = null;
+
+    if (observer) {
+        observer.disconnect();
+        observer = null;
+        observedElement = null;
+    }
+    
+    // Attempt to re-initialize capturing if the user is still in a meeting.
+    console.log("State cleared. Re-running main setup logic.");
+    main();
+}
+
 
 async function main() {
     if (!isUserInMeeting()) {
@@ -143,6 +164,9 @@ async function main() {
     if (captionsOn) {
         console.log("Live Captions are ON. Initializing capture process.");
         capturing = true;
+        meetingTitleOnStart = document.title;
+        recordingStartTime = new Date();
+        console.log(`Capture started. Title: "${meetingTitleOnStart}", Start Time: ${recordingStartTime.toLocaleString()}`);
         
         ensureObserverIsActive();
         setInterval(ensureObserverIsActive, 10000);
@@ -211,7 +235,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             chrome.runtime.sendMessage({
                 message: "download_captions",
                 transcriptArray: transcriptArray.map(({ key, ...rest }) => rest), // Remove ID property
-                meetingTitle: document.title
+                meetingTitle: meetingTitleOnStart,
+                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
             });
             break;
 
@@ -240,8 +265,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             chrome.runtime.sendMessage({
                 message: "download_ai_captions",
                 transcriptArray: transcriptArray.map(({ key, ...rest }) => rest), // Remove ID property
-                meetingTitle: document.title
+                meetingTitle: meetingTitleOnStart,
+                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
             });
+            break;
+
+        case 'clear_transcript_data':
+            resetCaptureState();
+            sendResponse({ status: "resetting" });
             break;
 
         default:

@@ -24,13 +24,31 @@ function jsonToYaml(json) {
     }).join('\n');
 }
 
-function saveTranscripts(meetingTitle, transcriptArray, saveAsPrompt = true) {
+function resetContentScript(tabId) {
+    if (!tabId) {
+        console.warn("Could not reset content script, tab ID not available.");
+        return;
+    }
+    // Use a small delay to ensure other operations initiated before this call have started.
+    setTimeout(() => {
+        chrome.tabs.sendMessage(tabId, { message: "clear_transcript_data" }, (response) => {
+            if (chrome.runtime.lastError) {
+                // This error is expected if the tab was closed (e.g., after leaving a meeting)
+                console.log("Could not send reset message, probably because tab was closed:", chrome.runtime.lastError.message);
+            } else {
+                console.log("Content script acknowledged reset.", response);
+            }
+        });
+    }, 200);
+}
+
+function saveTranscripts(meetingTitle, transcriptArray, saveAsPrompt = true, recordingStartTime) {
     const yaml = jsonToYaml(transcriptArray);
     
     const meetingName = getMeetingNameFromTitle(meetingTitle);
     let sanitizedTitle = meetingName.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim() || "Meeting";
 
-    const now = new Date();
+    const now = recordingStartTime ? new Date(recordingStartTime) : new Date();
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
     const day = String(now.getDate()).padStart(2, '0');
@@ -45,7 +63,7 @@ function saveTranscripts(meetingTitle, transcriptArray, saveAsPrompt = true) {
     });
 }
 
-async function saveAiTranscript(meetingTitle, transcriptArray, saveAsPrompt = true) {
+async function saveAiTranscript(meetingTitle, transcriptArray, saveAsPrompt = true, recordingStartTime) {
     if (!transcriptArray || transcriptArray.length === 0) return;
 
     const meetingName = getMeetingNameFromTitle(meetingTitle);
@@ -69,7 +87,7 @@ async function saveAiTranscript(meetingTitle, transcriptArray, saveAsPrompt = tr
         `[${entry.Time}] ${entry.Name}: ${entry.Text}`
     ).join('\n\n');
     
-    const now = new Date();
+    const now = recordingStartTime ? new Date(recordingStartTime) : new Date();
     const currentDateTime = now.toLocaleString();
     const metadataHeader = `Meeting Title: ${meetingName}\nDate: ${currentDateTime}`;
 
@@ -110,34 +128,44 @@ function createViewerTab(transcriptArray) {
 
 chrome.runtime.onMessage.addListener(async (message, sender) => {
     console.log("Service worker received message:", message.message);
+    const tabId = sender.tab?.id;
     
     switch (message.message) {
         case 'download_captions': // message from Content script
-            saveTranscripts(message.meetingTitle, message.transcriptArray, true);
+            saveTranscripts(message.meetingTitle, message.transcriptArray, true, message.recordingStartTime);
+            resetContentScript(tabId);
             break;
 
         case 'save_on_leave':
             console.log('Auto-saving transcript on leave...');
             
             const result = await chrome.storage.sync.get(['autoSaveStandard', 'autoSaveAi']);
-            
+            let didSave = false;
+
             if (result.autoSaveStandard) {
                 console.log('Auto-saving Standard version as per user setting.');
-                saveTranscripts(message.meetingTitle, message.transcriptArray, false);
+                saveTranscripts(message.meetingTitle, message.transcriptArray, false, message.recordingStartTime);
+                didSave = true;
             }
             if (result.autoSaveAi) {
                 console.log('Auto-saving AI version as per user setting.');
-                await saveAiTranscript(message.meetingTitle, message.transcriptArray, false);
+                await saveAiTranscript(message.meetingTitle, message.transcriptArray, false, message.recordingStartTime);
+                didSave = true;
+            }
+            if (didSave) {
+                resetContentScript(tabId);
             }
             break;
 
         case 'display_captions': // message from Content script with captions for viewing
             createViewerTab(message.transcriptArray);
+            resetContentScript(tabId);
             break;
         
         case 'download_ai_captions':
             // Manual AI save will still prompt the user
-            await saveAiTranscript(message.meetingTitle, message.transcriptArray, true);
+            await saveAiTranscript(message.meetingTitle, message.transcriptArray, true, message.recordingStartTime);
+            resetContentScript(tabId);
             break;
     }
 });
