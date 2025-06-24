@@ -1,21 +1,23 @@
 <!doctype html>
 <html>
 <head>
-    <title>Chat Transcript Saver</title>
+    <title>Teams Transcript Saver</title>
+    <meta charset="UTF-8">
     <style>
+        /* --- General Body & Typography --- */
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #f4f4f4;
             margin: 0;
             padding: 15px 20px;
+            width: 400px;
+            box-sizing: border-box;
             display: flex;
             flex-direction: column;
             align-items: center;
-            background-color: #f4f4f4;
-            width: 400px;
-            box-sizing: border-box;
         }
 
-        h2, p { 
+        h2, p {
             margin: 4px 0;
             text-align: center;
         }
@@ -25,6 +27,37 @@
             font-style: italic;
             font-weight: normal;
             color: #555;
+        }
+
+        .info-text {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 15px;
+            line-height: 1.5;
+        }
+
+        .small-info-text {
+            font-size: 12px;
+            color: #6c757d;
+            width: 100%;
+            text-align: left;
+            margin-left: 2px;
+        }
+
+        #status-message {
+            font-weight: bold;
+            margin-top: 15px;
+            height: 20px;
+        }
+
+        #status-message a {
+            color: #17a2b8;
+            text-decoration: underline;
+            transition: color 0.3s ease;
+        }
+
+        #status-message a:hover {
+            color: #138496;
         }
 
         kbd {
@@ -39,86 +72,93 @@
             margin: 0 2px;
         }
 
-        button {
-            padding: 10px;
-            font-size: 14px;
-            margin: 0 5px;
-            border: none;
-            border-radius: 6px;
-            color: white;
-            cursor: pointer;
-            transition: background-color 0.3s ease, opacity 0.3s ease;
-            white-space: nowrap;
-            flex-grow: 1;
-        }
-
-        button:disabled {
-            background-color: #cccccc;
-            cursor: not-allowed;
-            opacity: 0.7;
-        }
-
-        #saveButton { background-color: #28a745; }
-        #saveButton:not(:disabled):hover { background-color: #1e7e34; }
-
-        #viewButton { background-color: #17a2b8; }
-        #viewButton:not(:disabled):hover { background-color: #138496; }
-        
-        #saveAiButton { background-color: #6f42c1; }
-        #saveAiButton:not(:disabled):hover { background-color: #5a379a; }
-
-        .prompt-button {
-            background-color: #e9ecef;
-            color: #495057;
-            border: 1px solid #dee2e6;
-            border-radius: 12px;
-            padding: 4px 10px;
-            font-size: 12px;
-            font-weight: 500;
-            cursor: pointer;
-            flex-grow: 0;
-            transition: background-color 0.2s ease, border-color 0.2s ease;
-        }
-        .prompt-button:hover {
-            background-color: #dee2e6;
-            border-color: #ced4da;
-        }
-
+        /* --- Buttons --- */
         .button-container {
             display: flex;
             flex-direction: row;
             justify-content: center;
             width: 100%;
             margin-top: 20px;
-        }
-
-        .info-text {
-            font-size: 12px;
-            color: #6c757d;
-            margin-top: 15px;
-            line-height: 1.5; 
+            gap: 10px;
         }
         
-        .small-info-text {
-             font-size: 12px;
-             color: #6c757d;
+        button, .split-button > button {
+            padding: 10px;
+            font-size: 14px;
+            border: none;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.3s ease, opacity 0.3s ease;
+            white-space: nowrap;
         }
 
-        #status-message {
-            font-weight: bold;
-            margin-top: 15px;
-            height: 20px;
+        button:disabled, .split-button > button:disabled {
+            background-color: #cccccc !important;
+            cursor: not-allowed;
+            opacity: 0.7;
         }
 
-        #status-message a {
-            color: #17a2b8;
-            text-decoration: underline;
-            transition: color 0.3s ease;
-        }
-        #status-message a:hover {
-            color: #138496;
-        }
+        #copyButton, #copyDropdownButton { background-color: #007bff; }
+        #copyButton:not(:disabled):hover, #copyDropdownButton:not(:disabled):hover { background-color: #0069d9; }
+        
+        #saveButton, #saveDropdownButton { background-color: #28a745; }
+        #saveButton:not(:disabled):hover, #saveDropdownButton:not(:disabled):hover { background-color: #1e7e34; }
 
+        #viewButton { 
+            background-color: #17a2b8; 
+            flex-grow: 1; 
+            border-radius: 6px; 
+        }
+        #viewButton:not(:disabled):hover { background-color: #138496; }
+
+        /* --- Split Button & Dropdown --- */
+        .split-button {
+            position: relative;
+            display: flex;
+            flex-grow: 1;
+        }
+        .split-button-main {
+            flex-grow: 1;
+            border-radius: 6px 0 0 6px;
+        }
+        .split-button-dropdown {
+            flex-grow: 0;
+            border-left: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 10px 8px;
+            margin-left: -1px;
+            border-radius: 0 6px 6px 0;
+        }
+        .split-button-options {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            background-color: white;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+            z-index: 1;
+            width: 100%;
+            border-radius: 4px;
+            overflow: hidden;
+            padding: 5px 0;
+        }
+        .split-button-options a {
+            color: black;
+            padding: 10px 16px;
+            text-decoration: none;
+            display: block;
+            font-size: 14px;
+        }
+        .split-button-options a:hover { 
+            background-color: #f1f1f1; 
+        }
+        .dropdown-divider {
+            height: 1px;
+            margin: 5px 0;
+            overflow: hidden;
+            background-color: #e9ecef;
+        }
+        
+        /* --- Settings Sections --- */
         .settings-container {
             margin-top: 20px;
             padding-top: 15px;
@@ -144,7 +184,6 @@
             border-bottom: 1px solid #eee;
             padding-bottom: 5px;
         }
-
         .setting-item {
             width: 100%;
             display: flex;
@@ -156,7 +195,13 @@
             font-size: 14px;
             color: #333;
         }
+        select#defaultSaveFormat {
+            padding: 5px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
 
+        /* --- Toggle Switch --- */
         .toggle-switch {
             position: relative;
             display: inline-block;
@@ -197,7 +242,35 @@
         input:checked + .slider:before {
             transform: translateX(25px);
         }
-        textarea {
+
+        /* --- Speaker Aliases --- */
+        .alias-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .alias-item label {
+            flex: 1;
+            font-size: 14px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .alias-item input {
+            flex: 2;
+            padding: 5px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        #speaker-alias-list p {
+            font-size: 13px;
+            color: #666;
+            text-align: left;
+        }
+
+        /* --- AI Customization --- */
+        textarea#aiInstructions {
             width: 100%;
             box-sizing: border-box;
             padding: 8px;
@@ -207,64 +280,109 @@
             font-size: 13px;
             resize: vertical;
         }
+        .prompt-suggestion-container {
+            display: flex;
+            gap: 5px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+        .prompt-button {
+            background-color: #e9ecef;
+            color: #495057;
+            border: 1px solid #dee2e6;
+            border-radius: 12px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s ease, border-color 0.2s ease;
+        }
+        .prompt-button:hover {
+            background-color: #dee2e6;
+            border-color: #ced4da;
+        }
     </style>
     <script src="popup.js" defer></script>
 </head>
 
 <body>
-    <h2>Teams Captions Saver v4.0</h2>
-    <p class="subtitle">Web Teams V2 Only</p>
+    <h2>Teams Captions Saver v4.4</h2>
+    <p class="subtitle">For Microsoft Teams on the Web</p>
     
-    <p id="manual-start-info" class="info-text">To start, click More > Language and Speech > Turn on live captions in your Teams meeting (or press <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>).</p>
+    <p id="manual-start-info" class="info-text">To begin, turn on live captions in your Teams meeting.</p>
 
     <p id="status-message">Checking status...</p>
 
     <div class="button-container">
-        <button id="saveButton" disabled>Save Captions</button>
-        <button id="viewButton" disabled>View Captions</button>
-        <button id="saveAiButton" disabled>Save for AI</button>
+        <div class="split-button" id="copy-container">
+            <button id="copyButton" class="split-button-main" disabled>Copy Transcript</button>
+            <button id="copyDropdownButton" class="split-button-dropdown" disabled>▾</button>
+            <div id="copyOptions" class="split-button-options">
+                <a href="#" data-copy-type="standard">Copy Standard Transcript</a>
+                <a href="#" data-copy-type="ai">Copy for AI Analysis</a>
+            </div>
+        </div>
+        <div class="split-button" id="save-container">
+            <button id="saveButton" class="split-button-main" disabled>Save as TXT</button>
+            <button id="saveDropdownButton" class="split-button-dropdown" disabled>▾</button>
+            <div id="saveOptions" class="split-button-options">
+                <a href="#" data-format="txt">Save as TXT (.txt)</a>
+                <a href="#" data-format="md">Save as Markdown (.md)</a>
+                <a href="#" data-format="doc">Save as Word (.doc)</a>
+                <a href="#" data-format="json">Save as JSON (.json)</a>
+                <div class="dropdown-divider"></div>
+                <a href="#" data-format="ai">Save for AI Analysis (.txt)</a>
+            </div>
+        </div>
+    </div>
+    <div class="button-container">
+         <button id="viewButton" disabled>View Transcript</button>
     </div>
 
     <div class="settings-container">
         <h3 class="settings-header">Settings</h3>
 
         <div class="settings-group">
-            <p class="settings-subheader">Meeting Features</p>
-            <div class="setting-item">
-                <label for="autoEnableCaptionsToggle" class="setting-label">Auto-start Live Captions</label>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="autoEnableCaptionsToggle">
-                    <span class="slider"></span>
-                </label>
+            <p class="settings-subheader">Session Settings</p>
+            <div id="speaker-alias-container">
+                 <label class="setting-label" style="margin-bottom: 10px;">Speaker Aliases</label>
+                 <div id="speaker-alias-list"><p>Start capturing to see the speaker list.</p></div>
             </div>
         </div>
 
         <div class="settings-group">
-            <p class="settings-subheader">Auto-Save on Meeting End</p>
+            <p class="settings-subheader">Export & Automation</p>
             <div class="setting-item">
-                <label for="autoSaveStandardToggle" class="setting-label">Save Standard Version</label>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="autoSaveStandardToggle">
-                    <span class="slider"></span>
-                </label>
+                <label for="defaultSaveFormat" class="setting-label">Default Save Format</label>
+                <select id="defaultSaveFormat">
+                    <option value="txt">TXT</option>
+                    <option value="md">Markdown</option>
+                    <option value="doc">Word</option>
+                    <option value="json">JSON</option>
+                    <option value="ai">AI Analysis</option>
+                </select>
             </div>
             <div class="setting-item">
-                <label for="autoSaveAiToggle" class="setting-label">Save AI Version</label>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="autoSaveAiToggle">
-                    <span class="slider"></span>
-                </label>
+                <label for="autoSaveOnEndToggle" class="setting-label">Auto-Save on Meeting End</label>
+                <label class="toggle-switch"><input type="checkbox" id="autoSaveOnEndToggle"><span class="slider"></span></label>
+            </div>
+             <p class="small-info-text">Automatically saves in your default format when you leave a meeting.</p>
+        </div>
+
+        <div class="settings-group">
+            <p class="settings-subheader">Meeting Features</p>
+            <div class="setting-item">
+                <label for="autoEnableCaptionsToggle" class="setting-label">Auto-start Live Captions</label>
+                <label class="toggle-switch"><input type="checkbox" id="autoEnableCaptionsToggle"><span class="slider"></span></label>
             </div>
         </div>
 
         <div class="settings-group">
              <p class="settings-subheader">AI Customization</p>
              <label for="aiInstructions" class="setting-label" style="margin-bottom: 5px;">Custom AI Instructions</label>
-             <p class="small-info-text" style="margin: 0 0 8px 0; width: 100%; text-align: left;">
-                This text will be added to the start of the 'Save for AI' file.
-             </p>
-             <textarea id="aiInstructions" rows="4" placeholder="Example: Summarize this meeting transcript into key action items..."></textarea>
-            <div class="prompt-suggestion-container" style="display: flex; gap: 5px; margin-top: 8px; flex-wrap: wrap;">
+             <p class="small-info-text" style="margin: 0 0 8px 0;">This text is used for "Copy/Save for AI" actions.</p>
+             <textarea id="aiInstructions" rows="4" placeholder="Example: Summarize this transcript into key action items..."></textarea>
+            <div class="prompt-suggestion-container">
                 <button class="prompt-button">Summarize</button>
                 <button class="prompt-button">List Action Items</button>
                 <button class="prompt-button">Find Decisions</button>

@@ -1,168 +1,184 @@
-// Service worker is a script that your browser runs in the background, separate from a web page, opening the door to features that don't need a web page 
-// or user interaction.
-// Service worker script will be forcefully terminated after about 30 seconds of inactivity, and restarted when it's next needed.
-// https://stackoverflow.com/questions/66618136/persistent-service-worker-in-chrome-extension/66618269#66618269
+// --- Utility Functions ---
 
-function getMeetingNameFromTitle(fullTitle) {
+function getSanitizedMeetingName(fullTitle) {
+    if (!fullTitle) return "Meeting";
     const parts = fullTitle.split('|');
-    let meetingName;
+    // Handles titles like "Meeting Name | Microsoft Teams" or "Location | Meeting | Teams"
+    const meetingName = parts.length > 2 ? parts[1] : parts[0];
+    const cleanedName = meetingName.replace('Microsoft Teams', '').trim();
+    // Replace characters forbidden in filenames
+    return cleanedName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_') || "Meeting";
+}
 
-    if (parts.length > 1) {
-        // If the title is like "Location | Meeting Name | App Name", there will be 3+ parts. We want the middle one.
-        // If it's "Meeting Name | App Name", there will be 2 parts. We want the first one.
-        meetingName = (parts.length > 2) ? parts[1] : parts[0];
-    } else {
-        meetingName = parts[0];
+function generateFilename(baseName, extension, recordingStartTime) {
+    const date = recordingStartTime ? new Date(recordingStartTime) : new Date();
+    const datePrefix = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    return `${datePrefix} - ${baseName}.${extension}`;
+}
+
+function applyAliasesToTranscript(transcriptArray, aliases = {}) {
+    if (Object.keys(aliases).length === 0) {
+        return transcriptArray;
     }
-    return meetingName.replace('Microsoft Teams', '').trim();
+    return transcriptArray.map(entry => {
+        const newName = aliases[entry.Name]?.trim();
+        return {
+            ...entry,
+            Name: newName || entry.Name
+        };
+    });
 }
 
-// This code is not used. But without it, the extension does not work
-function jsonToYaml(json) {
-    return json.map(entry => {
-        return `Name: ${entry.Name}\nText: ${entry.Text}\nTime: ${entry.Time}\n----`;
-    }).join('\n');
+// --- Formatting Functions ---
+
+function formatAsTxt(transcript) {
+    return transcript.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n');
 }
 
-function resetContentScript(tabId) {
-    if (!tabId) {
-        console.warn("Could not reset content script, tab ID not available.");
-        return;
-    }
-    // Use a small delay to ensure other operations initiated before this call have started.
-    setTimeout(() => {
-        chrome.tabs.sendMessage(tabId, { message: "clear_transcript_data" }, (response) => {
-            if (chrome.runtime.lastError) {
-                // This error is expected if the tab was closed (e.g., after leaving a meeting)
-                console.log("Could not send reset message, probably because tab was closed:", chrome.runtime.lastError.message);
-            } else {
-                console.log("Content script acknowledged reset.", response);
-            }
-        });
-    }, 200);
+function formatAsMarkdown(transcript) {
+    let lastSpeaker = null;
+    return transcript.map(entry => {
+        if (entry.Name !== lastSpeaker) {
+            lastSpeaker = entry.Name;
+            return `\n**${entry.Name}** (${entry.Time}):\n> ${entry.Text}`;
+        }
+        return `> ${entry.Text}`;
+    }).join('\n').trim();
 }
 
-function saveTranscripts(meetingTitle, transcriptArray, saveAsPrompt = true, recordingStartTime) {
-    const yaml = jsonToYaml(transcriptArray);
+function formatAsDoc(transcript) {
+    const body = transcript.map(entry =>
+        `<p><b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`
+    ).join('');
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Meeting Transcript</title></head><body>${body}</body></html>`;
+}
+
+async function formatForAi(transcript, meetingName, recordingStartTime) {
+    const { aiInstructions = '' } = await chrome.storage.sync.get('aiInstructions');
+    const date = recordingStartTime ? new Date(recordingStartTime) : new Date();
     
-    const meetingName = getMeetingNameFromTitle(meetingTitle);
-    let sanitizedTitle = meetingName.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim() || "Meeting";
+    const metadataHeader = `Meeting Title: ${meetingName}\nDate: ${date.toLocaleString()}`;
+    const transcriptText = transcript.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n\n');
 
-    const now = recordingStartTime ? new Date(recordingStartTime) : new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const datePrefix = `${year}-${month}-${day}`;
+    let finalContent = aiInstructions ? `${aiInstructions}\n\n---\n\n` : '';
+    finalContent += `${metadataHeader}\n\n---\n\n${transcriptText}`;
+    
+    return finalContent;
+}
 
-    const filename = `${datePrefix} - ${sanitizedTitle}.txt`;
+// A simple HTML escaper for the .doc format
+function escapeHtml(str) {
+    return str.replace(/&/g, "&")
+              .replace(/</g, "<")
+              .replace(/>/g, ">")
+              .replace(/"/g, "&quot;")
+            //   .replace(/'/g, "'");
+              .replace(/'/g, "&#039;");
+}
 
+// --- Core Actions ---
+
+function downloadFile(filename, content, mimeType, saveAs) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
     chrome.downloads.download({
-        url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(yaml),
+        url: url,
         filename: filename,
-        saveAs: saveAsPrompt
+        saveAs: saveAs
     });
 }
 
-async function saveAiTranscript(meetingTitle, transcriptArray, saveAsPrompt = true, recordingStartTime) {
-    if (!transcriptArray || transcriptArray.length === 0) return;
+async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt) {
+    const processedTranscript = applyAliasesToTranscript(transcriptArray, aliases);
+    const meetingName = getSanitizedMeetingName(meetingTitle);
 
-    const meetingName = getMeetingNameFromTitle(meetingTitle);
+    let content, extension, mimeType;
 
-    // Fetch AI instructions from storage
-    const storageResult = await chrome.storage.sync.get(['aiInstructions']);
-    const aiInstructions = storageResult.aiInstructions || '';
-
-    const mergedTranscript = [];
-    transcriptArray.forEach(current => {
-        const lastEntry = mergedTranscript[mergedTranscript.length - 1];
-        if (lastEntry && lastEntry.Name === current.Name) {
-            lastEntry.Text += ' ' + current.Text;
-            lastEntry.Time = current.Time;
-        } else {
-            mergedTranscript.push({ ...current });
-        }
-    });
-
-    const transcriptText = mergedTranscript.map(entry => 
-        `[${entry.Time}] ${entry.Name}: ${entry.Text}`
-    ).join('\n\n');
-    
-    const now = recordingStartTime ? new Date(recordingStartTime) : new Date();
-    const currentDateTime = now.toLocaleString();
-    const metadataHeader = `Meeting Title: ${meetingName}\nDate: ${currentDateTime}`;
-
-    let finalContent = '';
-    if (aiInstructions) {
-        finalContent += `${aiInstructions}\n\n---\n\n`;
-    }
-    finalContent += `${metadataHeader}\n\n---\n\n`;
-    finalContent += transcriptText;
-
-    let sanitizedTitle = meetingName.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_').trim() || "Meeting";
-
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const datePrefix = `${year}-${month}-${day}`;
-
-    const filename = `${datePrefix} - ${sanitizedTitle}-AI.txt`;
-
-    chrome.downloads.download({
-        url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(finalContent),
-        filename: filename, 
-        saveAs: saveAsPrompt
-    });
-}
-
-function createViewerTab(transcriptArray) {
-    chrome.storage.local.set({ captionsToView: transcriptArray }, function() {
-        if (chrome.runtime.lastError) {
-            console.error("Error saving captions to storage:", chrome.runtime.lastError);
-            return;
-        }
-        chrome.tabs.create({
-            url: chrome.runtime.getURL('viewer.html')
-        });
-    });
-}
-
-chrome.runtime.onMessage.addListener(async (message, sender) => {
-    console.log("Service worker received message:", message.message);
-    const tabId = sender.tab?.id;
-    
-    switch (message.message) {
-        case 'download_captions': // message from Content script
-            saveTranscripts(message.meetingTitle, message.transcriptArray, true, message.recordingStartTime);
+    switch (format) {
+        case 'md':
+            content = formatAsMarkdown(processedTranscript);
+            extension = 'md';
+            mimeType = 'text/markdown';
             break;
+        case 'json':
+            content = JSON.stringify(processedTranscript, null, 2);
+            extension = 'json';
+            mimeType = 'application/json';
+            break;
+        case 'doc':
+            content = formatAsDoc(processedTranscript);
+            extension = 'doc';
+            mimeType = 'application/msword';
+            break;
+        case 'ai':
+            content = await formatForAi(processedTranscript, meetingName, recordingStartTime);
+            extension = 'txt';
+            mimeType = 'text/plain';
+            break;
+        case 'txt':
+        default:
+            content = formatAsTxt(processedTranscript);
+            extension = 'txt';
+            mimeType = 'text/plain';
+            break;
+    }
+    
+    const filename = generateFilename(meetingName, format === 'ai' ? `${meetingName}-AI` : meetingName, recordingStartTime);
+    downloadFile(filename, content, mimeType, saveAsPrompt);
+}
 
-        case 'save_on_leave':
-            console.log('Auto-saving transcript on leave...');
+async function createViewerTab(transcriptArray) {
+    await chrome.storage.local.set({ captionsToView: transcriptArray });
+    chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') });
+}
+
+function updateBadge(isCapturing) {
+    if (isCapturing) {
+        chrome.action.setBadgeText({ text: 'ON' });
+        chrome.action.setBadgeBackgroundColor({ color: '#28a745' }); // Green
+    } else {
+        chrome.action.setBadgeText({ text: 'OFF' });
+        chrome.action.setBadgeBackgroundColor({ color: '#6c757d' }); // Grey
+    }
+}
+
+// --- Event Listeners ---
+
+chrome.runtime.onInstalled.addListener(() => {
+    updateBadge(false);
+});
+
+chrome.runtime.onStartup.addListener(() => {
+    updateBadge(false);
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    (async () => {
+        const { speakerAliases } = await chrome.storage.session.get('speakerAliases');
+
+        switch (message.message) {
+            case 'download_captions':
+                await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, message.format, message.recordingStartTime, true);
+                break;
+
+            case 'save_on_leave':
+                const settings = await chrome.storage.sync.get(['autoSaveOnEnd', 'defaultSaveFormat']);
+                if (settings.autoSaveOnEnd && message.transcriptArray.length > 0) {
+                    const formatToSave = settings.defaultSaveFormat || 'txt';
+                    console.log(`Auto-saving transcript in ${formatToSave.toUpperCase()} format.`);
+                    await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, formatToSave, message.recordingStartTime, false);
+                }
+                break;
+
+            case 'display_captions':
+                await createViewerTab(message.transcriptArray);
+                break;
             
-            const result = await chrome.storage.sync.get(['autoSaveStandard', 'autoSaveAi']);
-            let didSave = false;
-
-            if (result.autoSaveStandard) {
-                console.log('Auto-saving Standard version as per user setting.');
-                saveTranscripts(message.meetingTitle, message.transcriptArray, false, message.recordingStartTime);
-                didSave = true;
-            }
-            if (result.autoSaveAi) {
-                console.log('Auto-saving AI version as per user setting.');
-                await saveAiTranscript(message.meetingTitle, message.transcriptArray, false, message.recordingStartTime);
-                didSave = true;
-            }
-            if (didSave) {
-                resetContentScript(tabId);
-            }
-            break;
-
-        case 'display_captions': // message from Content script with captions for viewing
-            createViewerTab(message.transcriptArray);
-            break;
-        
-        case 'download_ai_captions':
-            // Manual AI save will still prompt the user
-            await saveAiTranscript(message.meetingTitle, message.transcriptArray, true, message.recordingStartTime);
-            break;
-    }
+            case 'update_badge_status':
+                updateBadge(message.capturing);
+                break;
+        }
+    })();
+    
+    return true; // Indicates that the response will be sent asynchronously
 });

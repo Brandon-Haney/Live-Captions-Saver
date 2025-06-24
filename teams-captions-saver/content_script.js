@@ -1,301 +1,304 @@
-const transcriptArray = [];
-let capturing = false;
-let observer = null;
-let observedElement = null;
-let meetingTitleOnStart = '';
-let recordingStartTime = null;
-let hasInitialized = false;
-
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-function isUserInMeeting() {
-    const LEAVE_BUTTON_SELECTORS = [
+// --- Constants ---
+const SELECTORS = {
+    CAPTIONS_RENDERER: "[data-tid='closed-captions-renderer']",
+    CHAT_MESSAGE: '.fui-ChatMessageCompact',
+    AUTHOR: '[data-tid="author"]',
+    CAPTION_TEXT: '[data-tid="closed-caption-text"]',
+    LEAVE_BUTTONS: [
         "button[data-tid='hangup-main-btn']",
         "button[data-tid='hangup-leave-button']",
         "button[data-tid='hangup-end-meeting-button']",
         "div#hangup-button button",
         "#hangup-button"
-    ];
-    // If any of these buttons exist on the page, we're in a meeting.
-    return document.querySelector(LEAVE_BUTTON_SELECTORS.join(',')) !== null;
-}
+    ].join(','),
+    MORE_BUTTON: "button[data-tid='more-button'], button[id='callingButtons-showMoreBtn']",
+    MORE_BUTTON_EXPANDED: "button[data-tid='more-button'][aria-expanded='true'], button[id='callingButtons-showMoreBtn'][aria-expanded='true']",
+    LANGUAGE_SPEECH_BUTTON: "div[id='LanguageSpeechMenuControl-id']",
+    TURN_ON_CAPTIONS_BUTTON: "div[id='closed-captions-button']",
+};
 
-function checkCaptions() {
-    // Teams v2 - Updated for new HTML structure
-    const closedCaptionsContainer = document.querySelector("[data-tid='closed-captions-renderer']");
-    if (!closedCaptionsContainer) {
-        // "Please, click 'More' > 'Language and speech' > 'Turn on life captions'"
-        return;
-    }
-    
-    // New selector for caption items
-    const transcripts = closedCaptionsContainer.querySelectorAll('.fui-ChatMessageCompact');
+// --- State ---
+const transcriptArray = [];
+let capturing = false;
+let meetingTitleOnStart = '';
+let recordingStartTime = null;
+let observer = null;
+let observedElement = null;
+let hasInitializedListeners = false;
 
-    transcripts.forEach(transcript => {
-        // Get author name
-        const authorElement = transcript.querySelector('[data-tid="author"]');
-        if (!authorElement) return; // Skip if no author found
-        
-        const Name = authorElement.innerText.trim();
-        
-        // Get caption text
-        const textElement = transcript.querySelector('[data-tid="closed-caption-text"]');
-        if (!textElement) return; // Skip if no text found
-        
-        const Text = textElement.innerText.trim();
-        
-        if (Text.length === 0) return;
-        
-        let captionId = transcript.getAttribute('data-caption-id');
+// --- Utility Functions ---
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const getCleanTranscript = () => transcriptArray.map(({ key, ...rest }) => rest);
+
+const isUserInMeeting = () => document.querySelector(SELECTORS.LEAVE_BUTTONS) !== null;
+
+// --- Core Logic ---
+
+/**
+ * Scans the DOM for new or updated caption entries and adds them to the transcript array.
+ */
+function processCaptionUpdates() {
+    const closedCaptionsContainer = document.querySelector(SELECTORS.CAPTIONS_RENDERER);
+    if (!closedCaptionsContainer) return;
+
+    const transcriptElements = closedCaptionsContainer.querySelectorAll(SELECTORS.CHAT_MESSAGE);
+
+    transcriptElements.forEach(element => {
+        const authorElement = element.querySelector(SELECTORS.AUTHOR);
+        const textElement = element.querySelector(SELECTORS.CAPTION_TEXT);
+
+        if (!authorElement || !textElement) return;
+
+        const name = authorElement.innerText.trim();
+        const text = textElement.innerText.trim();
+        if (text.length === 0) return;
+
+        let captionId = element.getAttribute('data-caption-id');
         if (!captionId) {
-            captionId = `caption_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-            transcript.setAttribute('data-caption-id', captionId);
+            captionId = `caption_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+            element.setAttribute('data-caption-id', captionId);
         }
 
         const existingIndex = transcriptArray.findIndex(entry => entry.key === captionId);
-        const Time = new Date().toLocaleTimeString();
+        const time = new Date().toLocaleTimeString();
 
         if (existingIndex !== -1) {
-            if (transcriptArray[existingIndex].Text !== Text) {
-                transcriptArray[existingIndex].Text = Text;
-                transcriptArray[existingIndex].Time = Time;
+            // Update existing entry if text has changed
+            if (transcriptArray[existingIndex].Text !== text) {
+                transcriptArray[existingIndex].Text = text;
+                transcriptArray[existingIndex].Time = time;
             }
         } else {
-            transcriptArray.push({ Name, Text, Time, key: captionId });
+            // Add new entry
+            transcriptArray.push({ Name: name, Text: text, Time: time, key: captionId });
         }
     });
 }
 
+/**
+ * Ensures the MutationObserver is attached to the caption container and watching for changes.
+ * This function runs periodically to re-attach the observer if the DOM changes (e.g., Teams re-renders).
+ */
 function ensureObserverIsActive() {
     if (!capturing) return;
-    const currentContainer = document.querySelector("[data-tid='closed-captions-renderer']");
-    if (!currentContainer || currentContainer !== observedElement) {
-        if (observer) observer.disconnect();
-        if (currentContainer) {
-            observer = new MutationObserver(checkCaptions);
-            observer.observe(currentContainer, { 
-                childList: true, 
-                subtree: true, 
-                characterData: true // Also watch for text changes
+
+    const captionContainer = document.querySelector(SELECTORS.CAPTIONS_RENDERER);
+    
+    // If the container doesn't exist or has changed, re-initialize the observer
+    if (!captionContainer || captionContainer !== observedElement) {
+        if (observer) {
+            observer.disconnect();
+        }
+
+        if (captionContainer) {
+            observer = new MutationObserver(processCaptionUpdates);
+            observer.observe(captionContainer, {
+                childList: true,
+                subtree: true,
+                characterData: true,
             });
-            observedElement = currentContainer;
-            // Do an initial check
-            checkCaptions();
+            observedElement = captionContainer;
+            processCaptionUpdates(); // Initial scan
         } else {
             observedElement = null;
         }
     }
 }
 
-function setupLeaveButtonListener() {
-    // This function is designed to run periodically to find the leave button.
-    const LEAVE_BUTTON_SELECTORS = [
-        "button[data-tid='hangup-main-btn']",
-        "button[data-tid='hangup-leave-button']",
-        "button[data-tid='hangup-end-meeting-button']",
-        "div#hangup-button button",
-        "#hangup-button"
-    ];
+/**
+ * Resets the state and starts a new captioning session.
+ */
+function startCaptureSession() {
+    if (capturing) return;
 
-    const handleLeaveClick = () => {
-        if (capturing && transcriptArray.length > 0) {
-            console.log("Leave button clicked, triggering auto-save.");
-            const cleanTranscript = transcriptArray.map(({ key, ...rest }) => rest);
-            chrome.runtime.sendMessage({
-                message: "save_on_leave",
-                transcriptArray: cleanTranscript,
-                meetingTitle: meetingTitleOnStart,
-                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
-            });
+    console.log("New caption session detected. Starting capture.");
+    transcriptArray.length = 0;
+    chrome.storage.session.remove('speakerAliases');
+
+    capturing = true;
+    meetingTitleOnStart = document.title;
+    recordingStartTime = new Date();
+    
+    console.log(`Capture started. Title: "${meetingTitleOnStart}", Time: ${recordingStartTime.toLocaleString()}`);
+    chrome.runtime.sendMessage({ message: "update_badge_status", capturing: true });
+    
+    ensureObserverIsActive();
+}
+
+/**
+ * Stops the current captioning session but preserves the captured data.
+ */
+function stopCaptureSession() {
+    if (!capturing) return;
+
+    console.log("Captions turned off or meeting ended. Capture stopped. Data preserved.");
+    capturing = false;
+    if (observer) {
+        observer.disconnect();
+        observer = null;
+    }
+    observedElement = null;
+    chrome.runtime.sendMessage({ message: "update_badge_status", capturing: false });
+}
+
+// --- Automated Features ---
+
+/**
+ * Attempts to find and click the UI elements to turn on live captions automatically.
+ */
+async function attemptAutoEnableCaptions() {
+    try {
+        const moreButton = document.querySelector(SELECTORS.MORE_BUTTON);
+        if (!moreButton) {
+            console.error("Auto-enable FAILED: Could not find 'More' button.");
+            return;
         }
-    };
+        moreButton.click();
+        await delay(400);
 
-    const intervalId = setInterval(() => {
-        // If chrome.runtime.id doesn't exist, the extension has been reloaded or uninstalled.
-        // This is the "zombie" check.
-        if (!chrome.runtime || !chrome.runtime.id) {
-            console.log("Extension context invalidated. Stopping leave button listener.");
+        const langAndSpeechButton = document.querySelector(SELECTORS.LANGUAGE_SPEECH_BUTTON);
+        if (!langAndSpeechButton) {
+            console.error("Auto-enable FAILED: Could not find 'Language and speech' menu item.");
+            return;
+        }
+        langAndSpeechButton.click();
+        await delay(400);
+
+        const turnOnCaptionsButton = document.querySelector(SELECTORS.TURN_ON_CAPTIONS_BUTTON);
+        if (turnOnCaptionsButton) {
+            turnOnCaptionsButton.click();
+        } else {
+            console.error("Auto-enable FAILED: Could not find 'Turn on live captions' button.");
+        }
+
+        // Attempt to close the 'More' menu
+        const expandedMoreButton = document.querySelector(SELECTORS.MORE_BUTTON_EXPANDED);
+        if (expandedMoreButton) {
+            expandedMoreButton.click();
+        }
+    } catch (e) {
+        console.error("Error during auto-enable captions attempt:", e);
+    }
+}
+
+/**
+ * Periodically searches for the "Leave" button and attaches a one-time click listener for auto-saving.
+ */
+function setupLeaveButtonListener() {
+    const intervalId = setInterval(async () => {
+        // Stop if the extension context is invalidated (e.g., reloaded)
+        if (!chrome.runtime?.id) {
             clearInterval(intervalId);
             return;
         }
-        
-        chrome.storage.sync.get(['autoSaveStandard', 'autoSaveAi'], function(result) {
-            if (!result.autoSaveStandard && !result.autoSaveAi) {
-                return;
-            }
 
-            const buttons = document.querySelectorAll(LEAVE_BUTTON_SELECTORS.join(', '));
-            buttons.forEach(button => {
-                if (button.dataset.listenerAttached) return;
-                console.log('Found new leave button, attaching listener:', button);
-                button.addEventListener('click', handleLeaveClick, { once: true });
-                button.dataset.listenerAttached = 'true';
-            });
+        const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
+        if (!autoSaveOnEnd) return;
+
+        const leaveButtons = document.querySelectorAll(SELECTORS.LEAVE_BUTTONS);
+        leaveButtons.forEach(button => {
+            if (button.dataset.listenerAttached) return;
+
+            button.addEventListener('click', () => {
+                if (capturing && transcriptArray.length > 0) {
+                    chrome.runtime.sendMessage({
+                        message: "save_on_leave",
+                        transcriptArray: getCleanTranscript(),
+                        meetingTitle: meetingTitleOnStart,
+                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
+                    });
+                }
+            }, { once: true });
+            
+            button.dataset.listenerAttached = 'true';
         });
     }, 3000);
 }
 
-// This is now just used for a manual clear action if we ever add a button for it.
-function resetCaptureState() {
-    console.log("Resetting transcript data manually.");
-    transcriptArray.length = 0; // Clear array
-    capturing = false;
-    meetingTitleOnStart = '';
-    recordingStartTime = null;
-
-    if (observer) {
-        observer.disconnect();
-        observer = null;
-        observedElement = null;
-    }
-}
+// --- Main Loop & Initialization ---
 
 async function main() {
-    // Main function now acts as a state-checking loop.
+    if (!hasInitializedListeners) {
+        setupLeaveButtonListener();
+        setInterval(ensureObserverIsActive, 10000); // Periodically check observer status
+        hasInitializedListeners = true;
+    }
+
     if (!isUserInMeeting()) {
-        if (capturing) {
-            console.log("No longer in a meeting. Capture stopped.");
-        }
-        capturing = false;
-        setTimeout(main, 2000); 
+        stopCaptureSession();
+        setTimeout(main, 2000); // Check again in 2 seconds
         return;
     }
 
-    // Run one-time setup for persistent listeners
-    if (!hasInitialized) {
-        setupLeaveButtonListener();
-        setInterval(ensureObserverIsActive, 10000);
-        hasInitialized = true;
-    }
-    
-    const captionsOn = document.querySelector("[data-tid='closed-captions-renderer']");
-    
-    if (captionsOn) {
-        // This is the trigger for a new session: captions are on, but we weren't in a capturing state.
-        if (!capturing) {
-            console.log("New caption session detected. Resetting transcript and starting capture.");
-            transcriptArray.length = 0; // Clear old data automatically
-            meetingTitleOnStart = document.title;
-            recordingStartTime = new Date();
-            console.log(`Capture started. Title: "${meetingTitleOnStart}", Start Time: ${recordingStartTime.toLocaleString()}`);
-        }
-        capturing = true; // Set our state to capturing
-        // ensureObserverIsActive() is called by its own interval
+    const captionsContainer = document.querySelector(SELECTORS.CAPTIONS_RENDERER);
+    if (captionsContainer) {
+        startCaptureSession();
     } else {
-        // Captions are off.
-        if (capturing) {
-            console.log("Captions turned off. Capture stopped. Data is preserved until next session.");
-        }
-        capturing = false;
-        
-        const settings = await chrome.storage.sync.get(['autoEnableCaptions']);
-        if (settings.autoEnableCaptions) {
-            console.log("Auto-enable setting is on. Attempting to turn on captions...");
-            try {
-                const moreButton = document.querySelector("button[data-tid='more-button'], button[id='callingButtons-showMoreBtn']");
-                
-                if (moreButton) {
-                    moreButton.click();
-                    await delay(400);
-
-                    const langAndSpeechButton = document.querySelector("div[id='LanguageSpeechMenuControl-id']");
-                    if (langAndSpeechButton) {
-                        langAndSpeechButton.click();
-                        await delay(400);
-
-                        const turnOnCaptionsButton = document.querySelector("div[id='closed-captions-button']");
-                        if (turnOnCaptionsButton) {
-                            turnOnCaptionsButton.click();
-                        } else {
-                            console.error("Auto-enable FAILED: Could not find 'Turn on live captions' button after clicking 'Language and speech'.");
-                        }
-                    } else {
-                         console.error("Auto-enable FAILED: Could not find 'Language and speech' button after clicking 'More'.");
-                    }
-                    
-                    // Try to close the menu again
-                    const moreButtonAfter = document.querySelector("button[data-tid='more-button'][aria-expanded='true'], button[id='callingButtons-showMoreBtn'][aria-expanded='true']");
-                    if (moreButtonAfter) moreButtonAfter.click();
-                } else {
-                    console.error("Auto-enable FAILED: Could not find any 'More' button.");
-                }
-            } catch (e) {
-                console.error("Error during auto-enable attempt:", e);
-            }
+        stopCaptureSession();
+        const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
+        if (autoEnableCaptions) {
+            await attemptAutoEnableCaptions();
         }
     }
 
-    setTimeout(main, 5000);
+    setTimeout(main, 5000); // Main loop polling interval
 }
 
 main();
 
-// Listen for messages from the popup.js or service_worker.js
+// --- Message Handling ---
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    console.log("Content script received message:", request);
-    
     switch (request.message) {
         case 'get_status':
-            sendResponse({ capturing, captionCount: transcriptArray.length });
+            sendResponse({
+                capturing: capturing,
+                captionCount: transcriptArray.length,
+                isInMeeting: isUserInMeeting()
+            });
             break;
 
         case 'return_transcript':
-            console.log("return_transcript request received:", transcriptArray);
-            if (!capturing && transcriptArray.length === 0) { // Check both states
-                alert("Oops! No captions were captured. Please make sure captions are turned on.");
-                break;
+            if (transcriptArray.length > 0) {
+                chrome.runtime.sendMessage({
+                    message: "download_captions",
+                    transcriptArray: getCleanTranscript(),
+                    meetingTitle: meetingTitleOnStart,
+                    format: request.format,
+                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
+                });
+            } else {
+                alert("No captions were captured. Please ensure captions are turned on in the meeting.");
             }
+            break;
 
-            // Prepare data for the background script to handle the download.
-            chrome.runtime.sendMessage({
-                message: "download_captions",
-                transcriptArray: transcriptArray.map(({ key, ...rest }) => rest), // Remove ID property
-                meetingTitle: meetingTitleOnStart,
-                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
-            });
+        case 'get_transcript_for_copying':
+            sendResponse({ transcriptArray: getCleanTranscript() });
             break;
 
         case 'get_captions_for_viewing':
-            console.log("get_captions_for_viewing request received:", transcriptArray);
-             if (!capturing && transcriptArray.length === 0) {
-                alert("Oops! No captions were captured. Please make sure captions are turned on.");
-                break;
+            if (transcriptArray.length > 0) {
+                chrome.runtime.sendMessage({
+                    message: "display_captions",
+                    transcriptArray: getCleanTranscript()
+                });
+            } else {
+                alert("No captions were captured. Please ensure captions are turned on in the meeting.");
             }
-
-            // Send the transcript to the background script to display in a new tab.
-            chrome.runtime.sendMessage({
-                message: "display_captions",
-                transcriptArray: transcriptArray.map(({ key, ...rest }) => rest) // Remove ID property
-            });
             break;
 
-        case 'return_transcript_for_ai':
-            console.log("return_transcript_for_ai request received:", transcriptArray);
-            if (!capturing && transcriptArray.length === 0) {
-                alert("Oops! No captions were captured. Please make sure captions are turned on.");
-                break;
-            }
-
-            // Prepare data for the background script to handle the download.
-            chrome.runtime.sendMessage({
-                message: "download_ai_captions",
-                transcriptArray: transcriptArray.map(({ key, ...rest }) => rest), // Remove ID property
-                meetingTitle: meetingTitleOnStart,
-                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
-            });
+        case 'get_unique_speakers':
+            const speakers = [...new Set(transcriptArray.map(item => item.Name))];
+            sendResponse({ speakers });
             break;
-
-        case 'clear_transcript_data':
-            resetCaptureState();
-            sendResponse({ status: "resetting" });
-            break;
-
+        
         default:
-            console.log("Unhandled message type:", request.message);
+            console.log("Unhandled message received in content script:", request.message);
             break;
     }
 
-    return true; 
+    return true; // Indicates an asynchronous response may be sent.
 });
 
-console.log("content_script.js is running");
+console.log("Teams Captions Saver content script is running.");
