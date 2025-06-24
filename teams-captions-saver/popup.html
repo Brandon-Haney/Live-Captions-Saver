@@ -27,6 +27,18 @@
             color: #555;
         }
 
+        kbd {
+            background-color: #fafafa;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-shadow: 0 1px 0 #bbb;
+            color: #333;
+            font-family: "Courier New", Courier, monospace;
+            font-size: 0.9em;
+            padding: 3px 6px;
+            margin: 0 2px;
+        }
+
         button {
             padding: 10px;
             font-size: 14px;
@@ -55,6 +67,23 @@
         #saveAiButton { background-color: #6f42c1; }
         #saveAiButton:not(:disabled):hover { background-color: #5a379a; }
 
+        .prompt-button {
+            background-color: #e9ecef;
+            color: #495057;
+            border: 1px solid #dee2e6;
+            border-radius: 12px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            flex-grow: 0;
+            transition: background-color 0.2s ease, border-color 0.2s ease;
+        }
+        .prompt-button:hover {
+            background-color: #dee2e6;
+            border-color: #ced4da;
+        }
+
         .button-container {
             display: flex;
             flex-direction: row;
@@ -67,6 +96,7 @@
             font-size: 12px;
             color: #6c757d;
             margin-top: 15px;
+            line-height: 1.5; 
         }
         
         .small-info-text {
@@ -78,6 +108,15 @@
             font-weight: bold;
             margin-top: 15px;
             height: 20px;
+        }
+
+        #status-message a {
+            color: #17a2b8;
+            text-decoration: underline;
+            transition: color 0.3s ease;
+        }
+        #status-message a:hover {
+            color: #138496;
         }
 
         .settings-container {
@@ -173,10 +212,10 @@
 </head>
 
 <body>
-    <h2>Captions Saver v4.0</h2>
-    <p class="subtitle">New Teams Only</p>
+    <h2>Teams Captions Saver v4.0</h2>
+    <p class="subtitle">Web Teams V2 Only</p>
     
-    <p class="info-text">To start, click More > Language and Speech > Turn on live captions in your Teams meeting.</p>
+    <p id="manual-start-info" class="info-text">To start, click More > Language and Speech > Turn on live captions in your Teams meeting (or press <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>).</p>
 
     <p id="status-message">Checking status...</p>
 
@@ -225,6 +264,11 @@
                 This text will be added to the start of the 'Save for AI' file.
              </p>
              <textarea id="aiInstructions" rows="4" placeholder="Example: Summarize this meeting transcript into key action items..."></textarea>
+            <div class="prompt-suggestion-container" style="display: flex; gap: 5px; margin-top: 8px; flex-wrap: wrap;">
+                <button class="prompt-button">Summarize</button>
+                <button class="prompt-button">List Action Items</button>
+                <button class="prompt-button">Find Decisions</button>
+            </div>
         </div>
     </div>
 </body>

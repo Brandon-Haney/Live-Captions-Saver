@@ -4,6 +4,7 @@ let observer = null;
 let observedElement = null;
 let meetingTitleOnStart = '';
 let recordingStartTime = null;
+let hasInitialized = false;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -87,8 +88,7 @@ function ensureObserverIsActive() {
 }
 
 function setupLeaveButtonListener() {
-    // A prioritized list of selectors for the "Leave" button.
-    // The script will try them in order to find a match.
+    // This function is designed to run periodically to find the leave button.
     const LEAVE_BUTTON_SELECTORS = [
         "button[data-tid='hangup-main-btn']",
         "button[data-tid='hangup-leave-button']",
@@ -135,8 +135,9 @@ function setupLeaveButtonListener() {
     }, 3000);
 }
 
+// This is now just used for a manual clear action if we ever add a button for it.
 function resetCaptureState() {
-    console.log("Resetting transcript data after save/view.");
+    console.log("Resetting transcript data manually.");
     transcriptArray.length = 0; // Clear array
     capturing = false;
     meetingTitleOnStart = '';
@@ -147,66 +148,80 @@ function resetCaptureState() {
         observer = null;
         observedElement = null;
     }
-    
-    // Attempt to re-initialize capturing if the user is still in a meeting.
-    console.log("State cleared. Re-running main setup logic.");
-    main();
 }
 
-
 async function main() {
+    // Main function now acts as a state-checking loop.
     if (!isUserInMeeting()) {
+        if (capturing) {
+            console.log("No longer in a meeting. Capture stopped.");
+        }
+        capturing = false;
         setTimeout(main, 2000); 
         return;
     }
+
+    // Run one-time setup for persistent listeners
+    if (!hasInitialized) {
+        setupLeaveButtonListener();
+        setInterval(ensureObserverIsActive, 10000);
+        hasInitialized = true;
+    }
     
     const captionsOn = document.querySelector("[data-tid='closed-captions-renderer']");
+    
     if (captionsOn) {
-        console.log("Live Captions are ON. Initializing capture process.");
-        capturing = true;
-        meetingTitleOnStart = document.title;
-        recordingStartTime = new Date();
-        console.log(`Capture started. Title: "${meetingTitleOnStart}", Start Time: ${recordingStartTime.toLocaleString()}`);
+        // This is the trigger for a new session: captions are on, but we weren't in a capturing state.
+        if (!capturing) {
+            console.log("New caption session detected. Resetting transcript and starting capture.");
+            transcriptArray.length = 0; // Clear old data automatically
+            meetingTitleOnStart = document.title;
+            recordingStartTime = new Date();
+            console.log(`Capture started. Title: "${meetingTitleOnStart}", Start Time: ${recordingStartTime.toLocaleString()}`);
+        }
+        capturing = true; // Set our state to capturing
+        // ensureObserverIsActive() is called by its own interval
+    } else {
+        // Captions are off.
+        if (capturing) {
+            console.log("Captions turned off. Capture stopped. Data is preserved until next session.");
+        }
+        capturing = false;
         
-        ensureObserverIsActive();
-        setInterval(ensureObserverIsActive, 10000);
-        setupLeaveButtonListener();
-        return; 
-    }
-
-    const settings = await chrome.storage.sync.get(['autoEnableCaptions']);
-    if (settings.autoEnableCaptions) {
-        console.log("Auto-enable setting is on. Attempting to turn on captions...");
-        try {
-            const moreButton = document.querySelector("button[data-tid='more-button'], button[id='callingButtons-showMoreBtn']");
-            
-            if (moreButton) {
-                moreButton.click();
-                await delay(400);
-
-                const langAndSpeechButton = document.querySelector("div[id='LanguageSpeechMenuControl-id']");
-                if (langAndSpeechButton) {
-                    langAndSpeechButton.click();
+        const settings = await chrome.storage.sync.get(['autoEnableCaptions']);
+        if (settings.autoEnableCaptions) {
+            console.log("Auto-enable setting is on. Attempting to turn on captions...");
+            try {
+                const moreButton = document.querySelector("button[data-tid='more-button'], button[id='callingButtons-showMoreBtn']");
+                
+                if (moreButton) {
+                    moreButton.click();
                     await delay(400);
 
-                    const turnOnCaptionsButton = document.querySelector("div[id='closed-captions-button']");
-                    if (turnOnCaptionsButton) {
-                        turnOnCaptionsButton.click();
+                    const langAndSpeechButton = document.querySelector("div[id='LanguageSpeechMenuControl-id']");
+                    if (langAndSpeechButton) {
+                        langAndSpeechButton.click();
+                        await delay(400);
+
+                        const turnOnCaptionsButton = document.querySelector("div[id='closed-captions-button']");
+                        if (turnOnCaptionsButton) {
+                            turnOnCaptionsButton.click();
+                        } else {
+                            console.error("Auto-enable FAILED: Could not find 'Turn on live captions' button after clicking 'Language and speech'.");
+                        }
                     } else {
-                        console.error("Auto-enable FAILED: Could not find 'Turn on live captions' button after clicking 'Language and speech'.");
+                         console.error("Auto-enable FAILED: Could not find 'Language and speech' button after clicking 'More'.");
                     }
+                    
+                    // Try to close the menu again
+                    const moreButtonAfter = document.querySelector("button[data-tid='more-button'][aria-expanded='true'], button[id='callingButtons-showMoreBtn'][aria-expanded='true']");
+                    if (moreButtonAfter) moreButtonAfter.click();
                 } else {
-                     console.error("Auto-enable FAILED: Could not find 'Language and speech' button after clicking 'More'.");
+                    console.error("Auto-enable FAILED: Could not find any 'More' button.");
                 }
-                
-                // Try to close the menu again
-                const moreButtonAfter = document.querySelector("button[data-tid='more-button'][aria-expanded='true'], button[id='callingButtons-showMoreBtn'][aria-expanded='true']");
-                if (moreButtonAfter) moreButtonAfter.click();
-            } else {
-                console.error("Auto-enable FAILED: Could not find any 'More' button.");
+            } catch (e) {
+                console.error("Error during auto-enable attempt:", e);
             }
-        } catch (e) {
-            console.error("Error during auto-enable attempt:", e);
         }
     }
 
@@ -226,7 +241,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         case 'return_transcript':
             console.log("return_transcript request received:", transcriptArray);
-            if (!capturing || transcriptArray.length === 0) {
+            if (!capturing && transcriptArray.length === 0) { // Check both states
                 alert("Oops! No captions were captured. Please make sure captions are turned on.");
                 break;
             }
@@ -242,7 +257,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         case 'get_captions_for_viewing':
             console.log("get_captions_for_viewing request received:", transcriptArray);
-            if (!capturing || transcriptArray.length === 0) {
+             if (!capturing && transcriptArray.length === 0) {
                 alert("Oops! No captions were captured. Please make sure captions are turned on.");
                 break;
             }
@@ -256,7 +271,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         case 'return_transcript_for_ai':
             console.log("return_transcript_for_ai request received:", transcriptArray);
-            if (!capturing || transcriptArray.length === 0) {
+            if (!capturing && transcriptArray.length === 0) {
                 alert("Oops! No captions were captured. Please make sure captions are turned on.");
                 break;
             }

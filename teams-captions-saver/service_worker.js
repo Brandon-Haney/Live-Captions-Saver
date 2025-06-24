@@ -133,7 +133,6 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
     switch (message.message) {
         case 'download_captions': // message from Content script
             saveTranscripts(message.meetingTitle, message.transcriptArray, true, message.recordingStartTime);
-            resetContentScript(tabId);
             break;
 
         case 'save_on_leave':
@@ -159,13 +158,11 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
 
         case 'display_captions': // message from Content script with captions for viewing
             createViewerTab(message.transcriptArray);
-            resetContentScript(tabId);
             break;
         
         case 'download_ai_captions':
             // Manual AI save will still prompt the user
             await saveAiTranscript(message.meetingTitle, message.transcriptArray, true, message.recordingStartTime);
-            resetContentScript(tabId);
             break;
     }
 });
