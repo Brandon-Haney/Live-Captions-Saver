@@ -170,7 +170,6 @@ function setupEventListeners() {
         }
     });
 
-    // Dropdown Logic
     setupDropdown(UI_ELEMENTS.copyButton, UI_ELEMENTS.copyDropdownButton, UI_ELEMENTS.copyOptions, handleCopy);
     setupDropdown(null, UI_ELEMENTS.saveDropdownButton, UI_ELEMENTS.saveOptions, handleSave);
 
@@ -178,11 +177,10 @@ function setupEventListeners() {
     UI_ELEMENTS.promptButtons.forEach(button => {
         button.addEventListener('click', function() {
             UI_ELEMENTS.aiInstructions.value = AI_PROMPTS[this.textContent];
-            UI_ELEMENTS.aiInstructions.dispatchEvent(new Event('change')); // Trigger save
+            UI_ELEMENTS.aiInstructions.dispatchEvent(new Event('change'));
         });
     });
 
-    // Close dropdowns on outside click
     document.addEventListener('click', () => {
         UI_ELEMENTS.copyOptions.style.display = 'none';
         UI_ELEMENTS.saveOptions.style.display = 'none';

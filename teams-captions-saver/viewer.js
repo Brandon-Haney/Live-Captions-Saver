@@ -15,7 +15,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Rendering Functions ---
-
     function createCaptionHTML(item, index) {
         const copyIconSVG = `
             <svg viewBox="0 0 24 24" fill="currentColor">
@@ -55,7 +54,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Interactivity & Filtering ---
-
     function applyFilters() {
         const searchTerm = searchBox.value.toLowerCase().trim();
         const activeSpeakerFilter = speakerFiltersContainer.querySelector('button.active');
@@ -107,7 +105,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // --- Initialization ---
-
     function setupEventListeners() {
         searchBox.addEventListener('input', applyFilters);
         speakerFiltersContainer.addEventListener('click', handleSpeakerFilterClick);

@@ -34,10 +34,6 @@ const getCleanTranscript = () => transcriptArray.map(({ key, ...rest }) => rest)
 const isUserInMeeting = () => document.querySelector(SELECTORS.LEAVE_BUTTONS) !== null;
 
 // --- Core Logic ---
-
-/**
- * Scans the DOM for new or updated caption entries and adds them to the transcript array.
- */
 function processCaptionUpdates() {
     const closedCaptionsContainer = document.querySelector(SELECTORS.CAPTIONS_RENDERER);
     if (!closedCaptionsContainer) return;
@@ -76,10 +72,6 @@ function processCaptionUpdates() {
     });
 }
 
-/**
- * Ensures the MutationObserver is attached to the caption container and watching for changes.
- * This function runs periodically to re-attach the observer if the DOM changes (e.g., Teams re-renders).
- */
 function ensureObserverIsActive() {
     if (!capturing) return;
 
@@ -106,9 +98,6 @@ function ensureObserverIsActive() {
     }
 }
 
-/**
- * Resets the state and starts a new captioning session.
- */
 function startCaptureSession() {
     if (capturing) return;
 
@@ -126,9 +115,6 @@ function startCaptureSession() {
     ensureObserverIsActive();
 }
 
-/**
- * Stops the current captioning session but preserves the captured data.
- */
 function stopCaptureSession() {
     if (!capturing) return;
 
@@ -143,10 +129,6 @@ function stopCaptureSession() {
 }
 
 // --- Automated Features ---
-
-/**
- * Attempts to find and click the UI elements to turn on live captions automatically.
- */
 async function attemptAutoEnableCaptions() {
     try {
         const moreButton = document.querySelector(SELECTORS.MORE_BUTTON);
@@ -182,9 +164,6 @@ async function attemptAutoEnableCaptions() {
     }
 }
 
-/**
- * Periodically searches for the "Leave" button and attaches a one-time click listener for auto-saving.
- */
 function setupLeaveButtonListener() {
     const intervalId = setInterval(async () => {
         // Stop if the extension context is invalidated (e.g., reloaded)
@@ -217,7 +196,6 @@ function setupLeaveButtonListener() {
 }
 
 // --- Main Loop & Initialization ---
-
 async function main() {
     if (!hasInitializedListeners) {
         setupLeaveButtonListener();
@@ -248,7 +226,6 @@ async function main() {
 main();
 
 // --- Message Handling ---
-
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     switch (request.message) {
         case 'get_status':

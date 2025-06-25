@@ -1,5 +1,4 @@
 // --- Utility Functions ---
-
 function getSanitizedMeetingName(fullTitle) {
     if (!fullTitle) return "Meeting";
     const parts = fullTitle.split('|');
@@ -30,7 +29,6 @@ function applyAliasesToTranscript(transcriptArray, aliases = {}) {
 }
 
 // --- Formatting Functions ---
-
 function formatAsTxt(transcript) {
     return transcript.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n');
 }
@@ -77,10 +75,8 @@ function escapeHtml(str) {
 }
 
 // --- Core Actions ---
-
 function downloadFile(filename, content, mimeType, saveAs) {
-    const blob = new Blob([content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
+    const url = `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`;
     chrome.downloads.download({
         url: url,
         filename: filename,
@@ -123,7 +119,8 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
             break;
     }
     
-    const filename = generateFilename(meetingName, format === 'ai' ? `${meetingName}-AI` : meetingName, recordingStartTime);
+    const baseName = format === 'ai' ? `${meetingName}-AI` : meetingName;
+    const filename = generateFilename(baseName, extension, recordingStartTime);
     downloadFile(filename, content, mimeType, saveAsPrompt);
 }
 
@@ -143,7 +140,6 @@ function updateBadge(isCapturing) {
 }
 
 // --- Event Listeners ---
-
 chrome.runtime.onInstalled.addListener(() => {
     updateBadge(false);
 });
