@@ -25,6 +25,7 @@ let recordingStartTime = null;
 let observer = null;
 let observedElement = null;
 let hasInitializedListeners = false;
+let wasInMeeting = false;
 
 // --- Utility Functions ---
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -164,46 +165,28 @@ async function attemptAutoEnableCaptions() {
     }
 }
 
-function setupLeaveButtonListener() {
-    const intervalId = setInterval(async () => {
-        // Stop if the extension context is invalidated (e.g., reloaded)
-        if (!chrome.runtime?.id) {
-            clearInterval(intervalId);
-            return;
-        }
-
-        const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
-        if (!autoSaveOnEnd) return;
-
-        const leaveButtons = document.querySelectorAll(SELECTORS.LEAVE_BUTTONS);
-        leaveButtons.forEach(button => {
-            if (button.dataset.listenerAttached) return;
-
-            button.addEventListener('click', () => {
-                if (capturing && transcriptArray.length > 0) {
-                    chrome.runtime.sendMessage({
-                        message: "save_on_leave",
-                        transcriptArray: getCleanTranscript(),
-                        meetingTitle: meetingTitleOnStart,
-                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
-                    });
-                }
-            }, { once: true });
-            
-            button.dataset.listenerAttached = 'true';
-        });
-    }, 3000);
-}
-
 // --- Main Loop & Initialization ---
 async function main() {
     if (!hasInitializedListeners) {
-        setupLeaveButtonListener();
         setInterval(ensureObserverIsActive, 10000); // Periodically check observer status
         hasInitializedListeners = true;
     }
-
-    if (!isUserInMeeting()) {
+    const nowInMeeting = isUserInMeeting();
+    if (wasInMeeting && !nowInMeeting) {
+        console.log("Meeting transition detected: In -> Out. Checking for auto-save.");
+        const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
+        if (autoSaveOnEnd && transcriptArray.length > 0) {
+            console.log("Auto-save is ON and transcript has data. Triggering save.");
+            chrome.runtime.sendMessage({
+                message: "save_on_leave",
+                transcriptArray: getCleanTranscript(),
+                meetingTitle: meetingTitleOnStart,
+                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
+            });
+        }
+    }
+    wasInMeeting = nowInMeeting;
+    if (!nowInMeeting) {
         stopCaptureSession();
         setTimeout(main, 2000); // Check again in 2 seconds
         return;
