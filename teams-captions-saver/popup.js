@@ -25,7 +25,23 @@ const AI_PROMPTS = {
 
 let currentDefaultFormat = 'txt';
 
+// --- Error Handling ---
+function safeExecute(fn, context = '', fallback = null) {
+    try {
+        return fn();
+    } catch (error) {
+        console.error(`[Teams Caption Saver] ${context}:`, error);
+        return fallback;
+    }
+}
+
 // --- Utility Functions ---
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
 async function getActiveTeamsTab() {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const teamsTab = tabs.find(tab => tab.url?.startsWith("https://teams.microsoft.com"));
@@ -93,14 +109,14 @@ async function renderSpeakerAliases(tab) {
             const item = document.createElement('div');
             item.className = 'alias-item';
             item.innerHTML = `
-                <label title="${speaker}">${speaker}</label>
-                <input type="text" data-original-name="${speaker}" placeholder="Enter alias..." value="${speakerAliases[speaker] || ''}">
+                <label title="${escapeHtml(speaker)}">${escapeHtml(speaker)}</label>
+                <input type="text" data-original-name="${escapeHtml(speaker)}" placeholder="Enter alias..." value="${escapeHtml(speakerAliases[speaker] || '')}">
             `;
             speakerAliasList.appendChild(item);
         });
     } catch (error) {
         console.error("Could not fetch or render speaker aliases:", error);
-        speakerAliasList.innerHTML = '<p>Could not load speaker list.</p>';
+        speakerAliasList.innerHTML = '<p>Unable to load speakers. Please refresh the Teams tab and try again.</p>';
     }
 }
 
@@ -260,9 +276,36 @@ async function initializePopup() {
         }
     } catch (error) {
         console.error("Error getting status from content script:", error.message);
-        UI_ELEMENTS.statusMessage.textContent = "Error: Please refresh your Teams tab.";
+        UI_ELEMENTS.statusMessage.textContent = "Connection lost. Please refresh your Teams tab and try again.";
         UI_ELEMENTS.statusMessage.style.color = '#dc3545';
     }
 }
+
+// --- Keyboard Shortcuts ---
+document.addEventListener('keydown', (e) => {
+    // Ctrl/Cmd + S for save
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (!UI_ELEMENTS.saveButton.disabled) {
+            UI_ELEMENTS.saveButton.click();
+        }
+    }
+    
+    // Ctrl/Cmd + C for copy
+    if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !e.target.matches('input, textarea')) {
+        e.preventDefault();
+        if (!UI_ELEMENTS.copyButton.disabled) {
+            UI_ELEMENTS.copyButton.click();
+        }
+    }
+    
+    // Ctrl/Cmd + V for view
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v' && !e.target.matches('input, textarea')) {
+        e.preventDefault();
+        if (!UI_ELEMENTS.viewButton.disabled) {
+            UI_ELEMENTS.viewButton.click();
+        }
+    }
+});
 
 document.addEventListener('DOMContentLoaded', initializePopup);

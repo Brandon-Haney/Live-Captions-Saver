@@ -173,6 +173,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case 'update_badge_status':
                 updateBadge(message.capturing);
                 break;
+                
+            case 'error_logged':
+                // Central error logging - could send to analytics service
+                console.warn('[Teams Caption Saver] Error logged:', message.error);
+                // Could implement error reporting here
+                break;
         }
     })();
     

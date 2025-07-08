@@ -6,6 +6,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- State ---
     let allCaptions = [];
+    let searchDebounceTimer = null;
+    const SEARCH_DEBOUNCE_DELAY = 300;
 
     // --- Utility ---
     function escapeHtml(str) {
@@ -70,6 +72,13 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function debouncedApplyFilters() {
+        if (searchDebounceTimer) {
+            clearTimeout(searchDebounceTimer);
+        }
+        searchDebounceTimer = setTimeout(applyFilters, SEARCH_DEBOUNCE_DELAY);
+    }
+
     function handleSpeakerFilterClick(e) {
         if (e.target.tagName !== 'BUTTON') return;
         
@@ -97,16 +106,22 @@ document.addEventListener('DOMContentLoaded', () => {
             setTimeout(() => {
                 copyButton.classList.remove('copied');
                 copyButton.querySelector('.tooltip-text').textContent = 'Copy';
-            }, 1500);
+            }, 1500); // TODO: Extract to TIMING constant
         } catch (err) {
             console.error('Failed to copy text: ', err);
-            copyButton.querySelector('.tooltip-text').textContent = 'Error!';
+            copyButton.querySelector('.tooltip-text').textContent = 'Copy failed';
+            // Show user-friendly error
+            const errorMsg = document.createElement('div');
+            errorMsg.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #dc3545; color: white; padding: 10px; border-radius: 4px; z-index: 1000;';
+            errorMsg.textContent = 'Failed to copy text to clipboard';
+            document.body.appendChild(errorMsg);
+            setTimeout(() => document.body.removeChild(errorMsg), 3000);
         }
     }
     
     // --- Initialization ---
     function setupEventListeners() {
-        searchBox.addEventListener('input', applyFilters);
+        searchBox.addEventListener('input', debouncedApplyFilters);
         speakerFiltersContainer.addEventListener('click', handleSpeakerFilterClick);
         captionsContainer.addEventListener('click', handleCopyClick);
     }
@@ -125,12 +140,27 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (error) {
             console.error("Error loading captions:", error);
-            captionsContainer.innerHTML = '<p class="status-message">An error occurred while loading the captions.</p>';
+            captionsContainer.innerHTML = '<p class="status-message">Unable to load captions. Please try opening the extension popup again.</p>';
         } finally {
             // Clean up storage to prevent re-displaying on next open
             chrome.storage.local.remove('captionsToView');
         }
     }
+
+    // --- Keyboard Shortcuts ---
+    document.addEventListener('keydown', (e) => {
+        // Ctrl/Cmd + F for search focus
+        if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+            e.preventDefault();
+            searchBox.focus();
+        }
+        
+        // Escape to clear search
+        if (e.key === 'Escape' && document.activeElement === searchBox) {
+            searchBox.value = '';
+            applyFilters();
+        }
+    });
 
     initialize();
 });

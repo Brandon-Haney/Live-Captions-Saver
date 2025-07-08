@@ -1,4 +1,12 @@
 // --- Constants ---
+const TIMING = {
+    BUTTON_CLICK_DELAY: 400,
+    RETRY_DELAY: 2000,
+    MAIN_LOOP_INTERVAL: 5000,
+    OBSERVER_CHECK_INTERVAL: 10000,
+    TOOLTIP_DISPLAY_DURATION: 1500
+};
+
 const SELECTORS = {
     CAPTIONS_RENDERER: "[data-tid='closed-caption-v2-window-wrapper'], [data-tid='closed-captions-renderer'], [data-tid*='closed-caption']",
     CHAT_MESSAGE: '.fui-ChatMessageCompact',
@@ -26,57 +34,243 @@ let observer = null;
 let observedElement = null;
 let hasInitializedListeners = false;
 let wasInMeeting = false;
+let meetingObserver = null;
+let captionsObserver = null;
+let cachedElements = new Map();
+let autoEnableInProgress = false;
+let autoEnableLastAttempt = 0;
+let autoEnableDebounceTimer = null;
+
+// --- Error Handling & Logging ---
+class ErrorHandler {
+    static log(error, context = '', silent = false) {
+        const timestamp = new Date().toISOString();
+        const errorInfo = {
+            timestamp,
+            context,
+            message: error.message || error,
+            stack: error.stack,
+            url: window.location.href
+        };
+        
+        console.error(`[Teams Caption Saver] ${context}:`, errorInfo);
+        
+        if (!silent) {
+            // Could send to analytics or show user notification
+            chrome.runtime.sendMessage({
+                message: "error_logged",
+                error: errorInfo
+            }).catch(() => {}); // Prevent recursive errors
+        }
+        
+        return errorInfo;
+    }
+    
+    static wrap(fn, context = '', fallback = null) {
+        return async function(...args) {
+            try {
+                return await fn.apply(this, args);
+            } catch (error) {
+                ErrorHandler.log(error, context);
+                return fallback;
+            }
+        };
+    }
+}
+
+// --- Retry Mechanism ---
+class RetryHandler {
+    static async withRetry(fn, context = '', maxAttempts = 3, baseDelay = 1000) {
+        let lastError;
+        
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return await fn();
+            } catch (error) {
+                lastError = error;
+                
+                if (attempt === maxAttempts) {
+                    ErrorHandler.log(error, `${context} - Final attempt failed`, false);
+                    throw error;
+                }
+                
+                const delayTime = baseDelay * Math.pow(2, attempt - 1); // Exponential backoff
+                ErrorHandler.log(error, `${context} - Attempt ${attempt} failed, retrying in ${delayTime}ms`, true);
+                await delay(delayTime);
+            }
+        }
+        
+        throw lastError;
+    }
+}
 
 // --- Utility Functions ---
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const getCleanTranscript = () => transcriptArray.map(({ key, ...rest }) => rest);
 
-const isUserInMeeting = () => document.querySelector(SELECTORS.LEAVE_BUTTONS) !== null;
+// --- DOM Element Caching ---
+function getCachedElement(selector, expiry = 5000) {
+    const now = Date.now();
+    const cached = cachedElements.get(selector);
+    
+    if (cached && (now - cached.timestamp) < expiry && document.contains(cached.element)) {
+        return cached.element;
+    }
+    
+    const element = document.querySelector(selector);
+    if (element) {
+        cachedElements.set(selector, { element, timestamp: now });
+    }
+    return element;
+}
+
+function clearElementCache() {
+    cachedElements.clear();
+}
+
+const isUserInMeeting = () => getCachedElement(SELECTORS.LEAVE_BUTTONS) !== null;
 
 // --- Core Logic ---
-function processCaptionUpdates() {
-    const closedCaptionsContainer = document.querySelector(SELECTORS.CAPTIONS_RENDERER);
+const processCaptionUpdates = ErrorHandler.wrap(function() {
+    const closedCaptionsContainer = getCachedElement(SELECTORS.CAPTIONS_RENDERER);
     if (!closedCaptionsContainer) return;
 
     const transcriptElements = closedCaptionsContainer.querySelectorAll(SELECTORS.CHAT_MESSAGE);
 
     transcriptElements.forEach(element => {
-        const authorElement = element.querySelector(SELECTORS.AUTHOR);
-        const textElement = element.querySelector(SELECTORS.CAPTION_TEXT);
+        try {
+            const authorElement = element.querySelector(SELECTORS.AUTHOR);
+            const textElement = element.querySelector(SELECTORS.CAPTION_TEXT);
 
-        if (!authorElement || !textElement) return;
+            if (!authorElement || !textElement) return;
 
-        const name = authorElement.innerText.trim();
-        const text = textElement.innerText.trim();
-        if (text.length === 0) return;
+            const name = authorElement.innerText.trim();
+            const text = textElement.innerText.trim();
+            if (text.length === 0) return;
 
-        let captionId = element.getAttribute('data-caption-id');
-        if (!captionId) {
-            captionId = `caption_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-            element.setAttribute('data-caption-id', captionId);
-        }
-
-        const existingIndex = transcriptArray.findIndex(entry => entry.key === captionId);
-        const time = new Date().toLocaleTimeString();
-
-        if (existingIndex !== -1) {
-            // Update existing entry if text has changed
-            if (transcriptArray[existingIndex].Text !== text) {
-                transcriptArray[existingIndex].Text = text;
-                transcriptArray[existingIndex].Time = time;
+            let captionId = element.getAttribute('data-caption-id');
+            if (!captionId) {
+                captionId = `caption_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                element.setAttribute('data-caption-id', captionId);
             }
-        } else {
-            // Add new entry
-            transcriptArray.push({ Name: name, Text: text, Time: time, key: captionId });
+
+            const existingIndex = transcriptArray.findIndex(entry => entry.key === captionId);
+            const time = new Date().toLocaleTimeString();
+
+            if (existingIndex !== -1) {
+                // Update existing entry if text has changed
+                if (transcriptArray[existingIndex].Text !== text) {
+                    transcriptArray[existingIndex].Text = text;
+                    transcriptArray[existingIndex].Time = time;
+                }
+            } else {
+                // Add new entry
+                transcriptArray.push({ Name: name, Text: text, Time: time, key: captionId });
+            }
+        } catch (error) {
+            ErrorHandler.log(error, 'Processing individual caption element', true);
         }
     });
+}, 'Caption updates processing');
+
+// --- Event-Driven Meeting Detection ---
+let meetingStateDebounceTimer = null;
+let captionsStateDebounceTimer = null;
+
+function setupMeetingObserver() {
+    if (meetingObserver) return;
+    
+    meetingObserver = new MutationObserver(() => {
+        // Debounce meeting state changes to prevent excessive calls
+        if (meetingStateDebounceTimer) {
+            clearTimeout(meetingStateDebounceTimer);
+        }
+        meetingStateDebounceTimer = setTimeout(() => {
+            handleMeetingStateChange();
+        }, 1000);
+    });
+    
+    meetingObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributeFilter: ['data-tid']
+    });
 }
+
+function setupCaptionsObserver() {
+    if (captionsObserver) return;
+    
+    captionsObserver = new MutationObserver(() => {
+        // Debounce captions state changes to prevent excessive calls
+        if (captionsStateDebounceTimer) {
+            clearTimeout(captionsStateDebounceTimer);
+        }
+        captionsStateDebounceTimer = setTimeout(() => {
+            handleCaptionsStateChange();
+        }, 1500);
+    });
+    
+    captionsObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributeFilter: ['data-tid']
+    });
+}
+
+const handleMeetingStateChange = ErrorHandler.wrap(async function() {
+    const nowInMeeting = isUserInMeeting();
+    
+    if (wasInMeeting && !nowInMeeting) {
+        console.log("Meeting transition detected: In -> Out. Checking for auto-save.");
+        
+        await RetryHandler.withRetry(async () => {
+            const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
+            if (autoSaveOnEnd && transcriptArray.length > 0) {
+                console.log("Auto-save is ON and transcript has data. Triggering save.");
+                await chrome.runtime.sendMessage({
+                    message: "save_on_leave",
+                    transcriptArray: getCleanTranscript(),
+                    meetingTitle: meetingTitleOnStart,
+                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
+                });
+            }
+        }, 'Auto-save on meeting end');
+        
+        clearElementCache();
+    }
+    
+    wasInMeeting = nowInMeeting;
+    
+    if (!nowInMeeting) {
+        stopCaptureSession();
+        return;
+    }
+    
+    handleCaptionsStateChange();
+}, 'Meeting state change handler');
+
+const handleCaptionsStateChange = ErrorHandler.wrap(async function() {
+    if (!isUserInMeeting()) return;
+    
+    const captionsContainer = getCachedElement(SELECTORS.CAPTIONS_RENDERER);
+    if (captionsContainer) {
+        startCaptureSession();
+    } else {
+        stopCaptureSession();
+        
+        const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
+        if (autoEnableCaptions) {
+            // Use debounced version to prevent rapid firing
+            debouncedAutoEnableCaptions();
+        }
+    }
+}, 'Captions state change handler');
 
 function ensureObserverIsActive() {
     if (!capturing) return;
 
-    const captionContainer = document.querySelector(SELECTORS.CAPTIONS_RENDERER);
+    const captionContainer = getCachedElement(SELECTORS.CAPTIONS_RENDERER);
     
     // If the container doesn't exist or has changed, re-initialize the observer
     if (!captionContainer || captionContainer !== observedElement) {
@@ -131,85 +325,152 @@ function stopCaptureSession() {
 
 // --- Automated Features ---
 async function attemptAutoEnableCaptions() {
+    // Prevent multiple simultaneous auto-enable attempts
+    if (autoEnableInProgress) {
+        console.log("Auto-enable already in progress, skipping...");
+        return;
+    }
+    
+    // Prevent too frequent attempts (min 10 seconds between attempts)
+    const now = Date.now();
+    if (now - autoEnableLastAttempt < 10000) {
+        console.log("Auto-enable attempted too recently, skipping...");
+        return;
+    }
+    
+    autoEnableInProgress = true;
+    autoEnableLastAttempt = now;
+    
     try {
-        const moreButton = document.querySelector(SELECTORS.MORE_BUTTON);
+        console.log("Starting auto-enable captions attempt...");
+        
+        const moreButton = getCachedElement(SELECTORS.MORE_BUTTON);
         if (!moreButton) {
             console.error("Auto-enable FAILED: Could not find 'More' button.");
             return;
         }
-        moreButton.click();
-        await delay(400);
+        
+        // Check if More menu is already expanded
+        const expandedMoreButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
+        if (!expandedMoreButton) {
+            console.log("Clicking More button...");
+            moreButton.click();
+            await delay(TIMING.BUTTON_CLICK_DELAY);
+        } else {
+            console.log("More menu already expanded, proceeding...");
+        }
 
-        const langAndSpeechButton = document.querySelector(SELECTORS.LANGUAGE_SPEECH_BUTTON);
+        const langAndSpeechButton = getCachedElement(SELECTORS.LANGUAGE_SPEECH_BUTTON);
         if (!langAndSpeechButton) {
             console.error("Auto-enable FAILED: Could not find 'Language and speech' menu item.");
+            // Close the More menu if we opened it
+            const currentExpandedButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
+            if (currentExpandedButton) {
+                currentExpandedButton.click();
+            }
             return;
         }
+        
+        console.log("Clicking Language and speech...");
         langAndSpeechButton.click();
-        await delay(400);
+        await delay(TIMING.BUTTON_CLICK_DELAY);
 
-        const turnOnCaptionsButton = document.querySelector(SELECTORS.TURN_ON_CAPTIONS_BUTTON);
+        const turnOnCaptionsButton = getCachedElement(SELECTORS.TURN_ON_CAPTIONS_BUTTON);
         if (turnOnCaptionsButton) {
+            console.log("Clicking Turn on live captions...");
             turnOnCaptionsButton.click();
+            await delay(TIMING.BUTTON_CLICK_DELAY);
         } else {
             console.error("Auto-enable FAILED: Could not find 'Turn on live captions' button.");
         }
 
         // Attempt to close the 'More' menu
-        const expandedMoreButton = document.querySelector(SELECTORS.MORE_BUTTON_EXPANDED);
-        if (expandedMoreButton) {
-            expandedMoreButton.click();
+        const finalExpandedButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
+        if (finalExpandedButton) {
+            console.log("Closing More menu...");
+            finalExpandedButton.click();
         }
+        
+        console.log("Auto-enable captions attempt completed.");
     } catch (e) {
         console.error("Error during auto-enable captions attempt:", e);
+    } finally {
+        autoEnableInProgress = false;
     }
 }
 
-// --- Main Loop & Initialization ---
-async function main() {
-    if (!hasInitializedListeners) {
-        setInterval(ensureObserverIsActive, 10000); // Periodically check observer status
-        hasInitializedListeners = true;
+function debouncedAutoEnableCaptions() {
+    if (autoEnableDebounceTimer) {
+        clearTimeout(autoEnableDebounceTimer);
     }
-    const nowInMeeting = isUserInMeeting();
-    if (wasInMeeting && !nowInMeeting) {
-        console.log("Meeting transition detected: In -> Out. Checking for auto-save.");
-        const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
-        if (autoSaveOnEnd && transcriptArray.length > 0) {
-            console.log("Auto-save is ON and transcript has data. Triggering save.");
-            chrome.runtime.sendMessage({
-                message: "save_on_leave",
-                transcriptArray: getCleanTranscript(),
-                meetingTitle: meetingTitleOnStart,
-                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
-            });
-        }
-    }
-    wasInMeeting = nowInMeeting;
-    if (!nowInMeeting) {
-        stopCaptureSession();
-        setTimeout(main, 2000); // Check again in 2 seconds
-        return;
-    }
-
-    const captionsContainer = document.querySelector(SELECTORS.CAPTIONS_RENDERER);
-    if (captionsContainer) {
-        startCaptureSession();
-    } else {
-        stopCaptureSession();
-        const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
-        if (autoEnableCaptions) {
-            await attemptAutoEnableCaptions();
-        }
-    }
-
-    setTimeout(main, 5000); // Main loop polling interval
+    
+    autoEnableDebounceTimer = setTimeout(() => {
+        attemptAutoEnableCaptions();
+    }, 2000); // 2 second debounce to prevent rapid firing
 }
 
-main();
+// --- Event-Driven Initialization ---
+function initializeEventDrivenSystem() {
+    if (hasInitializedListeners) return;
+    
+    console.log("Initializing event-driven caption system...");
+    
+    // Set up observers for meeting state changes
+    setupMeetingObserver();
+    setupCaptionsObserver();
+    
+    // Periodically check observer status (much less frequent than before)
+    setInterval(ensureObserverIsActive, TIMING.OBSERVER_CHECK_INTERVAL);
+    
+    // Initial state check
+    handleMeetingStateChange();
+    
+    hasInitializedListeners = true;
+}
+
+// --- Memory Leak Prevention ---
+function cleanupObservers() {
+    if (observer) {
+        observer.disconnect();
+        observer = null;
+    }
+    if (meetingObserver) {
+        meetingObserver.disconnect();
+        meetingObserver = null;
+    }
+    if (captionsObserver) {
+        captionsObserver.disconnect();
+        captionsObserver = null;
+    }
+    
+    // Clear all debounce timers
+    if (meetingStateDebounceTimer) {
+        clearTimeout(meetingStateDebounceTimer);
+        meetingStateDebounceTimer = null;
+    }
+    if (captionsStateDebounceTimer) {
+        clearTimeout(captionsStateDebounceTimer);
+        captionsStateDebounceTimer = null;
+    }
+    if (autoEnableDebounceTimer) {
+        clearTimeout(autoEnableDebounceTimer);
+        autoEnableDebounceTimer = null;
+    }
+    
+    // Reset auto-enable state
+    autoEnableInProgress = false;
+    
+    clearElementCache();
+}
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', cleanupObservers);
+
+// Initialize the system
+initializeEventDrivenSystem();
 
 // --- Message Handling ---
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.message) {
         case 'get_status':
             sendResponse({
