@@ -1,6 +1,6 @@
 // --- Constants ---
 const SELECTORS = {
-    CAPTIONS_RENDERER: "[data-tid='closed-captions-renderer']",
+    CAPTIONS_RENDERER: "[data-tid='closed-caption-v2-window-wrapper'], [data-tid='closed-captions-renderer'], [data-tid*='closed-caption']",
     CHAT_MESSAGE: '.fui-ChatMessageCompact',
     AUTHOR: '[data-tid="author"]',
     CAPTION_TEXT: '[data-tid="closed-caption-text"]',
