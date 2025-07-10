@@ -124,6 +124,10 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
     downloadFile(filename, content, mimeType, saveAsPrompt);
 }
 
+// --- State Management ---
+let lastAutoSaveId = null;
+let autoSaveInProgress = false;
+
 async function createViewerTab(transcriptArray) {
     await chrome.storage.local.set({ captionsToView: transcriptArray });
     chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') });
@@ -158,11 +162,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case 'save_on_leave':
-                const settings = await chrome.storage.sync.get(['autoSaveOnEnd', 'defaultSaveFormat']);
-                if (settings.autoSaveOnEnd && message.transcriptArray.length > 0) {
-                    const formatToSave = settings.defaultSaveFormat || 'txt';
-                    console.log(`Auto-saving transcript in ${formatToSave.toUpperCase()} format.`);
-                    await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, formatToSave, message.recordingStartTime, false);
+                // Generate unique ID for this save request
+                const saveId = `${message.meetingTitle}_${message.recordingStartTime}`;
+                
+                // Prevent duplicate saves
+                if (autoSaveInProgress || lastAutoSaveId === saveId) {
+                    console.log('Auto-save already in progress or completed for this meeting, skipping...');
+                    break;
+                }
+                
+                autoSaveInProgress = true;
+                lastAutoSaveId = saveId;
+                
+                try {
+                    const settings = await chrome.storage.sync.get(['autoSaveOnEnd', 'defaultSaveFormat']);
+                    if (settings.autoSaveOnEnd && message.transcriptArray.length > 0) {
+                        const formatToSave = settings.defaultSaveFormat || 'txt';
+                        console.log(`Auto-saving transcript in ${formatToSave.toUpperCase()} format.`);
+                        await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, formatToSave, message.recordingStartTime, false);
+                        console.log('Auto-save completed successfully.');
+                    }
+                } catch (error) {
+                    console.error('Auto-save failed:', error);
+                    // Reset state on error to allow retry
+                    lastAutoSaveId = null;
+                } finally {
+                    autoSaveInProgress = false;
                 }
                 break;
 
@@ -172,6 +197,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             
             case 'update_badge_status':
                 updateBadge(message.capturing);
+                // Reset auto-save state when starting a new capture session
+                if (message.capturing) {
+                    lastAutoSaveId = null;
+                    autoSaveInProgress = false;
+                    console.log('New capture session started, auto-save state reset.');
+                }
                 break;
                 
             case 'error_logged':

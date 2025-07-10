@@ -40,6 +40,8 @@ let cachedElements = new Map();
 let autoEnableInProgress = false;
 let autoEnableLastAttempt = 0;
 let autoEnableDebounceTimer = null;
+let autoSaveTriggered = false;
+let lastMeetingId = null;
 
 // --- Error Handling & Logging ---
 class ErrorHandler {
@@ -48,7 +50,7 @@ class ErrorHandler {
         const errorInfo = {
             timestamp,
             context,
-            message: error.message || error,
+            message: error.message || String(error),
             stack: error.stack,
             url: window.location.href
         };
@@ -95,7 +97,7 @@ class RetryHandler {
                 }
                 
                 const delayTime = baseDelay * Math.pow(2, attempt - 1); // Exponential backoff
-                ErrorHandler.log(error, `${context} - Attempt ${attempt} failed, retrying in ${delayTime}ms`, true);
+                console.log(`[Teams Caption Saver] ${context} - Attempt ${attempt} failed, retrying in ${delayTime}ms:`, error.message || error);
                 await delay(delayTime);
             }
         }
@@ -224,18 +226,41 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     if (wasInMeeting && !nowInMeeting) {
         console.log("Meeting transition detected: In -> Out. Checking for auto-save.");
         
-        await RetryHandler.withRetry(async () => {
+        // Generate a unique meeting session ID
+        const currentMeetingId = `${meetingTitleOnStart}_${recordingStartTime?.toISOString() || Date.now()}`;
+        
+        // Prevent duplicate auto-saves for the same meeting session
+        if (autoSaveTriggered && lastMeetingId === currentMeetingId) {
+            console.log("Auto-save already triggered for this meeting session, skipping...");
+            clearElementCache();
+            wasInMeeting = nowInMeeting;
+            return;
+        }
+        
+        try {
             const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
             if (autoSaveOnEnd && transcriptArray.length > 0) {
                 console.log("Auto-save is ON and transcript has data. Triggering save.");
+                
+                // Mark auto-save as triggered before sending message
+                autoSaveTriggered = true;
+                lastMeetingId = currentMeetingId;
+                
+                // Send save message without retry (let service worker handle retries if needed)
                 await chrome.runtime.sendMessage({
                     message: "save_on_leave",
                     transcriptArray: getCleanTranscript(),
                     meetingTitle: meetingTitleOnStart,
                     recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
                 });
+                
+                console.log("Auto-save message sent successfully.");
             }
-        }, 'Auto-save on meeting end');
+        } catch (error) {
+            ErrorHandler.log(error, 'Auto-save on meeting end', false);
+            // Reset auto-save state on error so it can be retried
+            autoSaveTriggered = false;
+        }
         
         clearElementCache();
     }
@@ -245,6 +270,11 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     if (!nowInMeeting) {
         stopCaptureSession();
         return;
+    } else if (!wasInMeeting && nowInMeeting) {
+        // Reset auto-save state when joining a new meeting
+        console.log("Meeting transition detected: Out -> In. Resetting auto-save state.");
+        autoSaveTriggered = false;
+        lastMeetingId = null;
     }
     
     handleCaptionsStateChange();
