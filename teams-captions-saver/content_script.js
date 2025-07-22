@@ -4,7 +4,9 @@ const TIMING = {
     RETRY_DELAY: 2000,
     MAIN_LOOP_INTERVAL: 5000,
     OBSERVER_CHECK_INTERVAL: 10000,
-    TOOLTIP_DISPLAY_DURATION: 1500
+    TOOLTIP_DISPLAY_DURATION: 1500,
+    ATTENDEE_UPDATE_INTERVAL: 60000, // Check attendees every minute
+    INITIAL_ATTENDEE_DELAY: 10000, // Wait 10s after meeting start before first check
 };
 
 const SELECTORS = {
@@ -23,6 +25,15 @@ const SELECTORS = {
     MORE_BUTTON_EXPANDED: "button[data-tid='more-button'][aria-expanded='true'], button[id='callingButtons-showMoreBtn'][aria-expanded='true']",
     LANGUAGE_SPEECH_BUTTON: "div[id='LanguageSpeechMenuControl-id']",
     TURN_ON_CAPTIONS_BUTTON: "div[id='closed-captions-button']",
+    // Attendee tracking selectors
+    ATTENDEE_TREE: "[role='tree'][aria-label='Attendees']",
+    ATTENDEE_ITEM: "[data-tid^='participantsInCall-']",
+    ATTENDEE_COUNT: "#roster-title-section-2",
+    ATTENDEE_NAME: "[id^='roster-avatar-img-']",
+    ATTENDEE_ROLE: "[data-tid='ts-roster-organizer-status']",
+    MEETING_CHAT: "#chat-pane-list",
+    CHAT_CONTROL_MESSAGE: ".fui-ChatControlMessage",
+    PEOPLE_BUTTON: "button[data-tid='calling-toolbar-people-button'], button[id='roster-button']",
 };
 
 // --- State ---
@@ -42,6 +53,16 @@ let autoEnableLastAttempt = 0;
 let autoEnableDebounceTimer = null;
 let autoSaveTriggered = false;
 let lastMeetingId = null;
+
+// --- Attendee Tracking State ---
+let attendeeUpdateInterval = null;
+let attendeeData = {
+    allAttendees: new Set(), // All unique attendees who joined
+    currentAttendees: new Map(), // Currently in meeting (name -> role)
+    attendeeHistory: [], // Detailed tracking with timestamps
+    lastUpdated: null,
+    meetingStartTime: null,
+};
 
 // --- Error Handling & Logging ---
 class ErrorHandler {
@@ -176,6 +197,181 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
     });
 }, 'Caption updates processing');
 
+// --- Attendee Tracking Functions ---
+function updateAttendeesFromTranscript() {
+    // Fallback method: Extract unique speakers from transcript
+    const speakers = [...new Set(transcriptArray.map(item => item.Name))];
+    const currentTime = new Date().toLocaleTimeString();
+    
+    speakers.forEach(name => {
+        if (!attendeeData.allAttendees.has(name)) {
+            attendeeData.allAttendees.add(name);
+            attendeeData.currentAttendees.set(name, 'Speaker');
+            
+            attendeeData.attendeeHistory.push({
+                name,
+                role: 'Speaker',
+                action: 'detected from transcript',
+                time: currentTime
+            });
+            
+            console.log(`Speaker detected from transcript: ${name}`);
+        }
+    });
+    
+    attendeeData.lastUpdated = currentTime;
+    console.log(`Attendee update from transcript. Speakers found: ${speakers.length}`);
+}
+function updateAttendeeList() {
+    try {
+        const attendeeTree = document.querySelector(SELECTORS.ATTENDEE_TREE);
+        if (!attendeeTree) {
+            console.log("Attendee tree not found, roster might not be open");
+            // Fallback: Add speakers from transcript as attendees
+            updateAttendeesFromTranscript();
+            return;
+        }
+        
+        const attendeeItems = document.querySelectorAll(SELECTORS.ATTENDEE_ITEM);
+        const currentTime = new Date().toLocaleTimeString();
+        
+        // Clear current attendees for fresh update
+        const previousAttendees = new Set(attendeeData.currentAttendees.keys());
+        attendeeData.currentAttendees.clear();
+        
+        // Process each attendee
+        attendeeItems.forEach(item => {
+            const nameElement = item.querySelector(SELECTORS.ATTENDEE_NAME);
+            const roleElement = item.querySelector(SELECTORS.ATTENDEE_ROLE);
+            
+            if (nameElement) {
+                const name = nameElement.textContent.trim();
+                const role = roleElement ? roleElement.textContent.trim() : 'Attendee';
+                
+                // Add to current attendees
+                attendeeData.currentAttendees.set(name, role);
+                
+                // Track in all attendees
+                if (!attendeeData.allAttendees.has(name)) {
+                    attendeeData.allAttendees.add(name);
+                    
+                    // Add to history as new join
+                    attendeeData.attendeeHistory.push({
+                        name,
+                        role,
+                        action: 'joined',
+                        time: currentTime
+                    });
+                    
+                    console.log(`New attendee detected: ${name} (${role})`);
+                }
+            }
+        });
+        
+        // Check for attendees who left
+        previousAttendees.forEach(name => {
+            if (!attendeeData.currentAttendees.has(name)) {
+                attendeeData.attendeeHistory.push({
+                    name,
+                    action: 'left',
+                    time: currentTime
+                });
+                console.log(`Attendee left: ${name}`);
+            }
+        });
+        
+        attendeeData.lastUpdated = currentTime;
+        
+        // Get count from header
+        const countElement = document.querySelector(SELECTORS.ATTENDEE_COUNT);
+        if (countElement) {
+            const countMatch = countElement.textContent.match(/\((\d+)\)/);
+            if (countMatch) {
+                console.log(`Total attendees in meeting: ${countMatch[1]}`);
+            }
+        }
+        
+        console.log(`Attendee update complete. Current: ${attendeeData.currentAttendees.size}, Total: ${attendeeData.allAttendees.size}`);
+        
+    } catch (error) {
+        ErrorHandler.log(error, 'Updating attendee list', true);
+    }
+}
+
+async function tryOpenParticipantPanel() {
+    try {
+        const peopleButton = document.querySelector(SELECTORS.PEOPLE_BUTTON);
+        if (peopleButton && peopleButton.getAttribute('aria-pressed') !== 'true') {
+            console.log("Attempting to open participant panel for attendee tracking...");
+            peopleButton.click();
+            await delay(500); // Wait for panel to open
+            return true;
+        }
+        return false;
+    } catch (error) {
+        console.log("Could not open participant panel:", error);
+        return false;
+    }
+}
+
+function startAttendeeTracking() {
+    if (attendeeUpdateInterval) {
+        clearInterval(attendeeUpdateInterval);
+    }
+    
+    // Reset attendee data for new meeting
+    attendeeData = {
+        allAttendees: new Set(),
+        currentAttendees: new Map(),
+        attendeeHistory: [],
+        lastUpdated: null,
+        meetingStartTime: new Date().toISOString(),
+    };
+    
+    console.log("Starting attendee tracking...");
+    
+    // Initial update after delay
+    setTimeout(async () => {
+        // Try to open participant panel if not open
+        await tryOpenParticipantPanel();
+        
+        updateAttendeeList();
+        
+        // Then update every minute
+        attendeeUpdateInterval = setInterval(updateAttendeeList, TIMING.ATTENDEE_UPDATE_INTERVAL);
+    }, TIMING.INITIAL_ATTENDEE_DELAY);
+}
+
+function stopAttendeeTracking() {
+    if (attendeeUpdateInterval) {
+        clearInterval(attendeeUpdateInterval);
+        attendeeUpdateInterval = null;
+        console.log("Stopped attendee tracking");
+    }
+}
+
+function getAttendeeReport() {
+    const report = {
+        meetingStartTime: attendeeData.meetingStartTime,
+        lastUpdated: attendeeData.lastUpdated,
+        totalUniqueAttendees: attendeeData.allAttendees.size,
+        currentAttendeeCount: attendeeData.currentAttendees.size,
+        attendeeList: Array.from(attendeeData.allAttendees),
+        currentAttendees: Array.from(attendeeData.currentAttendees.entries()).map(([name, role]) => ({
+            name,
+            role
+        })),
+        attendeeHistory: attendeeData.attendeeHistory
+    };
+    
+    console.log("[Teams Caption Saver] Attendee report generated:", {
+        totalAttendees: report.totalUniqueAttendees,
+        attendees: report.attendeeList
+    });
+    
+    return report;
+}
+
 // --- Event-Driven Meeting Detection ---
 let meetingStateDebounceTimer = null;
 let captionsStateDebounceTimer = null;
@@ -251,7 +447,8 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                     message: "save_on_leave",
                     transcriptArray: getCleanTranscript(),
                     meetingTitle: meetingTitleOnStart,
-                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
+                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                    attendeeReport: getAttendeeReport()
                 });
                 
                 console.log("Auto-save message sent successfully.");
@@ -335,6 +532,10 @@ function startCaptureSession() {
     recordingStartTime = new Date();
     
     console.log(`Capture started. Title: "${meetingTitleOnStart}", Time: ${recordingStartTime.toLocaleString()}`);
+    
+    // Start attendee tracking
+    startAttendeeTracking();
+    
     chrome.runtime.sendMessage({ message: "update_badge_status", capturing: true });
     
     ensureObserverIsActive();
@@ -350,6 +551,10 @@ function stopCaptureSession() {
         observer = null;
     }
     observedElement = null;
+    
+    // Stop attendee tracking
+    stopAttendeeTracking();
+    
     chrome.runtime.sendMessage({ message: "update_badge_status", capturing: false });
 }
 
@@ -490,6 +695,9 @@ function cleanupObservers() {
     // Reset auto-enable state
     autoEnableInProgress = false;
     
+    // Stop attendee tracking
+    stopAttendeeTracking();
+    
     clearElementCache();
 }
 
@@ -503,21 +711,30 @@ initializeEventDrivenSystem();
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.message) {
         case 'get_status':
+            const attendeeReport = getAttendeeReport();
             sendResponse({
                 capturing: capturing,
                 captionCount: transcriptArray.length,
-                isInMeeting: isUserInMeeting()
+                isInMeeting: isUserInMeeting(),
+                attendeeCount: attendeeReport.totalUniqueAttendees
             });
             break;
 
         case 'return_transcript':
             if (transcriptArray.length > 0) {
+                const attendeeReport = getAttendeeReport();
+                console.log("[Teams Caption Saver] Sending transcript with attendee report:", {
+                    transcriptCount: transcriptArray.length,
+                    attendeeCount: attendeeReport.totalUniqueAttendees,
+                    attendees: attendeeReport.attendeeList
+                });
                 chrome.runtime.sendMessage({
                     message: "download_captions",
                     transcriptArray: getCleanTranscript(),
                     meetingTitle: meetingTitleOnStart,
                     format: request.format,
-                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString()
+                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                    attendeeReport: attendeeReport
                 });
             } else {
                 alert("No captions were captured. Please ensure captions are turned on in the meeting.");
@@ -542,6 +759,10 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         case 'get_unique_speakers':
             const speakers = [...new Set(transcriptArray.map(item => item.Name))];
             sendResponse({ speakers });
+            break;
+            
+        case 'get_attendee_report':
+            sendResponse({ attendeeReport: getAttendeeReport() });
             break;
         
         default:

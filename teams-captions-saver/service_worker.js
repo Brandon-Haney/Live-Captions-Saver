@@ -28,34 +28,122 @@ function applyAliasesToTranscript(transcriptArray, aliases = {}) {
     });
 }
 
-// --- Formatting Functions ---
-function formatAsTxt(transcript) {
-    return transcript.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n');
+function applyAliasesToAttendeeReport(attendeeReport, aliases = {}) {
+    if (!attendeeReport || Object.keys(aliases).length === 0) {
+        return attendeeReport;
+    }
+    
+    // Create a new report with aliased names
+    const aliasedReport = {
+        ...attendeeReport,
+        attendeeList: attendeeReport.attendeeList.map(name => {
+            const aliasedName = aliases[name]?.trim();
+            return aliasedName || name;
+        }),
+        currentAttendees: attendeeReport.currentAttendees.map(attendee => ({
+            ...attendee,
+            name: aliases[attendee.name]?.trim() || attendee.name
+        })),
+        attendeeHistory: attendeeReport.attendeeHistory.map(event => ({
+            ...event,
+            name: aliases[event.name]?.trim() || event.name
+        }))
+    };
+    
+    return aliasedReport;
 }
 
-function formatAsMarkdown(transcript) {
+// --- Formatting Functions ---
+function formatAsTxt(transcript, attendeeReport) {
+    let content = '';
+    
+    console.log('[Teams Caption Saver] formatAsTxt called with:', {
+        transcriptLength: transcript?.length,
+        hasAttendeeReport: !!attendeeReport,
+        attendeeCount: attendeeReport?.totalUniqueAttendees || 0,
+        attendeeList: attendeeReport?.attendeeList || []
+    });
+    
+    // Add attendee information if available
+    if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
+        content += '=== MEETING ATTENDEES ===\n';
+        content += `Total Attendees: ${attendeeReport.totalUniqueAttendees}\n`;
+        content += `Meeting Start: ${new Date(attendeeReport.meetingStartTime).toLocaleString()}\n`;
+        content += '\nAttendee List:\n';
+        attendeeReport.attendeeList.forEach(name => {
+            content += `- ${name}\n`;
+        });
+        content += '\n=== TRANSCRIPT ===\n';
+    }
+    
+    content += transcript.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n');
+    return content;
+}
+
+function formatAsMarkdown(transcript, attendeeReport) {
+    let content = '';
+    
+    // Add attendee information if available
+    if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
+        content += '# Meeting Attendees\n\n';
+        content += `**Total Attendees:** ${attendeeReport.totalUniqueAttendees}\n\n`;
+        content += `**Meeting Start:** ${new Date(attendeeReport.meetingStartTime).toLocaleString()}\n\n`;
+        content += '## Attendee List\n\n';
+        attendeeReport.attendeeList.forEach(name => {
+            content += `- ${name}\n`;
+        });
+        content += '\n---\n\n# Transcript\n\n';
+    }
+    
     let lastSpeaker = null;
-    return transcript.map(entry => {
+    content += transcript.map(entry => {
         if (entry.Name !== lastSpeaker) {
             lastSpeaker = entry.Name;
             return `\n**${entry.Name}** (${entry.Time}):\n> ${entry.Text}`;
         }
         return `> ${entry.Text}`;
     }).join('\n').trim();
+    
+    return content;
 }
 
-function formatAsDoc(transcript) {
-    const body = transcript.map(entry =>
+function formatAsDoc(transcript, attendeeReport) {
+    let body = '';
+    
+    // Add attendee information if available
+    if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
+        body += '<h2>Meeting Attendees</h2>';
+        body += `<p><b>Total Attendees:</b> ${attendeeReport.totalUniqueAttendees}</p>`;
+        body += `<p><b>Meeting Start:</b> ${escapeHtml(new Date(attendeeReport.meetingStartTime).toLocaleString())}</p>`;
+        body += '<h3>Attendee List</h3><ul>';
+        attendeeReport.attendeeList.forEach(name => {
+            body += `<li>${escapeHtml(name)}</li>`;
+        });
+        body += '</ul><hr><h2>Transcript</h2>';
+    }
+    
+    body += transcript.map(entry =>
         `<p><b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`
     ).join('');
+    
     return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Meeting Transcript</title></head><body>${body}</body></html>`;
 }
 
-async function formatForAi(transcript, meetingName, recordingStartTime) {
+async function formatForAi(transcript, meetingName, recordingStartTime, attendeeReport) {
     const { aiInstructions = '' } = await chrome.storage.sync.get('aiInstructions');
     const date = recordingStartTime ? new Date(recordingStartTime) : new Date();
     
-    const metadataHeader = `Meeting Title: ${meetingName}\nDate: ${date.toLocaleString()}`;
+    let metadataHeader = `Meeting Title: ${meetingName}\nDate: ${date.toLocaleString()}`;
+    
+    // Add attendee information if available
+    if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
+        metadataHeader += `\nTotal Attendees: ${attendeeReport.totalUniqueAttendees}`;
+        metadataHeader += '\n\nAttendee List:';
+        attendeeReport.attendeeList.forEach(name => {
+            metadataHeader += `\n- ${name}`;
+        });
+    }
+    
     const transcriptText = transcript.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n\n');
 
     let finalContent = aiInstructions ? `${aiInstructions}\n\n---\n\n` : '';
@@ -84,36 +172,44 @@ function downloadFile(filename, content, mimeType, saveAs) {
     });
 }
 
-async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt) {
+async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt, attendeeReport = null) {
     const processedTranscript = applyAliasesToTranscript(transcriptArray, aliases);
+    const processedAttendeeReport = applyAliasesToAttendeeReport(attendeeReport, aliases);
     const meetingName = getSanitizedMeetingName(meetingTitle);
 
     let content, extension, mimeType;
 
     switch (format) {
         case 'md':
-            content = formatAsMarkdown(processedTranscript);
+            content = formatAsMarkdown(processedTranscript, processedAttendeeReport);
             extension = 'md';
             mimeType = 'text/markdown';
             break;
         case 'json':
-            content = JSON.stringify(processedTranscript, null, 2);
+            // For JSON, include both transcript and attendee data
+            const jsonData = {
+                meetingTitle: meetingName,
+                recordingStartTime,
+                transcript: processedTranscript,
+                attendees: processedAttendeeReport
+            };
+            content = JSON.stringify(jsonData, null, 2);
             extension = 'json';
             mimeType = 'application/json';
             break;
         case 'doc':
-            content = formatAsDoc(processedTranscript);
+            content = formatAsDoc(processedTranscript, processedAttendeeReport);
             extension = 'doc';
             mimeType = 'application/msword';
             break;
         case 'ai':
-            content = await formatForAi(processedTranscript, meetingName, recordingStartTime);
+            content = await formatForAi(processedTranscript, meetingName, recordingStartTime, processedAttendeeReport);
             extension = 'txt';
             mimeType = 'text/plain';
             break;
         case 'txt':
         default:
-            content = formatAsTxt(processedTranscript);
+            content = formatAsTxt(processedTranscript, processedAttendeeReport);
             extension = 'txt';
             mimeType = 'text/plain';
             break;
@@ -158,7 +254,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         switch (message.message) {
             case 'download_captions':
-                await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, message.format, message.recordingStartTime, true);
+                console.log('[Teams Caption Saver] Download request received:', {
+                    format: message.format,
+                    transcriptCount: message.transcriptArray?.length,
+                    hasAttendeeReport: !!message.attendeeReport,
+                    attendeeCount: message.attendeeReport?.totalUniqueAttendees || 0
+                });
+                await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, message.format, message.recordingStartTime, true, message.attendeeReport);
                 break;
 
             case 'save_on_leave':
@@ -179,7 +281,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     if (settings.autoSaveOnEnd && message.transcriptArray.length > 0) {
                         const formatToSave = settings.defaultSaveFormat || 'txt';
                         console.log(`Auto-saving transcript in ${formatToSave.toUpperCase()} format.`);
-                        await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, formatToSave, message.recordingStartTime, false);
+                        await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport);
                         console.log('Auto-save completed successfully.');
                     }
                 } catch (error) {

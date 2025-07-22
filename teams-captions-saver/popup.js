@@ -64,18 +64,29 @@ async function formatTranscript(transcript, aliases, type = 'standard') {
 }
 
 // --- UI Update Functions ---
-function updateStatusUI({ capturing, captionCount, isInMeeting }) {
+function updateStatusUI({ capturing, captionCount, isInMeeting, attendeeCount }) {
     const { statusMessage } = UI_ELEMENTS;
     if (isInMeeting) {
         if (capturing) {
-            statusMessage.textContent = captionCount > 0 ? `Capturing! (${captionCount} lines recorded)` : 'Capturing... (Waiting for speech)';
+            let status = captionCount > 0 ? `Capturing! (${captionCount} lines recorded` : 'Capturing... (Waiting for speech';
+            if (attendeeCount > 0) {
+                status += `, ${attendeeCount} attendees`;
+            }
+            status += ')';
+            statusMessage.textContent = status;
             statusMessage.style.color = captionCount > 0 ? '#28a745' : '#ffc107';
         } else {
             statusMessage.textContent = 'In a meeting, but captions are off.';
             statusMessage.style.color = '#dc3545';
         }
     } else {
-        statusMessage.textContent = captionCount > 0 ? `Meeting ended. ${captionCount} lines available.` : 'Not in a meeting.';
+        let status = captionCount > 0 ? `Meeting ended. ${captionCount} lines` : 'Not in a meeting.';
+        if (captionCount > 0 && attendeeCount > 0) {
+            status += `, ${attendeeCount} attendees available.`;
+        } else if (captionCount > 0) {
+            status += ' available.';
+        }
+        statusMessage.textContent = status;
         statusMessage.style.color = captionCount > 0 ? '#17a2b8' : '#6c757d';
     }
 }
