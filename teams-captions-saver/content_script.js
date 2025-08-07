@@ -314,7 +314,14 @@ async function tryOpenParticipantPanel() {
     }
 }
 
-function startAttendeeTracking() {
+async function startAttendeeTracking() {
+    // Check if attendee tracking is enabled
+    const { trackAttendees } = await chrome.storage.sync.get('trackAttendees');
+    if (trackAttendees === false) {
+        console.log("Attendee tracking is disabled in settings");
+        return;
+    }
+    
     if (attendeeUpdateInterval) {
         clearInterval(attendeeUpdateInterval);
     }
@@ -350,7 +357,13 @@ function stopAttendeeTracking() {
     }
 }
 
-function getAttendeeReport() {
+async function getAttendeeReport() {
+    // Check if attendee tracking is enabled
+    const { trackAttendees } = await chrome.storage.sync.get('trackAttendees');
+    if (trackAttendees === false) {
+        return null; // Return null if tracking is disabled
+    }
+    
     const report = {
         meetingStartTime: attendeeData.meetingStartTime,
         lastUpdated: attendeeData.lastUpdated,
@@ -443,12 +456,13 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                 lastMeetingId = currentMeetingId;
                 
                 // Send save message without retry (let service worker handle retries if needed)
+                const attendeeReport = await getAttendeeReport();
                 await chrome.runtime.sendMessage({
                     message: "save_on_leave",
                     transcriptArray: getCleanTranscript(),
                     meetingTitle: meetingTitleOnStart,
                     recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
-                    attendeeReport: getAttendeeReport()
+                    attendeeReport: attendeeReport
                 });
                 
                 console.log("Auto-save message sent successfully.");
@@ -711,31 +725,35 @@ initializeEventDrivenSystem();
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.message) {
         case 'get_status':
-            const attendeeReport = getAttendeeReport();
-            sendResponse({
-                capturing: capturing,
-                captionCount: transcriptArray.length,
-                isInMeeting: isUserInMeeting(),
-                attendeeCount: attendeeReport.totalUniqueAttendees
-            });
-            break;
+            (async () => {
+                const attendeeReport = await getAttendeeReport();
+                sendResponse({
+                    capturing: capturing,
+                    captionCount: transcriptArray.length,
+                    isInMeeting: isUserInMeeting(),
+                    attendeeCount: attendeeReport ? attendeeReport.totalUniqueAttendees : 0
+                });
+            })();
+            return true; // Will respond asynchronously
 
         case 'return_transcript':
             if (transcriptArray.length > 0) {
-                const attendeeReport = getAttendeeReport();
-                console.log("[Teams Caption Saver] Sending transcript with attendee report:", {
-                    transcriptCount: transcriptArray.length,
-                    attendeeCount: attendeeReport.totalUniqueAttendees,
-                    attendees: attendeeReport.attendeeList
-                });
-                chrome.runtime.sendMessage({
-                    message: "download_captions",
-                    transcriptArray: getCleanTranscript(),
-                    meetingTitle: meetingTitleOnStart,
-                    format: request.format,
-                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
-                    attendeeReport: attendeeReport
-                });
+                (async () => {
+                    const attendeeReport = await getAttendeeReport();
+                    console.log("[Teams Caption Saver] Sending transcript with attendee report:", {
+                        transcriptCount: transcriptArray.length,
+                        attendeeCount: attendeeReport ? attendeeReport.totalUniqueAttendees : 0,
+                        attendees: attendeeReport ? attendeeReport.attendeeList : []
+                    });
+                    chrome.runtime.sendMessage({
+                        message: "download_captions",
+                        transcriptArray: getCleanTranscript(),
+                        meetingTitle: meetingTitleOnStart,
+                        format: request.format,
+                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                        attendeeReport: attendeeReport
+                    });
+                })();
             } else {
                 alert("No captions were captured. Please ensure captions are turned on in the meeting.");
             }
@@ -762,8 +780,11 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             break;
             
         case 'get_attendee_report':
-            sendResponse({ attendeeReport: getAttendeeReport() });
-            break;
+            (async () => {
+                const attendeeReport = await getAttendeeReport();
+                sendResponse({ attendeeReport: attendeeReport });
+            })();
+            return true; // Will respond asynchronously
         
         default:
             console.log("Unhandled message received in content script:", request.message);

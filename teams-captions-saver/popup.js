@@ -12,6 +12,7 @@ const UI_ELEMENTS = {
     defaultSaveFormatSelect: document.getElementById('defaultSaveFormat'),
     autoEnableCaptionsToggle: document.getElementById('autoEnableCaptionsToggle'),
     autoSaveOnEndToggle: document.getElementById('autoSaveOnEndToggle'),
+    trackAttendeesToggle: document.getElementById('trackAttendeesToggle'),
     aiInstructions: document.getElementById('aiInstructions'),
     speakerAliasList: document.getElementById('speaker-alias-list'),
     promptButtons: document.querySelectorAll('.prompt-button'),
@@ -137,11 +138,13 @@ async function loadSettings() {
         'autoEnableCaptions',
         'autoSaveOnEnd',
         'aiInstructions',
-        'defaultSaveFormat'
+        'defaultSaveFormat',
+        'trackAttendees'
     ]);
 
     UI_ELEMENTS.autoEnableCaptionsToggle.checked = !!settings.autoEnableCaptions;
     UI_ELEMENTS.autoSaveOnEndToggle.checked = !!settings.autoSaveOnEnd;
+    UI_ELEMENTS.trackAttendeesToggle.checked = settings.trackAttendees !== false; // Default to true
     UI_ELEMENTS.aiInstructions.value = settings.aiInstructions || '';
     UI_ELEMENTS.manualStartInfo.style.display = settings.autoEnableCaptions ? 'none' : 'block';
 
@@ -166,6 +169,10 @@ function setupEventListeners() {
 
     UI_ELEMENTS.autoSaveOnEndToggle.addEventListener('change', (e) => {
         chrome.storage.sync.set({ autoSaveOnEnd: e.target.checked });
+    });
+
+    UI_ELEMENTS.trackAttendeesToggle.addEventListener('change', (e) => {
+        chrome.storage.sync.set({ trackAttendees: e.target.checked });
     });
 
     UI_ELEMENTS.aiInstructions.addEventListener('change', (e) => {
