@@ -65,6 +65,33 @@ let attendeeData = {
     meetingStartTime: null,
 };
 
+// --- Real-time Broadcasting ---
+function broadcastCaptionUpdate(data) {
+    try {
+        chrome.runtime.sendMessage({
+            message: "live_caption_update",
+            ...data
+        }).catch(() => {
+            // Viewer might not be open, ignore error
+        });
+    } catch (error) {
+        // Silent fail if no listeners
+    }
+}
+
+function broadcastAttendeeUpdate(data) {
+    try {
+        chrome.runtime.sendMessage({
+            message: "live_attendee_update",
+            ...data
+        }).catch(() => {
+            // Viewer might not be open, ignore error
+        });
+    } catch (error) {
+        // Silent fail if no listeners
+    }
+}
+
 // --- Error Handling & Logging ---
 class ErrorHandler {
     static log(error, context = '', silent = false) {
@@ -187,10 +214,21 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                 if (transcriptArray[existingIndex].Text !== text) {
                     transcriptArray[existingIndex].Text = text;
                     transcriptArray[existingIndex].Time = time;
+                    // Broadcast update to viewer
+                    broadcastCaptionUpdate({
+                        type: 'update',
+                        caption: transcriptArray[existingIndex]
+                    });
                 }
             } else {
                 // Add new entry
-                transcriptArray.push({ Name: name, Text: text, Time: time, key: captionId });
+                const newCaption = { Name: name, Text: text, Time: time, key: captionId };
+                transcriptArray.push(newCaption);
+                // Broadcast new caption to viewer
+                broadcastCaptionUpdate({
+                    type: 'new',
+                    caption: newCaption
+                });
             }
         } catch (error) {
             ErrorHandler.log(error, 'Processing individual caption element', true);
@@ -317,7 +355,7 @@ async function tryOpenParticipantPanel() {
 
 async function startAttendeeTracking() {
     // Check if attendee tracking is enabled
-    const { trackAttendees } = await chrome.storage.sync.get('trackAttendees');
+    const { trackAttendees, autoOpenAttendees } = await chrome.storage.sync.get(['trackAttendees', 'autoOpenAttendees']);
     if (trackAttendees === false) {
         console.log("Attendee tracking is disabled in settings");
         return;
@@ -340,8 +378,10 @@ async function startAttendeeTracking() {
     
     // Initial update after delay
     setTimeout(async () => {
-        // Try to open participant panel if not open
-        await tryOpenParticipantPanel();
+        // Only auto-open participant panel if setting is enabled
+        if (autoOpenAttendees) {
+            await tryOpenParticipantPanel();
+        }
         
         updateAttendeeList();
         
@@ -436,6 +476,17 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     if (wasInMeeting && !nowInMeeting) {
         console.log("Meeting transition detected: In -> Out. Checking for auto-save.");
         
+        // Send meeting ended signal to viewer
+        try {
+            chrome.runtime.sendMessage({
+                message: "meeting_ended"
+            }).catch(() => {
+                // Viewer might not be open, ignore error
+            });
+        } catch (error) {
+            // Silent fail if no listeners
+        }
+        
         // Generate a unique meeting session ID
         const currentMeetingId = `${meetingTitleOnStart}_${recordingStartTime?.toISOString() || Date.now()}`;
         
@@ -481,12 +532,15 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     
     if (!nowInMeeting) {
         stopCaptureSession();
+        stopAttendeeTracking();
         return;
     } else if (!wasInMeeting && nowInMeeting) {
         // Reset auto-save state when joining a new meeting
         console.log("Meeting transition detected: Out -> In. Resetting auto-save state.");
         autoSaveTriggered = false;
         lastMeetingId = null;
+        // Start attendee tracking when entering meeting
+        startAttendeeTracking();
     }
     
     handleCaptionsStateChange();
@@ -494,6 +548,12 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
 
 const handleCaptionsStateChange = ErrorHandler.wrap(async function() {
     if (!isUserInMeeting()) return;
+    
+    const { trackCaptions } = await chrome.storage.sync.get('trackCaptions');
+    if (trackCaptions === false) {
+        console.log("Caption tracking disabled, skipping caption state handling");
+        return;
+    }
     
     const captionsContainer = getCachedElement(SELECTORS.CAPTIONS_RENDERER);
     if (captionsContainer) {
@@ -535,7 +595,16 @@ function ensureObserverIsActive() {
     }
 }
 
-function startCaptureSession() {
+async function startCaptureSession() {
+    // Check if caption tracking is enabled
+    const { trackCaptions } = await chrome.storage.sync.get('trackCaptions');
+    if (trackCaptions === false) {
+        console.log("Caption tracking is disabled in settings");
+        // Still start attendee tracking if captions are disabled
+        startAttendeeTracking();
+        return;
+    }
+    
     if (capturing) return;
 
     console.log("New caption session detected. Starting capture.");
@@ -774,11 +843,20 @@ initializeEventDrivenSystem();
 // --- Message Handling ---
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.message) {
+        case 'viewer_ready':
+            // Viewer is ready to receive live updates
+            sendResponse({
+                streaming: capturing,
+                captionCount: transcriptArray.length
+            });
+            return true;
+            
         case 'get_status':
             (async () => {
+                const { trackCaptions } = await chrome.storage.sync.get('trackCaptions');
                 const attendeeReport = await getAttendeeReport();
                 sendResponse({
-                    capturing: capturing,
+                    capturing: trackCaptions !== false ? capturing : false,
                     captionCount: transcriptArray.length,
                     isInMeeting: isUserInMeeting(),
                     attendeeCount: attendeeReport ? attendeeReport.totalUniqueAttendees : 0

@@ -367,16 +367,29 @@
         </div>
 
         <div class="settings-group">
-            <p class="settings-subheader">Meeting Features</p>
+            <p class="settings-subheader">Capture Settings</p>
             <div class="setting-item">
-                <label for="autoEnableCaptionsToggle" class="setting-label">Auto-start Live Captions</label>
-                <label class="toggle-switch"><input type="checkbox" id="autoEnableCaptionsToggle"><span class="slider"></span></label>
+                <label for="trackCaptionsToggle" class="setting-label">Track Live Captions</label>
+                <label class="toggle-switch"><input type="checkbox" id="trackCaptionsToggle" checked><span class="slider"></span></label>
             </div>
+            <p class="small-info-text">Capture and save meeting captions when available.</p>
             <div class="setting-item">
                 <label for="trackAttendeesToggle" class="setting-label">Track Meeting Attendees</label>
                 <label class="toggle-switch"><input type="checkbox" id="trackAttendeesToggle"><span class="slider"></span></label>
             </div>
-            <p class="small-info-text">Includes attendee list in saved transcripts (who joined the meeting).</p>
+            <p class="small-info-text">Monitor who joins/leaves the meeting and include in exports.</p>
+            
+            <p class="settings-subheader">Automation Settings</p>
+            <div class="setting-item">
+                <label for="autoEnableCaptionsToggle" class="setting-label">Auto-open Live Captions</label>
+                <label class="toggle-switch"><input type="checkbox" id="autoEnableCaptionsToggle"><span class="slider"></span></label>
+            </div>
+            <p class="small-info-text">Automatically enable Teams captions when joining a meeting.</p>
+            <div class="setting-item">
+                <label for="autoOpenAttendeesToggle" class="setting-label">Auto-open Attendee Panel</label>
+                <label class="toggle-switch"><input type="checkbox" id="autoOpenAttendeesToggle"><span class="slider"></span></label>
+            </div>
+            <p class="small-info-text">Automatically open roster panel for attendee tracking (requires "Track Meeting Attendees" to be enabled).</p>
             <div class="setting-item">
                 <label for="timestampFormat" class="setting-label">Timestamp Format</label>
                 <select id="timestampFormat" style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
