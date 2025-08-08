@@ -130,11 +130,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function updateAnalyticsIncremental(caption) {
-        // Update speaker filters if new speaker
-        const speakers = [...new Set(allCaptions.map(item => item.Name))];
-        const currentFilterCount = speakerFiltersContainer.querySelectorAll('button').length - 1; // Exclude "Show All" button
-        if (speakers.length !== currentFilterCount) {
-            populateSpeakerFilters(allCaptions);
+        // Check if this is a new speaker we haven't seen before
+        const speakerButton = speakerFiltersContainer.querySelector(`button[data-speaker="${caption.Name}"]`);
+        if (!speakerButton) {
+            // New speaker detected, add their button
+            const btn = document.createElement('button');
+            btn.textContent = caption.Name;
+            btn.dataset.speaker = caption.Name;
+            btn.setAttribute('aria-label', `Filter by ${caption.Name}`);
+            speakerFiltersContainer.appendChild(btn);
         }
         
         // Recalculate and display analytics
@@ -202,13 +206,24 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function populateSpeakerFilters(transcriptArray) {
+        // Get all unique speakers from transcript
         const speakers = [...new Set(transcriptArray.map(item => item.Name))];
+        
+        // Get existing speaker buttons (to track what we already have)
+        const existingSpeakers = new Set();
+        speakerFiltersContainer.querySelectorAll('button:not(#show-all-btn)').forEach(btn => {
+            existingSpeakers.add(btn.dataset.speaker);
+        });
+        
+        // Only add new speakers that don't already have buttons
         speakers.forEach(speaker => {
-            const btn = document.createElement('button');
-            btn.textContent = speaker;
-            btn.dataset.speaker = speaker;
-            btn.setAttribute('aria-label', `Filter by ${speaker}`);
-            speakerFiltersContainer.appendChild(btn);
+            if (!existingSpeakers.has(speaker)) {
+                const btn = document.createElement('button');
+                btn.textContent = speaker;
+                btn.dataset.speaker = speaker;
+                btn.setAttribute('aria-label', `Filter by ${speaker}`);
+                speakerFiltersContainer.appendChild(btn);
+            }
         });
     }
 
