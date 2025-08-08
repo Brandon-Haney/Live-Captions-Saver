@@ -36,11 +36,13 @@ The MS Teams Live Captions Saver is a powerful Chrome extension that captures, s
 5. **Save your transcript** using the extension popup when ready
 
 ![Extension Popup - Active Capture](IMG/Extension%20Popup%203.png)
+
 *The extension actively capturing captions with speaker aliases enabled*
 
 ### Extension Interface
 
 ![Extension Settings](IMG/Extension%20Popup%201.png)
+
 *Comprehensive settings panel with automation options*
 
 The extension popup provides:
@@ -55,6 +57,7 @@ The extension popup provides:
 Click "View Transcript" to open the interactive viewer with:
 
 ![Transcript Viewer](IMG/View%20Transcript.png)
+
 *Interactive transcript viewer with analytics dashboard*
 
 - **Meeting Analytics** - Total messages, words, and speaker count
@@ -65,6 +68,7 @@ Click "View Transcript" to open the interactive viewer with:
 ## Advanced Settings
 
 ![Advanced Settings](IMG/Extension%20Popup%202.png)
+
 *AI customization and meeting features configuration*
 
 ### Meeting Features
@@ -92,6 +96,7 @@ Click "View Transcript" to open the interactive viewer with:
 For environments where browser extensions cannot be installed:
 
 ![Standalone Script](IMG/Standalone%20Script.png)
+
 *Console script v2.0 with attendee tracking and speaker aliases*
 
 ### Features:
