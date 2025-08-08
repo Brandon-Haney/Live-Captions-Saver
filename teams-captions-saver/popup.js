@@ -12,7 +12,9 @@ const UI_ELEMENTS = {
     defaultSaveFormatSelect: document.getElementById('defaultSaveFormat'),
     autoEnableCaptionsToggle: document.getElementById('autoEnableCaptionsToggle'),
     autoSaveOnEndToggle: document.getElementById('autoSaveOnEndToggle'),
+    trackCaptionsToggle: document.getElementById('trackCaptionsToggle'),
     trackAttendeesToggle: document.getElementById('trackAttendeesToggle'),
+    autoOpenAttendeesToggle: document.getElementById('autoOpenAttendeesToggle'),
     timestampFormat: document.getElementById('timestampFormat'),
     filenamePattern: document.getElementById('filenamePattern'),
     meetingType: document.getElementById('meetingType'),
@@ -79,10 +81,13 @@ async function formatTranscript(transcript, aliases, type = 'standard') {
 }
 
 // --- UI Update Functions ---
-function updateStatusUI({ capturing, captionCount, isInMeeting, attendeeCount }) {
+async function updateStatusUI({ capturing, captionCount, isInMeeting, attendeeCount }) {
     const { statusMessage } = UI_ELEMENTS;
+    const { trackCaptions, trackAttendees } = await chrome.storage.sync.get(['trackCaptions', 'trackAttendees']);
+    
     if (isInMeeting) {
-        if (capturing) {
+        // In meeting - show appropriate status based on what's being tracked
+        if (trackCaptions !== false && capturing) {
             let status = captionCount > 0 ? `Capturing! (${captionCount} lines recorded` : 'Capturing... (Waiting for speech';
             if (attendeeCount > 0) {
                 status += `, ${attendeeCount} attendees`;
@@ -90,19 +95,32 @@ function updateStatusUI({ capturing, captionCount, isInMeeting, attendeeCount })
             status += ')';
             statusMessage.textContent = status;
             statusMessage.style.color = captionCount > 0 ? '#28a745' : '#ffc107';
+        } else if (trackCaptions === false && trackAttendees !== false && attendeeCount > 0) {
+            // Only tracking attendees
+            statusMessage.textContent = `Tracking attendees (${attendeeCount} participants)`;
+            statusMessage.style.color = '#17a2b8';
+        } else if (trackCaptions === false) {
+            statusMessage.textContent = 'In a meeting (caption tracking disabled)';
+            statusMessage.style.color = '#6c757d';
         } else {
             statusMessage.textContent = 'In a meeting, but captions are off.';
             statusMessage.style.color = '#dc3545';
         }
     } else {
-        let status = captionCount > 0 ? `Meeting ended. ${captionCount} lines` : 'Not in a meeting.';
-        if (captionCount > 0 && attendeeCount > 0) {
-            status += `, ${attendeeCount} attendees available.`;
-        } else if (captionCount > 0) {
-            status += ' available.';
+        // Not in meeting - show saved data status
+        let hasData = captionCount > 0 || attendeeCount > 0;
+        if (hasData) {
+            let status = 'Meeting ended. ';
+            let parts = [];
+            if (captionCount > 0) parts.push(`${captionCount} lines`);
+            if (attendeeCount > 0) parts.push(`${attendeeCount} attendees`);
+            status += parts.join(', ') + ' available.';
+            statusMessage.textContent = status;
+            statusMessage.style.color = '#17a2b8';
+        } else {
+            statusMessage.textContent = 'Not in a meeting.';
+            statusMessage.style.color = '#6c757d';
         }
-        statusMessage.textContent = status;
-        statusMessage.style.color = captionCount > 0 ? '#17a2b8' : '#6c757d';
     }
 }
 
@@ -231,14 +249,21 @@ async function loadSettings() {
         'autoSaveOnEnd',
         'aiInstructions',
         'defaultSaveFormat',
+        'trackCaptions',
         'trackAttendees',
+        'autoOpenAttendees',
         'timestampFormat',
         'filenamePattern'
     ]);
 
     UI_ELEMENTS.autoEnableCaptionsToggle.checked = !!settings.autoEnableCaptions;
     UI_ELEMENTS.autoSaveOnEndToggle.checked = !!settings.autoSaveOnEnd;
+    UI_ELEMENTS.trackCaptionsToggle.checked = settings.trackCaptions !== false; // Default to true
     UI_ELEMENTS.trackAttendeesToggle.checked = settings.trackAttendees !== false; // Default to true
+    if (UI_ELEMENTS.autoOpenAttendeesToggle) {
+        UI_ELEMENTS.autoOpenAttendeesToggle.checked = !!settings.autoOpenAttendees;
+        UI_ELEMENTS.autoOpenAttendeesToggle.disabled = !UI_ELEMENTS.trackAttendeesToggle.checked;
+    }
     UI_ELEMENTS.timestampFormat.value = settings.timestampFormat || '12hr';
     UI_ELEMENTS.filenamePattern.value = settings.filenamePattern || '{date}_{title}_{format}';
     UI_ELEMENTS.aiInstructions.value = settings.aiInstructions || '';
@@ -258,6 +283,18 @@ function setupEventListeners() {
         updateSaveButtonText(currentDefaultFormat);
     });
 
+    UI_ELEMENTS.trackCaptionsToggle.addEventListener('change', (e) => {
+        chrome.storage.sync.set({ trackCaptions: e.target.checked });
+        // Disable auto-enable captions if caption tracking is disabled
+        if (!e.target.checked) {
+            UI_ELEMENTS.autoEnableCaptionsToggle.checked = false;
+            UI_ELEMENTS.autoEnableCaptionsToggle.disabled = true;
+            chrome.storage.sync.set({ autoEnableCaptions: false });
+        } else {
+            UI_ELEMENTS.autoEnableCaptionsToggle.disabled = false;
+        }
+    });
+    
     UI_ELEMENTS.autoEnableCaptionsToggle.addEventListener('change', (e) => {
         chrome.storage.sync.set({ autoEnableCaptions: e.target.checked });
         UI_ELEMENTS.manualStartInfo.style.display = e.target.checked ? 'none' : 'block';
@@ -269,7 +306,28 @@ function setupEventListeners() {
 
     UI_ELEMENTS.trackAttendeesToggle.addEventListener('change', (e) => {
         chrome.storage.sync.set({ trackAttendees: e.target.checked });
+        // Disable auto-open if tracking is disabled
+        if (UI_ELEMENTS.autoOpenAttendeesToggle) {
+            if (!e.target.checked) {
+                UI_ELEMENTS.autoOpenAttendeesToggle.checked = false;
+                UI_ELEMENTS.autoOpenAttendeesToggle.disabled = true;
+                chrome.storage.sync.set({ autoOpenAttendees: false });
+            } else {
+                UI_ELEMENTS.autoOpenAttendeesToggle.disabled = false;
+            }
+        }
     });
+    
+    if (UI_ELEMENTS.autoOpenAttendeesToggle) {
+        UI_ELEMENTS.autoOpenAttendeesToggle.addEventListener('change', (e) => {
+            chrome.storage.sync.set({ autoOpenAttendees: e.target.checked });
+        });
+    }
+    
+    // Initialize auto-enable captions toggle state based on track captions
+    if (UI_ELEMENTS.trackCaptionsToggle) {
+        UI_ELEMENTS.autoEnableCaptionsToggle.disabled = !UI_ELEMENTS.trackCaptionsToggle.checked;
+    }
 
     UI_ELEMENTS.timestampFormat.addEventListener('change', (e) => {
         chrome.storage.sync.set({ timestampFormat: e.target.value });
@@ -464,8 +522,10 @@ async function initializePopup() {
     try {
         const status = await chrome.tabs.sendMessage(tab.id, { message: "get_status" });
         if (status) {
-            updateStatusUI(status);
-            updateButtonStates(status.captionCount > 0);
+            await updateStatusUI(status);
+            // Enable buttons if we have either captions or attendees
+            const hasData = status.captionCount > 0 || (status.attendeeCount > 0 && status.isInMeeting === false);
+            updateButtonStates(hasData);
             if (status.captionCount > 0) {
                 renderSpeakerAliases(tab);
             }

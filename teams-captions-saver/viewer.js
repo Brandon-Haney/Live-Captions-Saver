@@ -3,6 +3,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const captionsContainer = document.getElementById('captions-container');
     const searchBox = document.getElementById('search-box');
     const speakerFiltersContainer = document.getElementById('speaker-filters');
+    const copyAllBtn = document.getElementById('copy-all-btn');
+    const saveAllBtn = document.getElementById('save-all-btn');
 
     // --- State ---
     let allCaptions = [];
@@ -10,12 +12,164 @@ document.addEventListener('DOMContentLoaded', () => {
     let meetingStartTime = null;
     let meetingEndTime = null;
     const SEARCH_DEBOUNCE_DELAY = 300;
+    
+    // Live streaming state
+    let isLiveStreaming = false;
+    let lastUpdateTime = Date.now();
+    let activeSearch = '';
+    let autoScroll = true;
+    let pendingUpdates = [];
+    let updateTimer = null;
 
     // --- Utility ---
     function escapeHtml(str) {
         const p = document.createElement("p");
         p.textContent = str;
         return p.innerHTML;
+    }
+    
+    // --- Helper Functions ---
+    function highlightSearchTerm(element, searchTerm) {
+        if (!searchTerm) return;
+        
+        const textElement = element.querySelector('.text');
+        if (!textElement) return;
+        
+        const text = textElement.textContent;
+        const regex = new RegExp(`(${searchTerm})`, 'gi');
+        const highlightedText = text.replace(regex, '<mark>$1</mark>');
+        textElement.innerHTML = highlightedText;
+    }
+    
+    // --- Live Update Functions ---
+    function appendNewCaption(caption) {
+        // Add to data array
+        allCaptions.push(caption);
+        
+        // Create HTML for new caption
+        const newCaptionHTML = createCaptionHTML(caption, allCaptions.length - 1);
+        
+        // Remove "no captions" message if it exists
+        const statusMessage = captionsContainer.querySelector('.status-message');
+        if (statusMessage) {
+            statusMessage.remove();
+        }
+        
+        // Append to DOM
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = newCaptionHTML;
+        const newCaptionElement = tempDiv.firstElementChild;
+        captionsContainer.appendChild(newCaptionElement);
+        
+        // Apply search filter if active
+        if (activeSearch) {
+            const matchesSearch = caption.Text.toLowerCase().includes(activeSearch.toLowerCase()) ||
+                                 caption.Name.toLowerCase().includes(activeSearch.toLowerCase());
+            if (!matchesSearch) {
+                newCaptionElement.style.display = 'none';
+            } else {
+                highlightSearchTerm(newCaptionElement, activeSearch);
+            }
+        }
+        
+        // Auto-scroll if enabled
+        if (autoScroll) {
+            newCaptionElement.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+        
+        // Update analytics
+        updateAnalyticsIncremental(caption);
+        
+        // Update export button states
+        updateExportButtonStates();
+        
+        // Update last update time
+        lastUpdateTime = Date.now();
+        updateLiveIndicator();
+    }
+    
+    function updateExistingCaption(caption) {
+        const captionElement = captionsContainer.querySelector(`[data-index="${allCaptions.findIndex(c => c.key === caption.key)}"]`);
+        if (captionElement) {
+            const textElement = captionElement.querySelector('.text');
+            if (textElement) {
+                textElement.textContent = caption.Text;
+            }
+        }
+        
+        // Update in data array
+        const index = allCaptions.findIndex(c => c.key === caption.key);
+        if (index !== -1) {
+            allCaptions[index] = caption;
+        }
+    }
+    
+    function batchProcessUpdates() {
+        if (pendingUpdates.length === 0) return;
+        
+        // Process all pending updates
+        pendingUpdates.forEach(update => {
+            if (update.type === 'new') {
+                appendNewCaption(update.caption);
+            } else if (update.type === 'update') {
+                updateExistingCaption(update.caption);
+            }
+        });
+        
+        pendingUpdates = [];
+        updateTimer = null;
+    }
+    
+    function queueUpdate(update) {
+        pendingUpdates.push(update);
+        
+        // Batch updates every 100ms for performance
+        if (!updateTimer) {
+            updateTimer = setTimeout(batchProcessUpdates, 100);
+        }
+    }
+    
+    function updateAnalyticsIncremental(caption) {
+        // Update speaker filters if new speaker
+        const speakers = [...new Set(allCaptions.map(item => item.Name))];
+        const currentFilterCount = speakerFiltersContainer.querySelectorAll('button').length - 1; // Exclude "Show All" button
+        if (speakers.length !== currentFilterCount) {
+            populateSpeakerFilters(allCaptions);
+        }
+        
+        // Recalculate and display analytics
+        const analytics = calculateAnalytics(allCaptions);
+        if (analytics) {
+            displayAnalytics(analytics);
+        }
+    }
+    
+    function updateLiveIndicator() {
+        const indicator = document.getElementById('live-indicator');
+        if (!indicator) {
+            // Create live indicator if it doesn't exist
+            const headerElement = document.querySelector('h1');
+            if (headerElement) {
+                const liveIndicator = document.createElement('span');
+                liveIndicator.id = 'live-indicator';
+                liveIndicator.className = 'live-indicator';
+                liveIndicator.innerHTML = '<span class="live-dot"></span> LIVE';
+                headerElement.appendChild(liveIndicator);
+            }
+        } else {
+            // Update indicator status
+            indicator.classList.toggle('active', isLiveStreaming);
+            
+            // Stop dot animation when not live
+            const liveDot = indicator.querySelector('.live-dot');
+            if (liveDot) {
+                if (!isLiveStreaming) {
+                    liveDot.style.animation = 'none';
+                } else {
+                    liveDot.style.animation = '';
+                }
+            }
+        }
     }
 
     // --- Rendering Functions ---
@@ -44,6 +198,7 @@ document.addEventListener('DOMContentLoaded', () => {
         allCaptions = transcriptArray;
         const htmlContent = transcriptArray.map(createCaptionHTML).join('');
         captionsContainer.innerHTML = htmlContent || '<p class="status-message">No captions to display.</p>';
+        updateExportButtonStates();
     }
 
     function populateSpeakerFilters(transcriptArray) {
@@ -60,8 +215,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Interactivity & Filtering ---
     function applyFilters() {
         const searchTerm = searchBox.value.toLowerCase().trim();
+        activeSearch = searchTerm; // Store for live updates
         const activeSpeakerFilter = speakerFiltersContainer.querySelector('button.active');
-        const speakerToFilter = activeSpeakerFilter.id === 'show-all-btn' ? null : activeSpeakerFilter.dataset.speaker;
+        const speakerToFilter = activeSpeakerFilter?.id === 'show-all-btn' ? null : activeSpeakerFilter?.dataset.speaker;
 
         document.querySelectorAll('.caption').forEach(captionDiv => {
             const text = captionDiv.querySelector('.text').textContent.toLowerCase();
@@ -72,6 +228,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
             captionDiv.style.display = (matchesSearch && matchesSpeaker) ? 'block' : 'none';
         });
+        
+        // Update export button states
+        updateExportButtonStates();
+    }
+    
+    function updateExportButtonStates() {
+        const visibleCount = getVisibleCaptions().length;
+        const hasVisibleCaptions = visibleCount > 0;
+        
+        copyAllBtn.disabled = !hasVisibleCaptions;
+        saveAllBtn.disabled = !hasVisibleCaptions;
+        
+        // Update titles with count
+        copyAllBtn.title = hasVisibleCaptions 
+            ? `Copy ${visibleCount} visible caption(s) to clipboard`
+            : 'No visible captions to copy';
+        saveAllBtn.title = hasVisibleCaptions 
+            ? `Save ${visibleCount} visible caption(s) as file`
+            : 'No visible captions to save';
     }
 
     function debouncedApplyFilters() {
@@ -121,15 +296,182 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
+    // --- Export Functions ---
+    function getVisibleCaptions() {
+        const visibleCaptions = [];
+        const captionElements = captionsContainer.querySelectorAll('.caption');
+        
+        captionElements.forEach(captionElement => {
+            if (captionElement.style.display !== 'none') {
+                const index = parseInt(captionElement.dataset.index, 10);
+                if (!isNaN(index) && allCaptions[index]) {
+                    visibleCaptions.push(allCaptions[index]);
+                }
+            }
+        });
+        
+        return visibleCaptions;
+    }
+    
+    function formatTranscriptForExport(captions, format = 'txt') {
+        if (!captions || captions.length === 0) {
+            return 'No captions to export.';
+        }
+        
+        if (format === 'markdown') {
+            return captions.map(entry => `**${entry.Name}** (${entry.Time}): ${entry.Text}`).join('\n\n');
+        } else {
+            return captions.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n');
+        }
+    }
+    
+    async function handleCopyAllClick() {
+        const visibleCaptions = getVisibleCaptions();
+        
+        if (visibleCaptions.length === 0) {
+            showNotification('No visible captions to copy', 'warning');
+            return;
+        }
+        
+        const textToCopy = formatTranscriptForExport(visibleCaptions);
+        
+        try {
+            await navigator.clipboard.writeText(textToCopy);
+            showButtonSuccess(copyAllBtn, 'Copied!', 'Copy All');
+            showNotification(`Copied ${visibleCaptions.length} caption(s) to clipboard`, 'success');
+        } catch (err) {
+            console.error('Failed to copy transcript: ', err);
+            showNotification('Failed to copy to clipboard', 'error');
+        }
+    }
+    
+    async function handleSaveAllClick() {
+        const visibleCaptions = getVisibleCaptions();
+        
+        if (visibleCaptions.length === 0) {
+            showNotification('No visible captions to save', 'warning');
+            return;
+        }
+        
+        // Create download
+        const content = formatTranscriptForExport(visibleCaptions);
+        const now = new Date();
+        const dateStr = now.toISOString().split('T')[0];
+        const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
+        const filename = `filtered-transcript-${dateStr}-${timeStr}.txt`;
+        
+        try {
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            showButtonSuccess(saveAllBtn, 'Saved!', 'Save');
+            showNotification(`Saved ${visibleCaptions.length} caption(s) to ${filename}`, 'success');
+            
+            // Update meeting ended message to show it's been saved
+            if (document.getElementById('meeting-ended-message')) {
+                await addMeetingEndedMessage(true);
+            }
+        } catch (err) {
+            console.error('Failed to save transcript: ', err);
+            showNotification('Failed to save file', 'error');
+        }
+    }
+    
+    function showButtonSuccess(button, successText, originalText) {
+        const originalHtml = button.innerHTML;
+        button.classList.add('success');
+        const svg = button.querySelector('svg');
+        button.innerHTML = `${svg.outerHTML}${successText}`;
+        
+        setTimeout(() => {
+            button.classList.remove('success');
+            button.innerHTML = originalHtml;
+        }, 2000);
+    }
+    
+    function showNotification(message, type = 'info') {
+        // Remove existing notification if any
+        const existingNotification = document.getElementById('notification');
+        if (existingNotification) {
+            existingNotification.remove();
+        }
+        
+        const notification = document.createElement('div');
+        notification.id = 'notification';
+        notification.textContent = message;
+        
+        const colors = {
+            success: '#28a745',
+            error: '#dc3545',
+            warning: '#ffc107',
+            info: '#17a2b8'
+        };
+        
+        notification.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: ${colors[type] || colors.info};
+            color: white;
+            padding: 12px 16px;
+            border-radius: 6px;
+            z-index: 10000;
+            font-size: 14px;
+            font-weight: 500;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            animation: slideInFromRight 0.3s ease-out;
+        `;
+        
+        // Add slide-in animation
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes slideInFromRight {
+                from {
+                    transform: translateX(100%);
+                    opacity: 0;
+                }
+                to {
+                    transform: translateX(0);
+                    opacity: 1;
+                }
+            }
+        `;
+        document.head.appendChild(style);
+        
+        document.body.appendChild(notification);
+        
+        setTimeout(() => {
+            notification.style.animation = 'slideInFromRight 0.3s ease-out reverse';
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.remove();
+                }
+                if (style.parentNode) {
+                    style.remove();
+                }
+            }, 300);
+        }, 3000);
+    }
+    
     // --- Initialization ---
     function setupEventListeners() {
         searchBox.addEventListener('input', debouncedApplyFilters);
         speakerFiltersContainer.addEventListener('click', handleSpeakerFilterClick);
         captionsContainer.addEventListener('click', handleCopyClick);
+        copyAllBtn.addEventListener('click', handleCopyAllClick);
+        saveAllBtn.addEventListener('click', handleSaveAllClick);
     }
 
     async function initialize() {
         try {
+            // Check if we have captions passed via storage (from popup)
             const result = await chrome.storage.local.get('captionsToView');
             const transcript = result.captionsToView;
 
@@ -143,8 +485,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderCaptions(transcript);
                 populateSpeakerFilters(transcript);
                 setupEventListeners();
+                
+                // Setup live streaming after initial load
+                setupLiveStreaming();
+                
+                // Check if this is a completed meeting (not live)
+                // If we have captions but no live connection after setup, show meeting ended
+                setTimeout(async () => {
+                    if (!isLiveStreaming && transcript.length > 0) {
+                        await addMeetingEndedMessage();
+                    }
+                }, 1000);
             } else {
-                captionsContainer.innerHTML = '<p class="status-message">No captions found. The data may have been cleared.</p>';
+                // Check if user navigated directly to the page
+                const isDirectNavigation = !result.captionsToView;
+                if (isDirectNavigation) {
+                    captionsContainer.innerHTML = '<p class="status-message">No transcript data available.<br><br>Please use the "View Transcript" button in the extension popup to load a transcript.</p>';
+                } else {
+                    captionsContainer.innerHTML = '<p class="status-message">Waiting for live captions...</p>';
+                    // Still setup live streaming even if no initial captions
+                    setupLiveStreaming();
+                }
             }
         } catch (error) {
             console.error("Error loading captions:", error);
@@ -152,6 +513,144 @@ document.addEventListener('DOMContentLoaded', () => {
         } finally {
             // Clean up storage to prevent re-displaying on next open
             chrome.storage.local.remove('captionsToView');
+        }
+    }
+    
+    async function addMeetingEndedMessage() {
+        // Check if message already exists
+        if (document.getElementById('meeting-ended-message')) return;
+        
+        // Check if auto-save is enabled
+        const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
+        
+        const endedMessage = document.createElement('div');
+        endedMessage.id = 'meeting-ended-message';
+        endedMessage.style.cssText = `
+            text-align: center;
+            padding: 20px;
+            margin: 20px 0;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            color: #6c757d;
+            font-size: 16px;
+        `;
+        
+        let subtext = autoSaveOnEnd 
+            ? 'The transcript has been auto-saved.'
+            : 'The transcript is ready to save.';
+            
+        endedMessage.innerHTML = `<strong>Meeting Ended</strong><br><span style="font-size: 14px;">${subtext}</span>`;
+        
+        captionsContainer.appendChild(endedMessage);
+        
+        // Auto-scroll to show the message
+        if (autoScroll) {
+            endedMessage.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+    }
+    
+    function removeMeetingEndedMessage() {
+        const message = document.getElementById('meeting-ended-message');
+        if (message) {
+            message.remove();
+        }
+    }
+    
+    // --- Live Streaming Setup ---
+    async function setupLiveStreaming() {
+        // Check if content script is available and streaming
+        try {
+            const tabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+            if (tabs.length > 0) {
+                const response = await chrome.tabs.sendMessage(tabs[0].id, { message: "viewer_ready" });
+                if (response && response.streaming) {
+                    isLiveStreaming = true;
+                    lastUpdateTime = Date.now(); // Initialize timestamp
+                    updateLiveIndicator();
+                    console.log("Connected to live caption stream");
+                }
+            }
+        } catch (error) {
+            console.log("Content script not ready for streaming:", error);
+        }
+        
+        // Setup message listener for live updates
+        chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
+            if (request.message === "live_caption_update") {
+                isLiveStreaming = true;
+                lastUpdateTime = Date.now(); // Update timestamp when receiving messages
+                queueUpdate(request);
+                
+                // Remove "Meeting Ended" message if we're receiving updates again
+                removeMeetingEndedMessage();
+            } else if (request.message === "live_attendee_update") {
+                // Handle attendee updates if needed
+                console.log("Attendee update:", request);
+                lastUpdateTime = Date.now(); // Update timestamp for attendee updates too
+            } else if (request.message === "meeting_ended") {
+                // Handle explicit meeting end signal
+                isLiveStreaming = false;
+                updateLiveIndicator();
+                await addMeetingEndedMessage();
+            }
+        });
+        
+        // Setup auto-scroll toggle
+        setupAutoScrollToggle();
+        
+        // Heartbeat to check connection
+        setInterval(checkConnectionStatus, 5000);
+    }
+    
+    function setupAutoScrollToggle() {
+        // Create auto-scroll toggle button
+        const searchContainer = document.querySelector('.search-container');
+        if (searchContainer && !document.getElementById('auto-scroll-toggle')) {
+            const autoScrollBtn = document.createElement('button');
+            autoScrollBtn.id = 'auto-scroll-toggle';
+            autoScrollBtn.className = 'filter-btn active';
+            autoScrollBtn.textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
+            autoScrollBtn.onclick = () => {
+                autoScroll = !autoScroll;
+                autoScrollBtn.textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
+                autoScrollBtn.classList.toggle('active', autoScroll);
+            };
+            searchContainer.appendChild(autoScrollBtn);
+        }
+    }
+    
+    async function checkConnectionStatus() {
+        if (!isLiveStreaming) return;
+        
+        // Check if we're still receiving updates
+        const timeSinceLastUpdate = Date.now() - lastUpdateTime;
+        if (timeSinceLastUpdate > 30000) { // 30 seconds without updates
+            isLiveStreaming = false;
+            updateLiveIndicator();
+            console.log("Lost connection to live stream");
+            
+            // Add "Meeting Ended" message
+            await addMeetingEndedMessage();
+            
+            // Try to reconnect
+            const tabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+            if (tabs.length > 0) {
+                try {
+                    const response = await chrome.tabs.sendMessage(tabs[0].id, { message: "viewer_ready" });
+                    if (response && response.streaming) {
+                        isLiveStreaming = true;
+                        lastUpdateTime = Date.now(); // Reset timeout
+                        updateLiveIndicator();
+                        console.log("Reconnected to live stream");
+                        
+                        // Remove "Meeting Ended" message if reconnected
+                        removeMeetingEndedMessage();
+                    }
+                } catch (error) {
+                    // Silent fail
+                }
+            }
         }
     }
 
@@ -198,12 +697,14 @@ document.addEventListener('DOMContentLoaded', () => {
     function displayAnalytics(analytics) {
         if (!analytics) return;
         
+        // Check if analytics container already exists
+        let analyticsContainer = document.getElementById('meeting-analytics');
+        
         // Sort speakers by word count
         const sortedSpeakers = Object.entries(analytics.speakerStats)
             .sort((a, b) => b[1].wordCount - a[1].wordCount);
         
         let analyticsHTML = `
-            <div id="meeting-analytics" style="background: #f8f9fa; padding: 15px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #dee2e6;">
                 <h3 style="margin-top: 0; color: #495057;">Meeting Analytics</h3>
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 15px;">
                     <div>
@@ -244,14 +745,22 @@ document.addEventListener('DOMContentLoaded', () => {
         
         analyticsHTML += `
                 </div>
-            </div>
         `;
         
-        // Insert analytics before captions container
+        // Update existing analytics or create new one
         const container = document.getElementById('captions-container');
-        const analyticsDiv = document.createElement('div');
-        analyticsDiv.innerHTML = analyticsHTML;
-        container.parentNode.insertBefore(analyticsDiv, container);
+        
+        if (analyticsContainer) {
+            // Update existing analytics
+            analyticsContainer.innerHTML = analyticsHTML;
+        } else {
+            // Create new analytics container
+            analyticsContainer = document.createElement('div');
+            analyticsContainer.id = 'meeting-analytics';
+            analyticsContainer.style.cssText = 'background: #f8f9fa; padding: 15px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #dee2e6;';
+            analyticsContainer.innerHTML = analyticsHTML;
+            container.parentNode.insertBefore(analyticsContainer, container);
+        }
     }
     
     // --- Keyboard Shortcuts ---

@@ -158,13 +158,25 @@ function escapeHtml(str) {
 }
 
 // --- Core Actions ---
-function downloadFile(filename, content, mimeType, saveAs) {
+async function downloadFile(filename, content, mimeType, saveAs) {
     const url = `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`;
     chrome.downloads.download({
         url: url,
         filename: filename,
         saveAs: saveAs
     });
+    
+    // Notify viewer that transcript was saved
+    try {
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+            if (tab.url && tab.url.includes('viewer.html')) {
+                chrome.tabs.sendMessage(tab.id, { message: 'transcript_saved' });
+            }
+        }
+    } catch (error) {
+        // Silent fail if viewer is not open
+    }
 }
 
 async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
