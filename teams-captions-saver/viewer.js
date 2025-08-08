@@ -7,6 +7,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- State ---
     let allCaptions = [];
     let searchDebounceTimer = null;
+    let meetingStartTime = null;
+    let meetingEndTime = null;
     const SEARCH_DEBOUNCE_DELAY = 300;
 
     // --- Utility ---
@@ -132,6 +134,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const transcript = result.captionsToView;
 
             if (transcript && transcript.length > 0) {
+                // Calculate and display analytics
+                const analytics = calculateAnalytics(transcript);
+                if (analytics) {
+                    displayAnalytics(analytics);
+                }
+                
                 renderCaptions(transcript);
                 populateSpeakerFilters(transcript);
                 setupEventListeners();
@@ -147,6 +155,105 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // --- Analytics Functions ---
+    function calculateAnalytics(captions) {
+        if (!captions || captions.length === 0) return null;
+        
+        const speakerStats = {};
+        let totalWords = 0;
+        
+        // Calculate speaker statistics
+        captions.forEach(caption => {
+            const speaker = caption.Name;
+            const words = caption.Text.split(/\s+/).length;
+            
+            if (!speakerStats[speaker]) {
+                speakerStats[speaker] = {
+                    messageCount: 0,
+                    wordCount: 0,
+                    firstMessage: caption.Time,
+                    lastMessage: caption.Time
+                };
+            }
+            
+            speakerStats[speaker].messageCount++;
+            speakerStats[speaker].wordCount += words;
+            speakerStats[speaker].lastMessage = caption.Time;
+            totalWords += words;
+        });
+        
+        // Calculate percentages
+        Object.keys(speakerStats).forEach(speaker => {
+            speakerStats[speaker].wordPercentage = ((speakerStats[speaker].wordCount / totalWords) * 100).toFixed(1);
+        });
+        
+        return {
+            totalMessages: captions.length,
+            totalWords: totalWords,
+            uniqueSpeakers: Object.keys(speakerStats).length,
+            speakerStats: speakerStats
+        };
+    }
+    
+    function displayAnalytics(analytics) {
+        if (!analytics) return;
+        
+        // Sort speakers by word count
+        const sortedSpeakers = Object.entries(analytics.speakerStats)
+            .sort((a, b) => b[1].wordCount - a[1].wordCount);
+        
+        let analyticsHTML = `
+            <div id="meeting-analytics" style="background: #f8f9fa; padding: 15px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #dee2e6;">
+                <h3 style="margin-top: 0; color: #495057;">Meeting Analytics</h3>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 15px;">
+                    <div>
+                        <div style="font-size: 24px; font-weight: bold; color: #17a2b8;">${analytics.totalMessages}</div>
+                        <div style="font-size: 12px; color: #6c757d;">Total Messages</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 24px; font-weight: bold; color: #28a745;">${analytics.totalWords}</div>
+                        <div style="font-size: 12px; color: #6c757d;">Total Words</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${analytics.uniqueSpeakers}</div>
+                        <div style="font-size: 12px; color: #6c757d;">Speakers</div>
+                    </div>
+                </div>
+                <h4 style="margin-top: 15px; margin-bottom: 10px; color: #495057;">Speaker Participation</h4>
+                <div style="space-y: 8px;">
+        `;
+        
+        sortedSpeakers.slice(0, 5).forEach(([speaker, stats]) => {
+            const percentage = stats.wordPercentage;
+            analyticsHTML += `
+                <div style="margin-bottom: 8px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
+                        <span style="font-size: 14px; color: #495057;">${escapeHtml(speaker)}</span>
+                        <span style="font-size: 12px; color: #6c757d;">${stats.wordCount} words (${percentage}%)</span>
+                    </div>
+                    <div style="background: #e9ecef; border-radius: 4px; height: 20px; overflow: hidden;">
+                        <div style="background: linear-gradient(90deg, #17a2b8, #28a745); height: 100%; width: ${percentage}%; transition: width 0.3s ease;"></div>
+                    </div>
+                </div>
+            `;
+        });
+        
+        if (sortedSpeakers.length > 5) {
+            analyticsHTML += `<div style="font-size: 12px; color: #6c757d; margin-top: 8px;">...and ${sortedSpeakers.length - 5} more speakers</div>`;
+        }
+        
+        analyticsHTML += `
+                </div>
+            </div>
+        `;
+        
+        // Insert analytics before captions container
+        const container = document.getElementById('captions-container');
+        const analyticsDiv = document.createElement('div');
+        analyticsDiv.innerHTML = analyticsHTML;
+        container.parentNode.insertBefore(analyticsDiv, container);
+    }
+    
     // --- Keyboard Shortcuts ---
     document.addEventListener('keydown', (e) => {
         // Ctrl/Cmd + F for search focus

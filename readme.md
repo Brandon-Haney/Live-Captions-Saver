@@ -1,120 +1,221 @@
 ![](IMG/logo.png)
 
-# MS Teams Live Captions Saver Browser Extension
+# MS Teams Live Captions Saver Browser Extension v4.5
 
-The MS Teams Live Captions Saver is a Chrome extension that allows you to capture and export live captions from Microsoft Teams. It is very helpful for those who want to save important discussions and keep track of the conversations for later reference.
+The MS Teams Live Captions Saver is a powerful Chrome extension that captures, saves, and analyzes live captions from Microsoft Teams meetings. With advanced features like AI-powered summaries, speaker tracking, attendee monitoring, and automated exports, it's the perfect tool for meeting documentation and accessibility.
+
+## Key Features
+
+### Core Functionality
+- **Real-time Caption Capture** - Automatically captures live captions during Teams meetings
+- **Multiple Export Formats** - Save as TXT, Markdown, JSON, YAML, DOC, or AI-optimized formats
+- **Speaker Identification & Aliasing** - Track who said what with customizable speaker names
+- **Attendee Tracking** - Monitor meeting participants with join/leave timestamps
+- **Auto-Save on Meeting End** - Never lose your transcripts with automatic saving
+
+### Advanced Features
+- **AI-Powered Templates** - 9 built-in meeting templates (Standup, Retrospective, Planning, etc.)
+- **Custom AI Instructions** - Create and save your own AI analysis templates
+- **Meeting Analytics Dashboard** - View speaker participation, word counts, and statistics
+- **Live Transcript Viewer** - Search and filter transcripts in real-time
+- **Customizable Filename Patterns** - Use variables like {date}, {time}, {title}, {attendees}
+- **Multiple Timestamp Formats** - Choose between 12-hour, 24-hour, or relative timestamps
 
 ## Install from the Chrome Store
 
-[MS Teams Live Captions Saver. Chrome Web Store](https://chromewebstore.google.com/detail/ms-teams-live-captions-sa/ffjfmokaelmhincapcajcnaoelgmpoih)
+[MS Teams Live Captions Saver - Chrome Web Store](https://chromewebstore.google.com/detail/ms-teams-live-captions-sa/ffjfmokaelmhincapcajcnaoelgmpoih)
 
-## Usage
+## Quick Start
 
-To use the Chat Transcript Saver extension:
+### Using the Extension
 
-1. Navigate to a Microsoft Teams page in the browser https://teams.microsoft.com.
+1. **Navigate to Microsoft Teams** in your browser: https://teams.microsoft.com
+2. **Join a meeting**
+3. **The extension will automatically enable live captions** (if auto-start is enabled)
+4. **Capture is automatic** - The extension starts recording once captions appear
+5. **Save your transcript** using the extension popup when ready
 
-2. Join a meeting.
+![Extension Popup - Active Capture](IMG/Extension%20Popup%203.png)
+*The extension actively capturing captions with speaker aliases enabled*
 
-3. Turn on live captions. This is done by clicking on the ellipsis button in the meeting controls, then clicking "Turn on live captions".
+### Extension Interface
 
-![](IMG/1.png)
+![Extension Settings](IMG/Extension%20Popup%201.png)
+*Comprehensive settings panel with automation options*
 
-3. When you're finished, click "Save Captions". The transcript will be downloaded as a YAML file.
+The extension popup provides:
+- **Real-time status** showing capture progress and attendee count
+- **Quick export buttons** with dropdown format selection
+- **Speaker alias management** for correcting names
+- **Auto-save configuration** with customizable settings
+- **AI template selection** for intelligent summaries
 
-![](IMG/4.png)
+## Transcript Viewer
 
+Click "View Transcript" to open the interactive viewer with:
 
+![Transcript Viewer](IMG/View%20Transcript.png)
+*Interactive transcript viewer with analytics dashboard*
 
-## Sample data exported
+- **Meeting Analytics** - Total messages, words, and speaker count
+- **Speaker Participation Graph** - Visual representation of contribution
+- **Search & Filter** - Find specific content or speakers
+- **Real-time Updates** - See new captions as they arrive
 
-Data is exported as a Yaml file. Here's a sample of the data exported:
+## Advanced Settings
 
-```
-Name: Denis Molodtsov
-Text: There I'm going to test this feature. Another test, test, test, test.
-Time: 21:55:59
-----
-Name: Denis Molodtsov
-Text: Hi this is a test.
-Time: 21:56:05
-----
-Name: Denis Molodtsov
-Text: Did you get any of this?
-Time: 21:56:08
-----
-Name: Denis Molodtsov
-Text: This is a test
-Time: 21:56:08
-----
-```
+![Advanced Settings](IMG/Extension%20Popup%202.png)
+*AI customization and meeting features configuration*
 
-## Browsing Captured Captions
+### Meeting Features
+- **Auto-start Live Captions** - Automatically enables Teams captions when joining
+- **Track Meeting Attendees** - Records participant join/leave times
+- **Timestamp Format Options** - Customize time display format
+- **Filename Pattern Variables** - Create dynamic file names
 
-You can also view the captured captions in the browser. To do this, click on the extension icon in the toolbar and select "View Captions". This will open a new tab with the captured captions.
+### AI Customization
+- **9 Built-in Templates**:
+  - Executive Summary
+  - Daily Standup
+  - Sprint Retrospective
+  - Sprint Planning
+  - Design Review
+  - Interview Notes
+  - All Hands Meeting
+  - One-on-One
+  - Brainstorming Session
+- **Custom Templates** - Save your own AI prompts for reuse
+- **Quick Template Buttons** - One-click access to common analyses
 
-![alt text](IMG/7.png)
+## Standalone Console Script
 
-![alt text](IMG/6.png)
+For environments where browser extensions cannot be installed:
 
+![Standalone Script](IMG/Standalone%20Script.png)
+*Console script v2.0 with attendee tracking and speaker aliases*
 
-## Optional: Installing extension via the "Load unpacked"
-The MS Teams Live Captions Saver Extension can also be installed via the "Load unpacked" option in Chrome/Edge/Brave browsers. Here's how:
+### Features:
+- Attendee tracking with join/leave times
+- Speaker aliasing system
+- Enhanced duplicate prevention
+- Multiple export formats
+- Auto-enable captions
+- Draggable UI panel
 
-1. Download the `teams-captions-saver.zip` file and unzip it anywhere on disk.
+### Usage:
+1. Open Developer Console (F12) in Teams meeting
+2. Paste the script from `Standalone-scripts/teams-caption-saver-console.js`
+3. Press Enter to run
 
-2. Open Chrome, Edge or Brave browser  and navigate to the Extensions page:
-   - edge://extensions/ -  edge browser
-   - chrome://extensions/ -  google chrome browser
-   - brave://extensions/ -  brave browser
+## Export Formats
 
+### Standard Formats
+- **TXT** - Plain text with timestamps
+- **Markdown** - Formatted with speaker sections
+- **JSON** - Structured data with metadata
+- **YAML** - Human-readable structured format
+- **DOC** - Microsoft Word document
 
-3. Enable Developer mode by clicking the toggle switch (typically, at the top right).
+### AI-Optimized Format
+Includes special formatting and instructions for AI analysis:
+- Meeting context and metadata
+- Structured transcript for LLM processing
+- Template-specific prompts
+- Action item extraction
+- Decision tracking
 
-4. Click the "Load Unpacked" button and select the directory containing your extension files. Use the unzipped `teams-captions-saver` directory.
+## Manual Installation (Developer Mode)
 
-## Optional: Standalone JavaScript. When you can't use browser extensions
-But what if you can't use extensions for security reasons? Well, in this case:
-- Join a meeting using a browser.
-- Start the live captions using the built-in MS Teams feature.
-- Open the browser console.
-- Paste the [Capture-Teams-Captrions - YAML.js](https://github.com/Zerg00s/Live-Captions-Saver/blob/master/Standalone-scripts/Capture-Teams-Captrions%20-%20YAML.js) into the console and run it.
-- Once you are ready to dowload a transcript, open the console window again and run this command: `downloadYAML();`
-- A text file with a transcript will be downloaded.
+1. Download the `teams-captions-saver` folder
+2. Open Chrome/Edge/Brave and navigate to extensions:
+   - `chrome://extensions/` - Chrome
+   - `edge://extensions/` - Edge
+   - `brave://extensions/` - Brave
+3. Enable **Developer mode** (top right toggle)
+4. Click **"Load unpacked"**
+5. Select the `teams-captions-saver` directory
 
-Please note that this extension works on Microsoft Teams pages only during the meetings and only when the live captions are first turned on.
+## Contributing
 
-## Contributing (Developers only)
+We welcome contributions! To get started:
 
-### Load unpacked extension in Chrome/Edge/Brave browser
+1. Fork the repository
+2. Load the extension in developer mode
+3. Make your changes to the `teams-captions-saver` directory
+4. Test in a Teams meeting
+5. Submit a pull request
 
-- Open the Extensions page:
-   - edge://extensions/ -  edge browser
-   - chrome://extensions/ -  google chrome browser
-   - brave://extensions/ -  brave browser
-- Enable Developer mode by clicking the toggle switch (typically, at the top right).
-- Click the "Load Unpacked" button and select the `teams-captions-saver` directory.
-- Open https://teams.microsoft.com/v2/
-- Open calendar and join a meeting.
+### Development Setup
+- No build system required - pure JavaScript/HTML/CSS
+- Test with actual Teams meetings (captions must be enabled)
+- Update version in `manifest.json` for releases
 
-### Update the manifest.json file
+## Requirements
 
-- Open manifest.json
-- Increment the version number
+- Chrome, Edge, or Brave browser
+- Microsoft Teams web version (teams.microsoft.com)
+- Live captions must be enabled in Teams meeting
+- Extension works only during active meetings
 
-### Publish New Extension Version to the Chrome Web Store
+## Privacy & Legal
 
-- Navigate to [Chrome Developer Dashboard.](https://chrome.google.com/webstore/devconsole)
-- Click the Add new item button.
-- Click Choose file > your zip file > Upload. If your item's manifest and ZIP file are valid, you can edit your item on the next page.
+### Important Notice
+This extension captures and saves live captions from meetings, which may include sensitive information. Before using:
 
-## Disclaimer
+- **Obtain consent** from all meeting participants
+- **Comply with local laws** regarding recording and transcription
+- **Follow your organization's policies** on meeting documentation
+- **Respect privacy** and confidentiality requirements
 
-Please note that the MS Teams Live Captions Saver Extension captures and saves live captions from meetings, which might include sensitive information and private conversations. Therefore, before using this tool, you are required to obtain consent from all parties involved in the meeting. 
+### Data Handling
+- All processing happens locally in your browser
+- No data is sent to external servers
+- Transcripts are saved to your local device only
+- No telemetry or usage tracking
 
-You must ensure that the use of this extension complies with all applicable laws and regulations in your jurisdiction, including but not limited to privacy laws, data protection regulations, and terms of service of Microsoft Teams. In some locations, recording or transcribing a conversation without the knowledge and consent of all participants could be illegal.
+## Troubleshooting
 
-This tool is provided for use "as is" and the developer assumes no responsibility for any legal issues that may arise from its use, including but not limited to privacy violations or data breaches. Users are solely responsible for the use of this tool and ensuring they comply with all local, national, and international laws.
+### Common Issues
 
-By using this extension, you agree to use it responsibly and ethically, and acknowledge that you have understood and accepted all the potential legal implications.
+**Captions not capturing:**
+- Ensure live captions are enabled in Teams (More → Turn on live captions)
+- Refresh the Teams page after installing the extension
+- Check that you're in an active meeting
 
+**Extension not appearing:**
+- Verify installation in browser extensions page
+- Check permissions for teams.microsoft.com
+- Try reloading the extension
+
+**Export not working:**
+- Check browser download settings
+- Verify sufficient disk space
+- Look for errors in browser console (F12)
+
+**Attendee tracking issues:**
+- Enable "Track Attendees" in settings
+- Ensure roster panel is accessible
+- Note: Only shows current participants
+
+## License
+
+This project is provided "as is" without warranty. Users are responsible for compliance with all applicable laws and regulations. See LICENSE file for details.
+
+## Acknowledgments
+
+- Original concept inspired by the need for accessible meeting documentation
+- Built for the Microsoft Teams community
+- Special thanks to all contributors and users providing feedback
+
+## Support
+
+For issues, feature requests, or questions:
+- Open an issue on [GitHub](https://github.com/Zerg00s/Live-Captions-Saver/issues)
+- Check existing issues for solutions
+- Provide detailed reproduction steps for bugs
+
+---
+
+**Version:** 4.5  
+**Last Updated:** August 2025  
+**Compatibility:** Chrome/Edge/Brave with Manifest V3

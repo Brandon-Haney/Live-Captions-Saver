@@ -6,7 +6,7 @@ const TIMING = {
     OBSERVER_CHECK_INTERVAL: 10000,
     TOOLTIP_DISPLAY_DURATION: 1500,
     ATTENDEE_UPDATE_INTERVAL: 60000, // Check attendees every minute
-    INITIAL_ATTENDEE_DELAY: 10000, // Wait 10s after meeting start before first check
+    INITIAL_ATTENDEE_DELAY: 1500, // Wait 1.5s after meeting start before first check
 };
 
 const SELECTORS = {
@@ -56,6 +56,7 @@ let lastMeetingId = null;
 
 // --- Attendee Tracking State ---
 let attendeeUpdateInterval = null;
+let backupInterval = null;
 let attendeeData = {
     allAttendees: new Set(), // All unique attendees who joined
     currentAttendees: new Map(), // Currently in meeting (name -> role)
@@ -547,12 +548,42 @@ function startCaptureSession() {
     
     console.log(`Capture started. Title: "${meetingTitleOnStart}", Time: ${recordingStartTime.toLocaleString()}`);
     
+    // Start periodic backup
+    startPeriodicBackup();
+    
     // Start attendee tracking
     startAttendeeTracking();
     
     chrome.runtime.sendMessage({ message: "update_badge_status", capturing: true });
     
     ensureObserverIsActive();
+}
+
+function startPeriodicBackup() {
+    // Clear any existing backup interval
+    if (backupInterval) {
+        clearInterval(backupInterval);
+    }
+    
+    // Backup transcript every 30 seconds
+    backupInterval = setInterval(async () => {
+        if (transcriptArray.length > 0) {
+            try {
+                await chrome.storage.local.set({
+                    transcriptBackup: {
+                        transcript: transcriptArray,
+                        meetingTitle: meetingTitleOnStart,
+                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
+                        lastBackup: new Date().toISOString(),
+                        attendeeData: attendeeData
+                    }
+                });
+                console.log(`[Teams Caption Saver] Backup saved: ${transcriptArray.length} entries`);
+            } catch (error) {
+                console.error("[Teams Caption Saver] Backup failed:", error);
+            }
+        }
+    }, 30000); // 30 seconds
 }
 
 function stopCaptureSession() {
@@ -565,6 +596,25 @@ function stopCaptureSession() {
         observer = null;
     }
     observedElement = null;
+    
+    // Stop periodic backup
+    if (backupInterval) {
+        clearInterval(backupInterval);
+        backupInterval = null;
+    }
+    
+    // Final backup before stopping
+    if (transcriptArray.length > 0) {
+        chrome.storage.local.set({
+            transcriptBackup: {
+                transcript: transcriptArray,
+                meetingTitle: meetingTitleOnStart,
+                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
+                lastBackup: new Date().toISOString(),
+                attendeeData: attendeeData
+            }
+        });
+    }
     
     // Stop attendee tracking
     stopAttendeeTracking();
