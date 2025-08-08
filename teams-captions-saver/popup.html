@@ -303,7 +303,7 @@
 </head>
 
 <body>
-    <h2>Teams Captions Saver v4.4</h2>
+    <h2>Teams Captions Saver v4.5</h2>
     <p class="subtitle">For Microsoft Teams on the Web</p>
     
     <p id="manual-start-info" class="info-text">To begin, turn on live captions in your Teams meeting.</p>
@@ -377,6 +377,22 @@
                 <label class="toggle-switch"><input type="checkbox" id="trackAttendeesToggle"><span class="slider"></span></label>
             </div>
             <p class="small-info-text">Includes attendee list in saved transcripts (who joined the meeting).</p>
+            <div class="setting-item">
+                <label for="timestampFormat" class="setting-label">Timestamp Format</label>
+                <select id="timestampFormat" style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+                    <option value="12hr">12-hour (2:30:45 PM)</option>
+                    <option value="24hr">24-hour (14:30:45)</option>
+                    <option value="relative">Relative (00:30:45)</option>
+                </select>
+            </div>
+            <div class="setting-item">
+                <label for="filenamePattern" class="setting-label">Filename Pattern</label>
+                <input type="text" id="filenamePattern" 
+                    value="{date}_{title}_{format}" 
+                    placeholder="{date}_{title}_{format}"
+                    style="width: 100%; padding: 5px; border-radius: 4px; border: 1px solid #ccc; font-size: 13px;">
+            </div>
+            <p class="small-info-text">Variables: {date}, {time}, {title}, {format}, {attendees}</p>
         </div>
 
         <div class="settings-group">
@@ -384,6 +400,32 @@
              <label for="aiInstructions" class="setting-label" style="margin-bottom: 5px;">Custom AI Instructions</label>
              <p class="small-info-text" style="margin: 0 0 8px 0;">This text is used for "Copy/Save for AI" actions.</p>
              <textarea id="aiInstructions" rows="4" placeholder="Example: Summarize this transcript into key action items..."></textarea>
+            <div style="margin: 8px 0;">
+                <label for="meetingType" class="setting-label" style="font-size: 12px;">Meeting Type Templates:</label>
+                <div style="display: flex; gap: 5px; margin-bottom: 8px;">
+                    <select id="meetingType" style="flex: 1; padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+                        <option value="">-- Select Template --</option>
+                        <optgroup label="Built-in Templates">
+                            <option value="executive">Executive Summary</option>
+                            <option value="standup">Daily Standup</option>
+                            <option value="retrospective">Retrospective</option>
+                            <option value="planning">Sprint Planning</option>
+                            <option value="review">Design Review</option>
+                            <option value="interview">Interview</option>
+                            <option value="allhands">All Hands</option>
+                            <option value="1on1">One-on-One</option>
+                            <option value="brainstorm">Brainstorming</option>
+                        </optgroup>
+                        <optgroup label="Custom Templates" id="customTemplatesGroup">
+                        </optgroup>
+                    </select>
+                    <button id="deleteTemplateBtn" style="padding: 5px 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; display: none;" title="Delete selected custom template">🗑️</button>
+                </div>
+                <div style="display: flex; gap: 5px;">
+                    <input type="text" id="templateName" placeholder="Template name..." style="flex: 1; padding: 5px; border-radius: 4px; border: 1px solid #ccc; font-size: 13px;">
+                    <button id="saveTemplateBtn" style="padding: 5px 15px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;" title="Save current instructions as template">Save Template</button>
+                </div>
+            </div>
             <div class="prompt-suggestion-container">
                 <button class="prompt-button">Summarize</button>
                 <button class="prompt-button">List Action Items</button>

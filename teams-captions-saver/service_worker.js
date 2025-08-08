@@ -9,11 +9,6 @@ function getSanitizedMeetingName(fullTitle) {
     return cleanedName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_') || "Meeting";
 }
 
-function generateFilename(baseName, extension, recordingStartTime) {
-    const date = recordingStartTime ? new Date(recordingStartTime) : new Date();
-    const datePrefix = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-    return `${datePrefix} - ${baseName}.${extension}`;
-}
 
 function applyAliasesToTranscript(transcriptArray, aliases = {}) {
     if (Object.keys(aliases).length === 0) {
@@ -172,10 +167,38 @@ function downloadFile(filename, content, mimeType, saveAs) {
     });
 }
 
+async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
+    const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-MM-SS
+    const attendeeCount = attendeeReport ? attendeeReport.totalUniqueAttendees : 0;
+    
+    const replacements = {
+        '{date}': dateStr,
+        '{time}': timeStr,
+        '{title}': getSanitizedMeetingName(meetingTitle),
+        '{format}': format,
+        '{attendees}': attendeeCount > 0 ? `${attendeeCount}_attendees` : ''
+    };
+    
+    let filename = pattern || '{date}_{title}_{format}';
+    for (const [key, value] of Object.entries(replacements)) {
+        filename = filename.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), value);
+    }
+    
+    // Clean up any double underscores or trailing underscores
+    filename = filename.replace(/__+/g, '_').replace(/_+$/, '');
+    
+    return filename;
+}
+
 async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt, attendeeReport = null) {
     const processedTranscript = applyAliasesToTranscript(transcriptArray, aliases);
     const processedAttendeeReport = applyAliasesToAttendeeReport(attendeeReport, aliases);
-    const meetingName = getSanitizedMeetingName(meetingTitle);
+    
+    // Get filename pattern from settings
+    const { filenamePattern } = await chrome.storage.sync.get('filenamePattern');
+    const filename = await generateFilename(filenamePattern, meetingTitle, format, processedAttendeeReport);
 
     let content, extension, mimeType;
 
@@ -215,9 +238,9 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
             break;
     }
     
-    const baseName = format === 'ai' ? `${meetingName}-AI` : meetingName;
-    const filename = generateFilename(baseName, extension, recordingStartTime);
-    downloadFile(filename, content, mimeType, saveAsPrompt);
+    // Add extension to filename
+    const fullFilename = `${filename}.${extension}`;
+    downloadFile(fullFilename, content, mimeType, saveAsPrompt);
 }
 
 // --- State Management ---
