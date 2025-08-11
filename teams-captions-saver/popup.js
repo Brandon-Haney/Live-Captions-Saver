@@ -25,6 +25,10 @@ const UI_ELEMENTS = {
     aiInstructions: document.getElementById('aiInstructions'),
     speakerAliasList: document.getElementById('speaker-alias-list'),
     promptButtons: document.querySelectorAll('.prompt-button'),
+    // Session History Elements
+    sessionHistory: document.getElementById('sessionHistory'),
+    historyButton: document.getElementById('historyButton'),
+    sessionList: document.getElementById('sessionList')
 };
 
 
@@ -506,11 +510,229 @@ async function handleSave(target) {
     }
 }
 
+// --- Session History Management ---
+async function initializeSessionHistory() {
+    try {
+        // Load SessionManager script
+        const script = document.createElement('script');
+        script.src = 'sessionManager.js';
+        document.head.appendChild(script);
+        
+        // Wait for script to load
+        await new Promise(resolve => {
+            script.onload = resolve;
+            setTimeout(resolve, 100); // Fallback timeout
+        });
+        
+        // Always show session history button
+        UI_ELEMENTS.sessionHistory.style.display = 'flex';
+        
+        // Setup history button click handler
+        UI_ELEMENTS.historyButton.addEventListener('click', async () => {
+            const isVisible = UI_ELEMENTS.sessionList.style.display !== 'none';
+            UI_ELEMENTS.sessionList.style.display = isVisible ? 'none' : 'block';
+            
+            if (!isVisible) {
+                await loadSessionList();
+            }
+        });
+        
+        // Check if we have saved sessions and update button text
+        const sessionManager = new SessionManager();
+        const sessions = await sessionManager.getSessionIndex();
+        
+        if (sessions && sessions.length > 0) {
+            UI_ELEMENTS.historyButton.innerHTML = `📁 View Previous Sessions (${sessions.length})`;
+        } else {
+            UI_ELEMENTS.historyButton.innerHTML = '📁 No Previous Sessions';
+        }
+    } catch (error) {
+        console.log('[Session History] Initialization skipped:', error.message);
+    }
+}
+
+async function loadSessionList() {
+    try {
+        const sessionManager = new SessionManager();
+        const sessions = await sessionManager.getSessionIndex();
+        const stats = await sessionManager.getStorageStats();
+        
+        if (!sessions || sessions.length === 0) {
+            UI_ELEMENTS.sessionList.innerHTML = '<div style="text-align: center; color: #999;">No saved sessions</div>';
+            return;
+        }
+        
+        let html = '';
+        for (const session of sessions) {
+            const timeAgo = getTimeAgo(new Date(session.timestamp));
+            html += `
+                <div class="session-item" data-id="${session.id}">
+                    <div class="session-title">${escapeHtml(session.title)}</div>
+                    <div class="session-meta">
+                        <span>${session.date} • ${session.duration} • ${session.captionCount} captions</span>
+                        <span>${session.speakers.length} speakers</span>
+                    </div>
+                    <div class="session-meta" style="margin-top: 4px;">
+                        <span style="font-size: 11px; color: #888;">${timeAgo}</span>
+                    </div>
+                    <div class="session-actions">
+                        <button class="session-btn view-btn" data-id="${session.id}">View</button>
+                        <button class="session-btn export-btn" data-id="${session.id}">Export</button>
+                        <button class="session-btn delete" data-id="${session.id}">Delete</button>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // Add storage info
+        html += `
+            <div class="storage-info">
+                Storage: ${stats.usedMB}MB / ${stats.quotaMB}MB (${stats.percentUsed}%)
+                <button id="clearAllSessions" style="margin-left: 10px; font-size: 11px; color: #dc3545; background: none; border: none; cursor: pointer; text-decoration: underline;">Clear All</button>
+            </div>
+        `;
+        
+        UI_ELEMENTS.sessionList.innerHTML = html;
+        
+        // Add event listeners for session actions
+        document.querySelectorAll('.view-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => viewSession(e.target.dataset.id));
+        });
+        
+        document.querySelectorAll('.export-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => exportSession(e.target.dataset.id));
+        });
+        
+        document.querySelectorAll('.session-btn.delete').forEach(btn => {
+            btn.addEventListener('click', (e) => deleteSession(e.target.dataset.id));
+        });
+        
+        document.getElementById('clearAllSessions')?.addEventListener('click', clearAllSessions);
+        
+    } catch (error) {
+        console.error('[Session History] Failed to load sessions:', error);
+        UI_ELEMENTS.sessionList.innerHTML = '<div style="text-align: center; color: #dc3545;">Error loading sessions</div>';
+    }
+}
+
+async function viewSession(sessionId) {
+    try {
+        const sessionManager = new SessionManager();
+        const sessionData = await sessionManager.loadSession(sessionId);
+        
+        // Store in chrome.storage.local for viewer to access - using the correct key
+        await chrome.storage.local.set({
+            captionsToView: sessionData.transcript,
+            viewerData: {
+                transcriptArray: sessionData.transcript,
+                meetingTitle: sessionData.metadata.title,
+                attendeeReport: sessionData.attendeeReport,
+                isHistorical: true
+            }
+        });
+        
+        // Open viewer
+        window.open(chrome.runtime.getURL('viewer.html'), '_blank');
+        
+    } catch (error) {
+        console.error('[Session History] Failed to view session:', error);
+        alert('Failed to load session. It may have been corrupted.');
+    }
+}
+
+async function exportSession(sessionId) {
+    try {
+        const sessionManager = new SessionManager();
+        const sessionData = await sessionManager.loadSession(sessionId);
+        
+        // Use existing export logic - correct message type
+        const format = currentDefaultFormat;
+        await chrome.runtime.sendMessage({
+            message: "download_captions",  // Fixed: was "save_transcript"
+            transcriptArray: sessionData.transcript,
+            format: format,
+            meetingTitle: sessionData.metadata.title,
+            attendeeReport: sessionData.attendeeReport,
+            recordingStartTime: sessionData.metadata.timestamp
+        });
+        
+        // Visual feedback
+        const btn = document.querySelector(`.export-btn[data-id="${sessionId}"]`);
+        if (btn) {
+            const originalText = btn.textContent;
+            btn.textContent = '✓ Exported';
+            btn.style.background = '#28a745';
+            btn.style.color = 'white';
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.style.background = '';
+                btn.style.color = '';
+            }, 2000);
+        }
+        
+    } catch (error) {
+        console.error('[Session History] Failed to export session:', error);
+        alert('Failed to export session.');
+    }
+}
+
+async function deleteSession(sessionId) {
+    if (!confirm('Delete this session? This cannot be undone.')) return;
+    
+    try {
+        const sessionManager = new SessionManager();
+        await sessionManager.deleteSession(sessionId);
+        await loadSessionList(); // Refresh the list
+    } catch (error) {
+        console.error('[Session History] Failed to delete session:', error);
+    }
+}
+
+async function clearAllSessions() {
+    if (!confirm('Delete ALL saved sessions? This cannot be undone.')) return;
+    
+    try {
+        const sessionManager = new SessionManager();
+        await sessionManager.clearAllSessions();
+        UI_ELEMENTS.sessionList.style.display = 'none';
+        UI_ELEMENTS.sessionHistory.style.display = 'none';
+    } catch (error) {
+        console.error('[Session History] Failed to clear sessions:', error);
+    }
+}
+
+function getTimeAgo(date) {
+    const seconds = Math.floor((new Date() - date) / 1000);
+    const intervals = {
+        year: 31536000,
+        month: 2592000,
+        week: 604800,
+        day: 86400,
+        hour: 3600,
+        minute: 60
+    };
+    
+    for (const [unit, secondsInUnit] of Object.entries(intervals)) {
+        const interval = Math.floor(seconds / secondsInUnit);
+        if (interval >= 1) {
+            return `${interval} ${unit}${interval > 1 ? 's' : ''} ago`;
+        }
+    }
+    return 'just now';
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 // --- Initialization ---
 async function initializePopup() {
     await loadSettings();
     await loadCustomTemplates();
     setupEventListeners();
+    await initializeSessionHistory(); // Initialize session history
 
     const tab = await getActiveTeamsTab();
     if (!tab) {
