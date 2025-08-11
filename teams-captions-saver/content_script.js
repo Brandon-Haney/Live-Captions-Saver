@@ -683,12 +683,35 @@ function stopCaptureSession() {
                 attendeeData: attendeeData
             }
         });
+        
+        // Save to session history when meeting ends (even if < 5 minutes)
+        saveToSessionHistory();
     }
     
     // Stop attendee tracking
     stopAttendeeTracking();
     
     chrome.runtime.sendMessage({ message: "update_badge_status", capturing: false });
+}
+
+// Save current transcript to session history
+async function saveToSessionHistory() {
+    if (transcriptArray.length === 0) return;
+    
+    try {
+        // Use message passing to save session (content scripts can't import modules)
+        const attendeeReport = await getAttendeeReport();
+        await chrome.runtime.sendMessage({
+            message: "save_session_history",
+            transcriptArray: transcriptArray,
+            meetingTitle: meetingTitleOnStart || 'Untitled Meeting',
+            attendeeReport: attendeeReport
+        });
+        
+        console.log('[Teams Caption Saver] Session saved to history');
+    } catch (error) {
+        console.log('[Teams Caption Saver] Could not save to session history:', error);
+    }
 }
 
 // --- Automated Features ---
