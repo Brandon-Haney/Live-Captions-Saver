@@ -5,6 +5,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const speakerFiltersContainer = document.getElementById('speaker-filters');
     const copyAllBtn = document.getElementById('copy-all-btn');
     const saveAllBtn = document.getElementById('save-all-btn');
+    const historyBtn = document.getElementById('history-btn');
+    const sessionModal = document.getElementById('sessionModal');
+    const sessionListModal = document.getElementById('sessionListModal');
+    const closeModal = document.querySelector('.close-modal');
 
     // --- State ---
     let allCaptions = [];
@@ -482,13 +486,138 @@ document.addEventListener('DOMContentLoaded', () => {
         captionsContainer.addEventListener('click', handleCopyClick);
         copyAllBtn.addEventListener('click', handleCopyAllClick);
         saveAllBtn.addEventListener('click', handleSaveAllClick);
+        
+        // Session history handlers
+        historyBtn.addEventListener('click', showSessionHistory);
+        closeModal.addEventListener('click', () => sessionModal.style.display = 'none');
+        window.addEventListener('click', (e) => {
+            if (e.target === sessionModal) {
+                sessionModal.style.display = 'none';
+            }
+        });
+    }
+    
+    // --- Session History Functions ---
+    async function showSessionHistory() {
+        sessionModal.style.display = 'block';
+        await loadSessionHistory();
+    }
+    
+    async function loadSessionHistory() {
+        try {
+            // Check if SessionManager already exists or load it
+            if (typeof SessionManager === 'undefined') {
+                const script = document.createElement('script');
+                script.src = chrome.runtime.getURL('sessionManager.js');
+                document.head.appendChild(script);
+                
+                await new Promise(resolve => {
+                    script.onload = resolve;
+                    setTimeout(resolve, 200);
+                });
+            }
+            
+            const sessionManager = new SessionManager();
+            const sessions = await sessionManager.getSessionIndex();
+            
+            if (!sessions || sessions.length === 0) {
+                sessionListModal.innerHTML = '<div style="text-align: center; color: #999; padding: 20px;">No saved sessions available</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const session of sessions) {
+                const timeAgo = getTimeAgo(new Date(session.timestamp));
+                html += `
+                    <div class="session-item" onclick="loadSessionFromHistory('${session.id}')">
+                        <div class="session-title">${escapeHtml(session.title)}</div>
+                        <div class="session-meta">
+                            ${session.date} • ${session.duration} • ${session.captionCount} captions • ${timeAgo}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            sessionListModal.innerHTML = html;
+            
+        } catch (error) {
+            console.error('[Session History] Failed to load:', error);
+            sessionListModal.innerHTML = '<div style="text-align: center; color: #dc3545; padding: 20px;">Error loading sessions</div>';
+        }
+    }
+    
+    window.loadSessionFromHistory = async function(sessionId) {
+        try {
+            const sessionManager = new SessionManager();
+            const sessionData = await sessionManager.loadSession(sessionId);
+            
+            // Close modal
+            sessionModal.style.display = 'none';
+            
+            // Load the transcript
+            allCaptions = sessionData.transcript;
+            isLiveStreaming = false; // Historical data, not live
+            
+            // Update title
+            document.querySelector('h1').innerHTML = `${escapeHtml(sessionData.metadata.title)} <span style="font-size: 0.5em; color: #666;">(Historical)</span>`;
+            
+            // Calculate and display analytics
+            const analytics = calculateAnalytics(allCaptions);
+            if (analytics) {
+                displayAnalytics(analytics);
+            }
+            
+            // Render the transcript
+            renderCaptions(allCaptions);
+            populateSpeakerFilters(allCaptions);
+            
+            // Clear any live indicators
+            const liveIndicator = document.getElementById('live-indicator');
+            if (liveIndicator) {
+                liveIndicator.classList.remove('active');
+            }
+            
+        } catch (error) {
+            console.error('[Session History] Failed to load session:', error);
+            alert('Failed to load session');
+        }
+    }
+    
+    function getTimeAgo(date) {
+        const seconds = Math.floor((new Date() - date) / 1000);
+        const intervals = {
+            year: 31536000,
+            month: 2592000,
+            week: 604800,
+            day: 86400,
+            hour: 3600,
+            minute: 60
+        };
+        
+        for (const [unit, secondsInUnit] of Object.entries(intervals)) {
+            const interval = Math.floor(seconds / secondsInUnit);
+            if (interval >= 1) {
+                return `${interval} ${unit}${interval > 1 ? 's' : ''} ago`;
+            }
+        }
+        return 'just now';
     }
 
     async function initialize() {
         try {
             // Check if we have captions passed via storage (from popup)
-            const result = await chrome.storage.local.get('captionsToView');
-            const transcript = result.captionsToView;
+            const result = await chrome.storage.local.get(['captionsToView', 'viewerData']);
+            let transcript = result.captionsToView;
+            let viewerData = result.viewerData;
+            
+            // Use viewerData if captionsToView is not available
+            if (!transcript && viewerData && viewerData.transcriptArray) {
+                transcript = viewerData.transcriptArray;
+                // Update title if it's historical data
+                if (viewerData.isHistorical && viewerData.meetingTitle) {
+                    document.querySelector('h1').innerHTML = `${escapeHtml(viewerData.meetingTitle)} <span style="font-size: 0.5em; color: #666;">(Historical)</span>`;
+                }
+            }
 
             if (transcript && transcript.length > 0) {
                 // Calculate and display analytics
@@ -527,7 +656,7 @@ document.addEventListener('DOMContentLoaded', () => {
             captionsContainer.innerHTML = '<p class="status-message">Unable to load captions. Please try opening the extension popup again.</p>';
         } finally {
             // Clean up storage to prevent re-displaying on next open
-            chrome.storage.local.remove('captionsToView');
+            chrome.storage.local.remove(['captionsToView', 'viewerData']);
         }
     }
     

@@ -45,7 +45,8 @@
     {
       "resources": [
         "viewer.html",
-        "viewer.js"
+        "viewer.js",
+        "sessionManager.js"
       ],
       "matches": [
         "<all_urls>"
