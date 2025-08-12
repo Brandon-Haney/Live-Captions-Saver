@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "MS Teams Live Captions Saver",
-  "version": "4.5",
-  "description": "Capture and save live captions from Microsoft Teams meetings on the web. Features include various save formats, AI summaries, and automation.",
+  "name": "Live Captions Saver - Teams & Meet",
+  "version": "5.0",
+  "description": "Capture and save live captions from Microsoft Teams and Google Meet. Features include various save formats, AI summaries, and automation.",
   "homepage_url": "https://spdenis.com",
   "icons": {
     "16": "icon.png",
@@ -17,7 +17,8 @@
   ],
 
   "host_permissions": [
-    "https://teams.microsoft.com/*"
+    "https://teams.microsoft.com/*",
+    "https://meet.google.com/*"
   ],
 
   "action": {
@@ -33,9 +34,11 @@
   "content_scripts": [
     {
       "matches": [
-        "https://teams.microsoft.com/*"
+        "https://teams.microsoft.com/*",
+        "https://meet.google.com/*"
       ],
       "js": [
+        "platformConfig.js",
         "content_script.js"
       ]
     }

@@ -63,11 +63,35 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
-async function getActiveTeamsTab() {
+async function getActiveMeetingTab() {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const teamsTab = tabs.find(tab => tab.url?.startsWith("https://teams.microsoft.com"));
-    return teamsTab || null;
+    // Check for supported platforms
+    const supportedPlatforms = [
+        "https://teams.microsoft.com",
+        "https://meet.google.com"
+    ];
+    
+    const meetingTab = tabs.find(tab => {
+        return supportedPlatforms.some(platform => tab.url?.startsWith(platform));
+    });
+    
+    // Update platform info if we found a tab
+    if (meetingTab) {
+        const platformInfo = document.getElementById('platform-info');
+        if (platformInfo) {
+            if (meetingTab.url.includes('teams.microsoft.com')) {
+                platformInfo.textContent = 'Connected to Microsoft Teams';
+            } else if (meetingTab.url.includes('meet.google.com')) {
+                platformInfo.textContent = 'Connected to Google Meet';
+            }
+        }
+    }
+    
+    return meetingTab || null;
 }
+
+// Keep old function name for compatibility
+const getActiveTeamsTab = getActiveMeetingTab;
 
 async function formatTranscript(transcript, aliases, type = 'standard') {
     const processed = transcript.map(entry => ({
@@ -736,7 +760,7 @@ async function initializePopup() {
 
     const tab = await getActiveTeamsTab();
     if (!tab) {
-        UI_ELEMENTS.statusMessage.innerHTML = 'Please <a href="https://teams.microsoft.com" target="_blank">open a Teams tab</a> to use this extension.';
+        UI_ELEMENTS.statusMessage.innerHTML = 'Please open a <a href="https://teams.microsoft.com" target="_blank">Teams</a> or <a href="https://meet.google.com" target="_blank">Google Meet</a> tab to use this extension.';
         UI_ELEMENTS.statusMessage.style.color = '#dc3545';
         return;
     }
@@ -756,7 +780,7 @@ async function initializePopup() {
         // This error is expected when content script isn't loaded yet
         if (error.message.includes("Could not establish connection")) {
             console.log("Content script not ready. This is normal if the Teams page was just opened.");
-            UI_ELEMENTS.statusMessage.innerHTML = 'Please refresh your Teams tab (F5) to activate the extension.';
+            UI_ELEMENTS.statusMessage.innerHTML = 'Please refresh your meeting tab (F5) to activate the extension.';
             UI_ELEMENTS.statusMessage.style.color = '#ffc107';
             
             // Try to inject the content script if it's not loaded
@@ -770,12 +794,12 @@ async function initializePopup() {
                 setTimeout(() => initializePopup(), 500);
             } catch (injectError) {
                 console.log("Could not inject content script:", injectError.message);
-                UI_ELEMENTS.statusMessage.textContent = "Please refresh your Teams tab to activate the extension.";
+                UI_ELEMENTS.statusMessage.textContent = "Please refresh your meeting tab to activate the extension.";
                 UI_ELEMENTS.statusMessage.style.color = '#dc3545';
             }
         } else {
             console.error("Unexpected error:", error.message);
-            UI_ELEMENTS.statusMessage.textContent = "Connection error. Please refresh your Teams tab and try again.";
+            UI_ELEMENTS.statusMessage.textContent = "Connection error. Please refresh your meeting tab and try again.";
             UI_ELEMENTS.statusMessage.style.color = '#dc3545';
         }
     }

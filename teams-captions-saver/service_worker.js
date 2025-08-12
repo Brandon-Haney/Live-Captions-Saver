@@ -315,6 +315,64 @@ function calculateDuration(transcriptArray) {
     }
 }
 
+// Helper function to save session to history
+async function saveSessionToHistory(transcriptArray, meetingTitle, attendeeReport) {
+    const sessionId = `session_${Date.now()}`;
+    
+    // Create session metadata
+    const metadata = {
+        id: sessionId,
+        title: meetingTitle || 'Untitled Meeting',
+        timestamp: new Date().toISOString(),
+        date: new Date().toLocaleDateString(),
+        time: new Date().toLocaleTimeString(),
+        captionCount: transcriptArray.length,
+        duration: calculateDuration(transcriptArray),
+        speakers: [...new Set(transcriptArray.map(c => c.Name))].slice(0, 10),
+        attendees: attendeeReport?.attendeeList?.slice(0, 20),
+        attendeeCount: attendeeReport?.totalUniqueAttendees || 0,
+        preview: transcriptArray.slice(0, 3).map(c => `${c.Name}: ${c.Text.substring(0, 50)}`).join(' | ')
+    };
+    
+    // Save transcript in chunks to avoid size limits
+    const chunks = chunkArray(transcriptArray, 100);
+    for (let i = 0; i < chunks.length; i++) {
+        await chrome.storage.local.set({
+            [`${sessionId}_chunk_${i}`]: chunks[i]
+        });
+    }
+    metadata.chunkCount = chunks.length;
+    
+    // Save attendee report if exists
+    if (attendeeReport) {
+        await chrome.storage.local.set({
+            [`${sessionId}_attendees`]: attendeeReport
+        });
+    }
+    
+    // Update session index
+    const { session_index = [] } = await chrome.storage.local.get('session_index');
+    session_index.push(metadata);
+    
+    // Keep only last 10 sessions
+    if (session_index.length > 10) {
+        const toDelete = session_index.shift();
+        // Clean up old session data
+        const keysToDelete = [];
+        for (let i = 0; i < toDelete.chunkCount; i++) {
+            keysToDelete.push(`${toDelete.id}_chunk_${i}`);
+        }
+        keysToDelete.push(`${toDelete.id}_attendees`);
+        await chrome.storage.local.remove(keysToDelete);
+    }
+    
+    // Sort by timestamp (newest first)
+    session_index.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    await chrome.storage.local.set({ 'session_index': session_index });
+    console.log('[Service Worker] Session saved to history:', sessionId);
+}
+
 chrome.runtime.onInstalled.addListener(() => {
     updateBadge(false);
 });
@@ -328,6 +386,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const { speakerAliases } = await chrome.storage.session.get('speakerAliases');
 
         switch (message.message) {
+            case 'live_caption_update':
+            case 'live_attendee_update':
+                // Don't relay back to the sender (content script)
+                if (sender.tab && sender.tab.id) {
+                    // Try to find and relay to viewer tabs
+                    chrome.tabs.query({}, async (tabs) => {
+                        for (const tab of tabs) {
+                            // Skip the sender tab
+                            if (tab.id === sender.tab.id) continue;
+                            
+                            // Try to send to every tab - the viewer will handle it if it's the right one
+                            try {
+                                await chrome.tabs.sendMessage(tab.id, message);
+                            } catch (error) {
+                                // Most tabs won't have a listener, that's expected
+                            }
+                        }
+                    });
+                }
+                // Send response immediately to unblock content script
+                sendResponse({received: true});
+                break;
             case 'save_session_history':
                 // Save meeting to session history using chrome.storage directly
                 try {
@@ -425,6 +505,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         console.log(`Auto-saving transcript in ${formatToSave.toUpperCase()} format.`);
                         await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport);
                         console.log('Auto-save completed successfully.');
+                        
+                        // Also save to session history
+                        try {
+                            await saveSessionToHistory(message.transcriptArray, message.meetingTitle, message.attendeeReport);
+                            console.log('Session also saved to history.');
+                        } catch (sessionError) {
+                            console.error('Failed to save to session history:', sessionError);
+                        }
                     }
                 } catch (error) {
                     console.error('Auto-save failed:', error);
