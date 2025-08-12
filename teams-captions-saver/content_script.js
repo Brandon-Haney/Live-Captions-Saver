@@ -1,3 +1,20 @@
+// --- Platform Detection and Configuration ---
+let platformConfig = null;
+let SELECTORS = {};
+
+// Initialize platform configuration
+function initializePlatform() {
+    platformConfig = getCurrentPlatformConfig();
+    if (!platformConfig) {
+        console.error('[Caption Saver] Unsupported platform');
+        return false;
+    }
+    
+    SELECTORS = platformConfig.selectors;
+    console.log(`[Caption Saver] Initialized for ${platformConfig.name}`);
+    return true;
+}
+
 // --- Constants ---
 const TIMING = {
     BUTTON_CLICK_DELAY: 400,
@@ -5,35 +22,8 @@ const TIMING = {
     MAIN_LOOP_INTERVAL: 5000,
     OBSERVER_CHECK_INTERVAL: 10000,
     TOOLTIP_DISPLAY_DURATION: 1500,
-    ATTENDEE_UPDATE_INTERVAL: 60000, // Check attendees every minute
-    INITIAL_ATTENDEE_DELAY: 1500, // Wait 1.5s after meeting start before first check
-};
-
-const SELECTORS = {
-    CAPTIONS_RENDERER: "[data-tid='closed-caption-v2-window-wrapper'], [data-tid='closed-captions-renderer'], [data-tid*='closed-caption']",
-    CHAT_MESSAGE: '.fui-ChatMessageCompact',
-    AUTHOR: '[data-tid="author"]',
-    CAPTION_TEXT: '[data-tid="closed-caption-text"]',
-    LEAVE_BUTTONS: [
-        "button[data-tid='hangup-main-btn']",
-        "button[data-tid='hangup-leave-button']",
-        "button[data-tid='hangup-end-meeting-button']",
-        "div#hangup-button button",
-        "#hangup-button"
-    ].join(','),
-    MORE_BUTTON: "button[data-tid='more-button'], button[id='callingButtons-showMoreBtn']",
-    MORE_BUTTON_EXPANDED: "button[data-tid='more-button'][aria-expanded='true'], button[id='callingButtons-showMoreBtn'][aria-expanded='true']",
-    LANGUAGE_SPEECH_BUTTON: "div[id='LanguageSpeechMenuControl-id']",
-    TURN_ON_CAPTIONS_BUTTON: "div[id='closed-captions-button']",
-    // Attendee tracking selectors
-    ATTENDEE_TREE: "[role='tree'][aria-label='Attendees']",
-    ATTENDEE_ITEM: "[data-tid^='participantsInCall-']",
-    ATTENDEE_COUNT: "#roster-title-section-2",
-    ATTENDEE_NAME: "[id^='roster-avatar-img-']",
-    ATTENDEE_ROLE: "[data-tid='ts-roster-organizer-status']",
-    MEETING_CHAT: "#chat-pane-list",
-    CHAT_CONTROL_MESSAGE: ".fui-ChatControlMessage",
-    PEOPLE_BUTTON: "button[data-tid='calling-toolbar-people-button'], button[id='roster-button']",
+    ATTENDEE_UPDATE_INTERVAL: 60000,
+    INITIAL_ATTENDEE_DELAY: 1500,
 };
 
 // --- State ---
@@ -53,6 +43,9 @@ let autoEnableLastAttempt = 0;
 let autoEnableDebounceTimer = null;
 let autoSaveTriggered = false;
 let lastMeetingId = null;
+let captionRetryInProgress = false;
+// Store current user's name for Google Meet
+window.currentUserName = null;
 
 // --- Attendee Tracking State ---
 let attendeeUpdateInterval = null;
@@ -68,27 +61,25 @@ let attendeeData = {
 // --- Real-time Broadcasting ---
 function broadcastCaptionUpdate(data) {
     try {
+        // Send message and handle response
         chrome.runtime.sendMessage({
             message: "live_caption_update",
             ...data
-        }).catch(() => {
-            // Viewer might not be open, ignore error
         });
     } catch (error) {
-        // Silent fail if no listeners
+        // Silent fail - viewer might not be open
     }
 }
 
-function broadcastAttendeeUpdate(data) {
+async function broadcastAttendeeUpdate(data) {
     try {
-        chrome.runtime.sendMessage({
+        // Send message to all extension pages (viewer, popup, etc.)
+        await chrome.runtime.sendMessage({
             message: "live_attendee_update",
             ...data
-        }).catch(() => {
-            // Viewer might not be open, ignore error
         });
     } catch (error) {
-        // Silent fail if no listeners
+        // This is normal if viewer is not open - silent fail
     }
 }
 
@@ -180,24 +171,26 @@ function clearElementCache() {
     cachedElements.clear();
 }
 
-const isUserInMeeting = () => getCachedElement(SELECTORS.LEAVE_BUTTONS) !== null;
+const isUserInMeeting = () => {
+    if (!platformConfig) return false;
+    return platformConfig.isMeetingActive();
+};
 
 // --- Core Logic ---
 const processCaptionUpdates = ErrorHandler.wrap(function() {
-    const closedCaptionsContainer = getCachedElement(SELECTORS.CAPTIONS_RENDERER);
+    if (!platformConfig) return;
+    
+    const closedCaptionsContainer = getCachedElement(SELECTORS.captionsContainer);
     if (!closedCaptionsContainer) return;
 
-    const transcriptElements = closedCaptionsContainer.querySelectorAll(SELECTORS.CHAT_MESSAGE);
+    const transcriptElements = closedCaptionsContainer.querySelectorAll(SELECTORS.captionBlock);
 
     transcriptElements.forEach(element => {
         try {
-            const authorElement = element.querySelector(SELECTORS.AUTHOR);
-            const textElement = element.querySelector(SELECTORS.CAPTION_TEXT);
+            const captionData = platformConfig.getCaptionData(element);
+            if (!captionData) return;
 
-            if (!authorElement || !textElement) return;
-
-            const name = authorElement.innerText.trim();
-            const text = textElement.innerText.trim();
+            const { Name: name, Text: text, Time: time } = captionData;
             if (text.length === 0) return;
 
             let captionId = element.getAttribute('data-caption-id');
@@ -207,18 +200,58 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
             }
 
             const existingIndex = transcriptArray.findIndex(entry => entry.key === captionId);
-            const time = new Date().toLocaleTimeString();
 
             if (existingIndex !== -1) {
-                // Update existing entry if text has changed
-                if (transcriptArray[existingIndex].Text !== text) {
-                    transcriptArray[existingIndex].Text = text;
-                    transcriptArray[existingIndex].Time = time;
-                    // Broadcast update to viewer
-                    broadcastCaptionUpdate({
-                        type: 'update',
-                        caption: transcriptArray[existingIndex]
-                    });
+                const existingEntry = transcriptArray[existingIndex];
+                
+                // For Google Meet: Just update the existing caption with the new text
+                // Google Meet continuously updates the same caption element
+                if (platformConfig.name === 'Google Meet') {
+                    const speakerChanged = existingEntry.Name !== name;
+                    
+                    if (speakerChanged) {
+                        // New speaker - create a new caption entry
+                        const newCaptionId = `${captionId}_${Date.now()}`;
+                        const newCaption = { 
+                            Name: name, 
+                            Text: text, 
+                            Time: time, 
+                            key: newCaptionId 
+                        };
+                        transcriptArray.push(newCaption);
+                        
+                        // Broadcast new caption to viewer
+                        broadcastCaptionUpdate({
+                            type: 'new',
+                            caption: newCaption
+                        });
+                        
+                        // Update the element ID for next comparison
+                        element.setAttribute('data-caption-id', newCaptionId);
+                    } else {
+                        // Same speaker - just update the existing caption in place
+                        if (existingEntry.Text !== text) {
+                            existingEntry.Text = text;
+                            existingEntry.Time = time;
+                            
+                            // Broadcast update to viewer
+                            broadcastCaptionUpdate({
+                                type: 'update',
+                                caption: existingEntry
+                            });
+                        }
+                    }
+                } else {
+                    // For other platforms, use original logic
+                    if (existingEntry.Text !== text) {
+                        existingEntry.Text = text;
+                        existingEntry.Time = time;
+                        // Broadcast update to viewer
+                        broadcastCaptionUpdate({
+                            type: 'update',
+                            caption: existingEntry
+                        });
+                    }
                 }
             } else {
                 // Add new entry
@@ -263,7 +296,9 @@ function updateAttendeesFromTranscript() {
 }
 function updateAttendeeList() {
     try {
-        const attendeeTree = document.querySelector(SELECTORS.ATTENDEE_TREE);
+        // Platform-specific attendee list selector
+        const attendeeListSelector = SELECTORS.attendeeList || SELECTORS.ATTENDEE_TREE;
+        const attendeeTree = document.querySelector(attendeeListSelector);
         if (!attendeeTree) {
             console.log("Attendee tree not found, roster might not be open");
             // Fallback: Add speakers from transcript as attendees
@@ -271,7 +306,9 @@ function updateAttendeeList() {
             return;
         }
         
-        const attendeeItems = document.querySelectorAll(SELECTORS.ATTENDEE_ITEM);
+        // Platform-specific attendee item selector
+        const attendeeItemSelector = SELECTORS.attendeeItem || SELECTORS.ATTENDEE_ITEM;
+        const attendeeItems = document.querySelectorAll(attendeeItemSelector);
         const currentTime = new Date().toLocaleTimeString();
         
         // Clear current attendees for fresh update
@@ -280,29 +317,54 @@ function updateAttendeeList() {
         
         // Process each attendee
         attendeeItems.forEach(item => {
-            const nameElement = item.querySelector(SELECTORS.ATTENDEE_NAME);
-            const roleElement = item.querySelector(SELECTORS.ATTENDEE_ROLE);
+            // Use platform-specific attendee data extraction if available
+            let attendeeInfo = null;
             
-            if (nameElement) {
-                const name = nameElement.textContent.trim();
-                const role = roleElement ? roleElement.textContent.trim() : 'Attendee';
+            if (platformConfig && platformConfig.getAttendeeData) {
+                attendeeInfo = platformConfig.getAttendeeData(item);
+            }
+            
+            if (!attendeeInfo) {
+                // Fallback to generic extraction
+                const nameElement = item.querySelector(SELECTORS.attendeeName || SELECTORS.ATTENDEE_NAME || '.participant-name, .attendee-name');
+                const roleElement = item.querySelector(SELECTORS.attendeeRole || SELECTORS.ATTENDEE_ROLE || '.participant-role, .attendee-role');
+                
+                if (nameElement) {
+                    attendeeInfo = {
+                        name: nameElement.textContent.trim(),
+                        role: roleElement ? roleElement.textContent.trim() : 'Attendee'
+                    };
+                }
+            }
+            
+            if (attendeeInfo && attendeeInfo.name) {
+                const { name, role, isCurrentUser } = attendeeInfo;
+                
+                // Skip "(You)" suffix for Google Meet
+                const cleanName = name.replace(/\s*\(You\)\s*$/, '');
+                
+                // If this is the current user on Google Meet, store their name
+                if (isCurrentUser && platformConfig && platformConfig.name === 'Google Meet') {
+                    window.currentUserName = cleanName;
+                    console.log(`[Caption Saver] Detected current user name: ${cleanName}`);
+                }
                 
                 // Add to current attendees
-                attendeeData.currentAttendees.set(name, role);
+                attendeeData.currentAttendees.set(cleanName, role);
                 
                 // Track in all attendees
-                if (!attendeeData.allAttendees.has(name)) {
-                    attendeeData.allAttendees.add(name);
+                if (!attendeeData.allAttendees.has(cleanName)) {
+                    attendeeData.allAttendees.add(cleanName);
                     
                     // Add to history as new join
                     attendeeData.attendeeHistory.push({
-                        name,
+                        name: cleanName,
                         role,
                         action: 'joined',
                         time: currentTime
                     });
                     
-                    console.log(`New attendee detected: ${name} (${role})`);
+                    console.log(`New attendee detected: ${cleanName} (${role})`);
                 }
             }
         });
@@ -339,8 +401,31 @@ function updateAttendeeList() {
 
 async function tryOpenParticipantPanel() {
     try {
-        const peopleButton = document.querySelector(SELECTORS.PEOPLE_BUTTON);
-        if (peopleButton && peopleButton.getAttribute('aria-pressed') !== 'true') {
+        // Check if platform has its own openAttendeePanel method (Google Meet)
+        if (platformConfig && platformConfig.openAttendeePanel) {
+            const opened = await platformConfig.openAttendeePanel();
+            if (opened) {
+                console.log("Attendee panel opened via platform method");
+                await delay(500); // Wait for panel to fully open
+                return true;
+            }
+        }
+        
+        // For Google Meet, check if side panel is already open
+        if (platformConfig && platformConfig.isPanelOpen && platformConfig.isPanelOpen()) {
+            console.log("Participant panel is already open");
+            return true;
+        }
+        
+        // Fallback to generic method
+        const peopleBtnSelector = SELECTORS.peopleButton || SELECTORS.PEOPLE_BUTTON;
+        const peopleButton = document.querySelector(peopleBtnSelector);
+        
+        // Check button state - different platforms use different attributes
+        const isPressed = peopleButton?.getAttribute('aria-pressed') === 'true' || 
+                         peopleButton?.getAttribute('aria-expanded') === 'true';
+        
+        if (peopleButton && !isPressed) {
             console.log("Attempting to open participant panel for attendee tracking...");
             peopleButton.click();
             await delay(500); // Wait for panel to open
@@ -429,25 +514,84 @@ async function getAttendeeReport() {
 // --- Event-Driven Meeting Detection ---
 let meetingStateDebounceTimer = null;
 let captionsStateDebounceTimer = null;
+let leaveButtonListener = null;
 
 function setupMeetingObserver() {
     if (meetingObserver) return;
     
-    meetingObserver = new MutationObserver(() => {
-        // Debounce meeting state changes to prevent excessive calls
+    meetingObserver = new MutationObserver((mutations) => {
+        // For Google Meet, check if meeting ended message appeared
+        if (platformConfig && platformConfig.name === 'Google Meet') {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const h1 = node.querySelector?.('h1.roSPhc') || (node.tagName === 'H1' && node.classList?.contains('roSPhc') ? node : null);
+                        if (h1 && (h1.textContent?.includes('Your host ended the meeting') || 
+                                  h1.textContent?.includes('You left the meeting'))) {
+                            console.log('[Caption Saver] Meeting end message detected:', h1.textContent);
+                            wasInMeeting = true; // Ensure we were in a meeting
+                            setTimeout(() => {
+                                handleMeetingStateChange();
+                            }, 100);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Debounce other meeting state changes
         if (meetingStateDebounceTimer) {
             clearTimeout(meetingStateDebounceTimer);
         }
         meetingStateDebounceTimer = setTimeout(() => {
             handleMeetingStateChange();
+            
+            // For Google Meet, also setup leave button listener
+            if (platformConfig && platformConfig.name === 'Google Meet') {
+                setupLeaveButtonListener();
+            }
         }, 1000);
     });
+    
+    // Watch for different attributes based on platform
+    const attributeFilter = platformConfig && platformConfig.name === 'Google Meet' 
+        ? ['aria-label', 'data-panel-id', 'jsname']
+        : ['data-tid'];
     
     meetingObserver.observe(document.body, {
         childList: true,
         subtree: true,
-        attributeFilter: ['data-tid']
+        attributeFilter: attributeFilter
     });
+}
+
+function setupLeaveButtonListener() {
+    // Remove existing listener if any
+    if (leaveButtonListener) {
+        document.removeEventListener('click', leaveButtonListener);
+    }
+    
+    // Add listener for leave button clicks
+    leaveButtonListener = (event) => {
+        const target = event.target;
+        const leaveButton = target.closest('button[aria-label="Leave call"], button[aria-label*="End call"]');
+        
+        if (leaveButton) {
+            console.log('[Caption Saver] Leave button clicked, triggering immediate meeting end detection');
+            
+            // Mark that we were in a meeting before leaving
+            wasInMeeting = true;
+            
+            // Trigger meeting state change after a short delay for DOM to update
+            setTimeout(() => {
+                console.log('[Caption Saver] Checking meeting state after leave button click');
+                handleMeetingStateChange();
+            }, 500);
+        }
+    };
+    
+    document.addEventListener('click', leaveButtonListener, true);
 }
 
 function setupCaptionsObserver() {
@@ -463,15 +607,22 @@ function setupCaptionsObserver() {
         }, 1500);
     });
     
+    // Watch for different attributes based on platform
+    const attributeFilter = platformConfig && platformConfig.name === 'Google Meet' 
+        ? ['aria-label', 'class']
+        : ['data-tid'];
+    
     captionsObserver.observe(document.body, {
         childList: true,
         subtree: true,
-        attributeFilter: ['data-tid']
+        attributeFilter: attributeFilter
     });
 }
 
 const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     const nowInMeeting = isUserInMeeting();
+    
+    console.log(`[Caption Saver] Meeting state check - Was: ${wasInMeeting}, Now: ${nowInMeeting}`);
     
     if (wasInMeeting && !nowInMeeting) {
         console.log("Meeting transition detected: In -> Out. Checking for auto-save.");
@@ -539,8 +690,33 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         console.log("Meeting transition detected: Out -> In. Resetting auto-save state.");
         autoSaveTriggered = false;
         lastMeetingId = null;
+        captionRetryInProgress = false; // Reset retry flag
         // Start attendee tracking when entering meeting
         startAttendeeTracking();
+        
+        // For Google Meet, setup leave button listener and check if we need to auto-enable captions
+        if (platformConfig && platformConfig.name === 'Google Meet') {
+            setupLeaveButtonListener();
+            
+            // Try to auto-enable captions after a delay
+            setTimeout(async () => {
+                const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
+                if (autoEnableCaptions) {
+                    console.log('[Caption Saver] Checking if captions need to be auto-enabled...');
+                    const captionsEnabled = platformConfig.areCaptionsEnabled();
+                    
+                    if (!captionsEnabled) {
+                        console.log('[Caption Saver] Captions not enabled, attempting to enable...');
+                        await attemptAutoEnableCaptions();
+                    } else {
+                        console.log('[Caption Saver] Captions already enabled');
+                    }
+                }
+                
+                // Then check caption state
+                handleCaptionsStateChange();
+            }, 3000); // Give meeting UI more time to load
+        }
     }
     
     handleCaptionsStateChange();
@@ -555,24 +731,68 @@ const handleCaptionsStateChange = ErrorHandler.wrap(async function() {
         return;
     }
     
-    const captionsContainer = getCachedElement(SELECTORS.CAPTIONS_RENDERER);
-    if (captionsContainer) {
+    const captionsContainer = getCachedElement(SELECTORS.captionsContainer);
+    
+    // For Google Meet, check if captions container actually has caption blocks
+    let hasCaptions = false;
+    if (captionsContainer && platformConfig && platformConfig.name === 'Google Meet') {
+        const captionBlocks = captionsContainer.querySelectorAll(SELECTORS.captionBlock);
+        hasCaptions = captionBlocks.length > 0;
+    } else if (captionsContainer) {
+        hasCaptions = true; // For Teams, container presence is enough
+    }
+    
+    if (captionsContainer && hasCaptions) {
         startCaptureSession();
     } else {
-        stopCaptureSession();
-        
-        const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
-        if (autoEnableCaptions) {
-            // Use debounced version to prevent rapid firing
-            debouncedAutoEnableCaptions();
+        // For Google Meet, if captions are off and auto-enable is on, enable them
+        if (platformConfig && platformConfig.name === 'Google Meet') {
+            const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
+            if (autoEnableCaptions) {
+                // Check if captions are disabled
+                const captionsEnabled = platformConfig.areCaptionsEnabled();
+                console.log(`[Caption Saver] Google Meet captions enabled: ${captionsEnabled}`);
+                
+                if (!captionsEnabled) {
+                    console.log("[Caption Saver] Captions are off, auto-enabling...");
+                    debouncedAutoEnableCaptions();
+                } else {
+                    // Captions are on but container not found yet, wait and retry
+                    console.log("[Caption Saver] Captions enabled, waiting for container...");
+                    
+                    // Only retry if not already retrying
+                    if (!captionRetryInProgress) {
+                        captionRetryInProgress = true;
+                        setTimeout(() => {
+                            clearElementCache(); // Clear cache to get fresh element
+                            const retryContainer = getCachedElement(SELECTORS.captionsContainer);
+                            if (retryContainer) {
+                                startCaptureSession();
+                            } else {
+                                console.log("[Caption Saver] Caption container still not found");
+                            }
+                            captionRetryInProgress = false;
+                        }, 2000);
+                    }
+                }
+            }
+        } else {
+            // Teams logic
+            stopCaptureSession();
+            
+            const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
+            if (autoEnableCaptions) {
+                // Use debounced version to prevent rapid firing
+                debouncedAutoEnableCaptions();
+            }
         }
     }
 }, 'Captions state change handler');
 
 function ensureObserverIsActive() {
-    if (!capturing) return;
+    if (!capturing || !platformConfig) return;
 
-    const captionContainer = getCachedElement(SELECTORS.CAPTIONS_RENDERER);
+    const captionContainer = getCachedElement(SELECTORS.captionsContainer);
     
     // If the container doesn't exist or has changed, re-initialize the observer
     if (!captionContainer || captionContainer !== observedElement) {
@@ -609,9 +829,16 @@ async function startCaptureSession() {
 
     console.log("New caption session detected. Starting capture.");
     transcriptArray.length = 0;
-    chrome.storage.session.remove('speakerAliases');
+    
+    // Try to clear speaker aliases, but don't fail if storage is restricted
+    try {
+        await chrome.storage.session.remove('speakerAliases');
+    } catch (e) {
+        // Expected on Google Meet, ignore
+    }
 
     capturing = true;
+    wasInMeeting = true; // Ensure we know we're in a meeting when capturing starts
     meetingTitleOnStart = document.title;
     recordingStartTime = new Date();
     
@@ -638,18 +865,26 @@ function startPeriodicBackup() {
     backupInterval = setInterval(async () => {
         if (transcriptArray.length > 0) {
             try {
-                await chrome.storage.local.set({
-                    transcriptBackup: {
-                        transcript: transcriptArray,
-                        meetingTitle: meetingTitleOnStart,
-                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
-                        lastBackup: new Date().toISOString(),
-                        attendeeData: attendeeData
-                    }
-                });
-                console.log(`[Teams Caption Saver] Backup saved: ${transcriptArray.length} entries`);
+                // Check if we have access to storage API
+                if (chrome.storage && chrome.storage.local) {
+                    await chrome.storage.local.set({
+                        transcriptBackup: {
+                            transcript: transcriptArray,
+                            meetingTitle: meetingTitleOnStart,
+                            recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
+                            lastBackup: new Date().toISOString(),
+                            attendeeData: attendeeData
+                        }
+                    });
+                    console.log(`[Caption Saver] Backup saved: ${transcriptArray.length} entries`);
+                }
             } catch (error) {
-                console.error("[Teams Caption Saver] Backup failed:", error);
+                // Silently fail on Google Meet if storage is restricted
+                if (platformConfig && platformConfig.name === 'Google Meet') {
+                    // Expected on Google Meet in some contexts
+                } else {
+                    console.error("[Caption Saver] Backup failed:", error);
+                }
             }
         }
     }, 30000); // 30 seconds
@@ -684,8 +919,7 @@ function stopCaptureSession() {
             }
         });
         
-        // Save to session history when meeting ends (even if < 5 minutes)
-        saveToSessionHistory();
+        // Don't save to session history here - let auto-save handle it to prevent duplicates
     }
     
     // Stop attendee tracking
@@ -701,16 +935,26 @@ async function saveToSessionHistory() {
     try {
         // Use message passing to save session (content scripts can't import modules)
         const attendeeReport = await getAttendeeReport();
-        await chrome.runtime.sendMessage({
+        
+        // Clean transcript array (remove internal keys)
+        const cleanTranscript = getCleanTranscript();
+        
+        // Send message to service worker
+        const response = await chrome.runtime.sendMessage({
             message: "save_session_history",
-            transcriptArray: transcriptArray,
+            transcriptArray: cleanTranscript,
             meetingTitle: meetingTitleOnStart || 'Untitled Meeting',
             attendeeReport: attendeeReport
         });
         
-        console.log('[Teams Caption Saver] Session saved to history');
+        console.log('[Caption Saver] Session saved to history');
     } catch (error) {
-        console.log('[Teams Caption Saver] Could not save to session history:', error);
+        console.log('[Caption Saver] Could not save to session history:', error);
+        
+        // Try alternative: also trigger when auto-save happens
+        if (platformConfig && platformConfig.name === 'Google Meet') {
+            console.log('[Caption Saver] Will save session with auto-save');
+        }
     }
 }
 
@@ -735,51 +979,63 @@ async function attemptAutoEnableCaptions() {
     try {
         console.log("Starting auto-enable captions attempt...");
         
-        const moreButton = getCachedElement(SELECTORS.MORE_BUTTON);
-        if (!moreButton) {
-            console.error("Auto-enable FAILED: Could not find 'More' button.");
-            return;
-        }
-        
-        // Check if More menu is already expanded
-        const expandedMoreButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
-        if (!expandedMoreButton) {
-            console.log("Clicking More button...");
-            moreButton.click();
-            await delay(TIMING.BUTTON_CLICK_DELAY);
-        } else {
-            console.log("More menu already expanded, proceeding...");
-        }
-
-        const langAndSpeechButton = getCachedElement(SELECTORS.LANGUAGE_SPEECH_BUTTON);
-        if (!langAndSpeechButton) {
-            console.error("Auto-enable FAILED: Could not find 'Language and speech' menu item.");
-            // Close the More menu if we opened it
-            const currentExpandedButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
-            if (currentExpandedButton) {
-                currentExpandedButton.click();
+        // Check if platform has its own enableCaptions method (Google Meet)
+        if (platformConfig && platformConfig.enableCaptions) {
+            const enabled = await platformConfig.enableCaptions();
+            if (enabled) {
+                console.log("Auto-enable SUCCESS: Captions enabled via platform method.");
+                return;
             }
-            return;
         }
         
-        console.log("Clicking Language and speech...");
-        langAndSpeechButton.click();
-        await delay(TIMING.BUTTON_CLICK_DELAY);
+        // Fallback to Teams method
+        if (platformConfig && platformConfig.name === 'Microsoft Teams') {
+            const moreButton = getCachedElement(SELECTORS.MORE_BUTTON);
+            if (!moreButton) {
+                console.error("Auto-enable FAILED: Could not find 'More' button.");
+                return;
+            }
+            
+            // Check if More menu is already expanded
+            const expandedMoreButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
+            if (!expandedMoreButton) {
+                console.log("Clicking More button...");
+                moreButton.click();
+                await delay(TIMING.BUTTON_CLICK_DELAY);
+            } else {
+                console.log("More menu already expanded, proceeding...");
+            }
 
-        const turnOnCaptionsButton = getCachedElement(SELECTORS.TURN_ON_CAPTIONS_BUTTON);
-        if (turnOnCaptionsButton) {
-            console.log("Clicking Turn on live captions...");
-            turnOnCaptionsButton.click();
+            const langAndSpeechButton = getCachedElement(SELECTORS.LANGUAGE_SPEECH_BUTTON);
+            if (!langAndSpeechButton) {
+                console.error("Auto-enable FAILED: Could not find 'Language and speech' menu item.");
+                // Close the More menu if we opened it
+                const currentExpandedButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
+                if (currentExpandedButton) {
+                    currentExpandedButton.click();
+                }
+                return;
+            }
+            
+            console.log("Clicking Language and speech...");
+            langAndSpeechButton.click();
             await delay(TIMING.BUTTON_CLICK_DELAY);
-        } else {
-            console.error("Auto-enable FAILED: Could not find 'Turn on live captions' button.");
-        }
 
-        // Attempt to close the 'More' menu
-        const finalExpandedButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
-        if (finalExpandedButton) {
-            console.log("Closing More menu...");
-            finalExpandedButton.click();
+            const turnOnCaptionsButton = getCachedElement(SELECTORS.TURN_ON_CAPTIONS_BUTTON);
+            if (turnOnCaptionsButton) {
+                console.log("Clicking Turn on live captions...");
+                turnOnCaptionsButton.click();
+                await delay(TIMING.BUTTON_CLICK_DELAY);
+            } else {
+                console.error("Auto-enable FAILED: Could not find 'Turn on live captions' button.");
+            }
+
+            // Attempt to close the 'More' menu
+            const finalExpandedButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
+            if (finalExpandedButton) {
+                console.log("Closing More menu...");
+                finalExpandedButton.click();
+            }
         }
         
         console.log("Auto-enable captions attempt completed.");
@@ -834,6 +1090,12 @@ function cleanupObservers() {
         captionsObserver = null;
     }
     
+    // Remove leave button listener
+    if (leaveButtonListener) {
+        document.removeEventListener('click', leaveButtonListener, true);
+        leaveButtonListener = null;
+    }
+    
     // Clear all debounce timers
     if (meetingStateDebounceTimer) {
         clearTimeout(meetingStateDebounceTimer);
@@ -861,7 +1123,11 @@ function cleanupObservers() {
 window.addEventListener('beforeunload', cleanupObservers);
 
 // Initialize the system
-initializeEventDrivenSystem();
+if (initializePlatform()) {
+    initializeEventDrivenSystem();
+} else {
+    console.error('[Caption Saver] Failed to initialize - unsupported platform');
+}
 
 // --- Message Handling ---
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
@@ -913,6 +1179,15 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         case 'get_transcript_for_copying':
             sendResponse({ transcriptArray: getCleanTranscript() });
             break;
+            
+        case 'get_transcript_for_viewer':
+            // Send current transcript to viewer for initial load
+            sendResponse({ 
+                transcriptArray: getCleanTranscript(),
+                meetingTitle: meetingTitleOnStart,
+                isCapturing: capturing
+            });
+            break;
 
         case 'get_captions_for_viewing':
             if (transcriptArray.length > 0) {
@@ -938,7 +1213,10 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             return true; // Will respond asynchronously
         
         default:
-            console.log("Unhandled message received in content script:", request.message);
+            // Ignore live updates that might be relayed back
+            if (request.message !== 'live_caption_update' && request.message !== 'live_attendee_update') {
+                console.log("Unhandled message received in content script:", request.message);
+            }
             break;
     }
 

@@ -47,6 +47,20 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // --- Live Update Functions ---
     function appendNewCaption(caption) {
+        // Check if this is actually a new caption or just a fragment
+        // For Google Meet, check if we already have a recent caption from this speaker
+        const recentCaptionIndex = allCaptions.findIndex(c => 
+            c.Name === caption.Name && 
+            Math.abs(new Date(c.Time).getTime() - new Date(caption.Time).getTime()) < 10000 // Within 10 seconds
+        );
+        
+        if (recentCaptionIndex !== -1 && caption.Text.length < 50) {
+            // This looks like a fragment, update the existing caption instead
+            console.log('[Viewer] Fragment detected, updating existing caption instead of adding new');
+            updateExistingCaption(caption);
+            return;
+        }
+        
         // Add to data array
         allCaptions.push(caption);
         
@@ -93,18 +107,44 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function updateExistingCaption(caption) {
-        const captionElement = captionsContainer.querySelector(`[data-index="${allCaptions.findIndex(c => c.key === caption.key)}"]`);
-        if (captionElement) {
-            const textElement = captionElement.querySelector('.text');
-            if (textElement) {
-                textElement.textContent = caption.Text;
+        console.log('[Viewer] Updating caption with key:', caption.key);
+        
+        // First, try to find by key
+        let index = allCaptions.findIndex(c => c.key === caption.key);
+        
+        // If not found by key, try to find by speaker name (for Google Meet)
+        if (index === -1 && caption.Name) {
+            console.log('[Viewer] Key not found, searching by name:', caption.Name);
+            // Find the most recent caption from this speaker
+            for (let i = allCaptions.length - 1; i >= 0; i--) {
+                if (allCaptions[i].Name === caption.Name) {
+                    index = i;
+                    console.log('[Viewer] Found caption by name at index:', index);
+                    break;
+                }
             }
         }
         
-        // Update in data array
-        const index = allCaptions.findIndex(c => c.key === caption.key);
         if (index !== -1) {
-            allCaptions[index] = caption;
+            // Update in data array
+            allCaptions[index] = { ...allCaptions[index], ...caption };
+            
+            // Update in DOM
+            const captionElement = captionsContainer.querySelector(`[data-index="${index}"]`);
+            if (captionElement) {
+                const textElement = captionElement.querySelector('.text');
+                if (textElement) {
+                    console.log('[Viewer] Updating text from:', textElement.textContent, 'to:', caption.Text);
+                    textElement.textContent = caption.Text;
+                } else {
+                    console.log('[Viewer] Text element not found in caption');
+                }
+            } else {
+                console.log('[Viewer] Caption element not found at index:', index);
+            }
+        } else {
+            console.log('[Viewer] Caption not found for update, adding as new');
+            appendNewCaption(caption);
         }
     }
     
@@ -125,6 +165,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function queueUpdate(update) {
+        console.log('[Viewer] Queuing update:', update.type, update.caption?.Name);
         pendingUpdates.push(update);
         
         // Batch updates every 100ms for performance
@@ -642,14 +683,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 }, 1000);
             } else {
                 // Check if user navigated directly to the page
-                const isDirectNavigation = !result.captionsToView;
+                const isDirectNavigation = !result.captionsToView && !result.viewerData;
                 if (isDirectNavigation) {
                     captionsContainer.innerHTML = '<p class="status-message">No transcript data available.<br><br>Please use the "View Transcript" button in the extension popup to load a transcript.</p>';
                 } else {
                     captionsContainer.innerHTML = '<p class="status-message">Waiting for live captions...</p>';
-                    // Still setup live streaming even if no initial captions
-                    setupLiveStreaming();
                 }
+                
+                // Always setup event listeners and live streaming
+                setupEventListeners();
+                setupLiveStreaming();
             }
         } catch (error) {
             console.error("Error loading captions:", error);
@@ -702,43 +745,99 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // --- Live Streaming Setup ---
+    let messageListenerSetup = false;
+    
     async function setupLiveStreaming() {
-        // Check if content script is available and streaming
-        try {
-            const tabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
-            if (tabs.length > 0) {
-                const response = await chrome.tabs.sendMessage(tabs[0].id, { message: "viewer_ready" });
-                if (response && response.streaming) {
+        // Setup message listener for live updates FIRST (before trying to connect)
+        // This ensures we don't miss any broadcasts from the content script
+        if (!messageListenerSetup) {
+            messageListenerSetup = true;
+            chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
+                // For live updates, only process from service worker to avoid duplicates
+                // But allow other messages from content scripts (like initial connection)
+                if (sender.tab && (request.message === 'live_caption_update' || request.message === 'live_attendee_update')) {
+                    // This is a live update directly from content script - ignore it
+                    // We'll get it via service worker relay
+                    return;
+                }
+                
+                const source = sender.tab ? `tab ${sender.tab.id}` : 'service worker';
+                console.log('[Viewer] Received message:', request.message, 'from', source);
+                
+                // Log test messages
+                if (request.test) {
+                    console.log('[Viewer] Received TEST broadcast with live update');
+                }
+                if (request.message === "live_caption_update") {
                     isLiveStreaming = true;
-                    lastUpdateTime = Date.now(); // Initialize timestamp
+                    lastUpdateTime = Date.now(); // Update timestamp when receiving messages
+                    queueUpdate(request);
+                    
+                    // Remove "Meeting Ended" message if we're receiving updates again
+                    removeMeetingEndedMessage();
+                    
+                    console.log("[Viewer] Processing live caption update:", request.type, request.caption?.Name, request.caption?.Text?.substring(0, 30));
+                } else if (request.message === "live_attendee_update") {
+                    // Handle attendee updates if needed
+                    console.log("Attendee update:", request);
+                    lastUpdateTime = Date.now(); // Update timestamp for attendee updates too
+                } else if (request.message === "meeting_ended") {
+                    // Handle explicit meeting end signal
+                    isLiveStreaming = false;
                     updateLiveIndicator();
-                    console.log("Connected to live caption stream");
+                    await addMeetingEndedMessage();
+                }
+            });
+        }
+        
+        // Try to connect to content script if it exists
+        // Also request current transcript if viewer opened mid-meeting
+        try {
+            // Check for both Teams and Google Meet tabs
+            const teamsTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+            const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+            const tabs = [...teamsTabs, ...meetTabs];
+            
+            // Try each tab until we find one with a content script
+            for (const tab of tabs) {
+                try {
+                    // First, announce viewer is ready
+                    const response = await chrome.tabs.sendMessage(tab.id, { message: "viewer_ready" });
+                    if (response && response.streaming) {
+                        isLiveStreaming = true;
+                        lastUpdateTime = Date.now(); // Initialize timestamp
+                        updateLiveIndicator();
+                        // If captions container is empty, request current transcript
+                        if (allCaptions.length === 0 && response.captionCount > 0) {
+                            // Request the current transcript to populate viewer
+                            const transcriptResponse = await chrome.tabs.sendMessage(tab.id, { 
+                                message: "get_transcript_for_viewer" 
+                            });
+                            
+                            if (transcriptResponse && transcriptResponse.transcriptArray) {
+                                // Load the existing captions
+                                allCaptions = transcriptResponse.transcriptArray;
+                                renderCaptions(allCaptions);
+                                populateSpeakerFilters(allCaptions);
+                                
+                                // Calculate and display analytics
+                                const analytics = calculateAnalytics(allCaptions);
+                                if (analytics) {
+                                    displayAnalytics(analytics);
+                                }
+                            }
+                        }
+                        break; // Stop after finding first active tab
+                    }
+                } catch (tabError) {
+                    // This tab doesn't have content script, try next
+                    console.log(`Tab ${tab.id} not ready:`, tabError.message);
                 }
             }
         } catch (error) {
-            console.log("Content script not ready for streaming:", error);
+            console.log("Initial connection attempt failed (this is normal):", error.message);
+            // This is OK - we'll receive broadcasts anyway when content script sends updates
         }
-        
-        // Setup message listener for live updates
-        chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
-            if (request.message === "live_caption_update") {
-                isLiveStreaming = true;
-                lastUpdateTime = Date.now(); // Update timestamp when receiving messages
-                queueUpdate(request);
-                
-                // Remove "Meeting Ended" message if we're receiving updates again
-                removeMeetingEndedMessage();
-            } else if (request.message === "live_attendee_update") {
-                // Handle attendee updates if needed
-                console.log("Attendee update:", request);
-                lastUpdateTime = Date.now(); // Update timestamp for attendee updates too
-            } else if (request.message === "meeting_ended") {
-                // Handle explicit meeting end signal
-                isLiveStreaming = false;
-                updateLiveIndicator();
-                await addMeetingEndedMessage();
-            }
-        });
         
         // Setup auto-scroll toggle
         setupAutoScrollToggle();
@@ -769,7 +868,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Check if we're still receiving updates
         const timeSinceLastUpdate = Date.now() - lastUpdateTime;
-        if (timeSinceLastUpdate > 30000) { // 30 seconds without updates
+        if (timeSinceLastUpdate > 60000) { // 60 seconds without updates (increased from 30)
             isLiveStreaming = false;
             updateLiveIndicator();
             console.log("Lost connection to live stream");
@@ -778,7 +877,10 @@ document.addEventListener('DOMContentLoaded', () => {
             await addMeetingEndedMessage();
             
             // Try to reconnect
-            const tabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+            // Check for both Teams and Google Meet tabs
+            const teamsTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+            const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+            const tabs = [...teamsTabs, ...meetTabs];
             if (tabs.length > 0) {
                 try {
                     const response = await chrome.tabs.sendMessage(tabs[0].id, { message: "viewer_ready" });
