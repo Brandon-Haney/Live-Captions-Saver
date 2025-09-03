@@ -228,17 +228,38 @@ document.addEventListener('DOMContentLoaded', () => {
                 <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
             </svg>`;
         
+        // Professional SVG icons instead of emojis
+        const chatIconSVG = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+            </svg>`;
+        
+        const captionIconSVG = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="10" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>`;
+        
+        // Determine if this is a chat message
+        const isChat = item.Type === 'chat';
+        const typeClass = isChat ? 'chat-message' : 'caption-message';
+        const typeIcon = isChat ? chatIconSVG : captionIconSVG;
+        const typeLabel = isChat ? 'Chat' : 'Caption';
+        
         return `
-            <div class="caption" data-speaker="${escapeHtml(item.Name)}" data-index="${index}">
+            <div class="caption ${typeClass}" data-speaker="${escapeHtml(item.Name)}" data-index="${index}" data-type="${item.Type || 'caption'}">
                 <button class="copy-btn" title="Copy this line" aria-label="Copy this line">
                     ${copyIconSVG}
                     <span class="tooltip-text">Copy</span>
                 </button>
-                <div class="caption-header">
-                    <span class="name">${escapeHtml(item.Name)}</span>
-                    <span class="time">${escapeHtml(item.Time)}</span>
+                <span class="time">${escapeHtml(item.Time)}</span>
+                <div class="caption-content">
+                    <span class="message-type" title="${typeLabel}">${typeIcon}</span>
+                    <span class="caption-header">
+                        <span class="name">${escapeHtml(item.Name)}</span>
+                    </span>
+                    <span class="text">${escapeHtml(item.Text)}</span>
                 </div>
-                <p class="text">${escapeHtml(item.Text)}</p>
             </div>
         `;
     }
@@ -793,10 +814,11 @@ document.addEventListener('DOMContentLoaded', () => {
         // Try to connect to content script if it exists
         // Also request current transcript if viewer opened mid-meeting
         try {
-            // Check for both Teams and Google Meet tabs
+            // Check for Teams, Google Meet, and Zoom tabs
             const teamsTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
             const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
-            const tabs = [...teamsTabs, ...meetTabs];
+            const zoomTabs = await chrome.tabs.query({ url: "https://*.zoom.us/*" });
+            const tabs = [...teamsTabs, ...meetTabs, ...zoomTabs];
             
             // Try each tab until we find one with a content script
             for (const tab of tabs) {
@@ -877,10 +899,11 @@ document.addEventListener('DOMContentLoaded', () => {
             await addMeetingEndedMessage();
             
             // Try to reconnect
-            // Check for both Teams and Google Meet tabs
+            // Check for Teams, Google Meet, and Zoom tabs
             const teamsTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
             const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
-            const tabs = [...teamsTabs, ...meetTabs];
+            const zoomTabs = await chrome.tabs.query({ url: "https://*.zoom.us/*" });
+            const tabs = [...teamsTabs, ...meetTabs, ...zoomTabs];
             if (tabs.length > 0) {
                 try {
                     const response = await chrome.tabs.sendMessage(tabs[0].id, { message: "viewer_ready" });

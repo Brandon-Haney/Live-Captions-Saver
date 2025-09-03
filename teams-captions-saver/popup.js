@@ -14,6 +14,7 @@ const UI_ELEMENTS = {
     autoSaveOnEndToggle: document.getElementById('autoSaveOnEndToggle'),
     trackCaptionsToggle: document.getElementById('trackCaptionsToggle'),
     trackAttendeesToggle: document.getElementById('trackAttendeesToggle'),
+    chatCaptureToggle: document.getElementById('chatCaptureToggle'),
     autoOpenAttendeesToggle: document.getElementById('autoOpenAttendeesToggle'),
     timestampFormat: document.getElementById('timestampFormat'),
     filenamePattern: document.getElementById('filenamePattern'),
@@ -28,8 +29,22 @@ const UI_ELEMENTS = {
     // Session History Elements
     sessionHistory: document.getElementById('sessionHistory'),
     historyButton: document.getElementById('historyButton'),
-    sessionList: document.getElementById('sessionList')
+    sessionList: document.getElementById('sessionList'),
+    // Multi-Session Elements
+    sessionManager: document.getElementById('session-manager'),
+    sessionSelector: document.getElementById('session-selector'),
+    refreshSessions: document.getElementById('refresh-sessions'),
+    exportAllSessions: document.getElementById('export-all-sessions'),
+    sessionInfo: document.getElementById('session-info'),
+    sessionPlatform: document.getElementById('session-platform'),
+    sessionDuration: document.getElementById('session-duration'),
+    sessionCaptions: document.getElementById('session-captions'),
+    sessionAttendees: document.getElementById('session-attendees')
 };
+
+// --- Multi-Session State ---
+let activeSessions = [];
+let selectedSessionId = null;
 
 
 const MEETING_TYPE_PROMPTS = {
@@ -51,7 +66,7 @@ function safeExecute(fn, context = '', fallback = null) {
     try {
         return fn();
     } catch (error) {
-        console.error(`[Teams Caption Saver] ${context}:`, error);
+        console.error(`[Live Caption Saver] ${context}:`, error);
         return fallback;
     }
 }
@@ -68,7 +83,10 @@ async function getActiveMeetingTab() {
     // Check for supported platforms
     const supportedPlatforms = [
         "https://teams.microsoft.com",
-        "https://meet.google.com"
+        "https://meet.google.com",
+        "https://web.zoom.us",
+        "https://app.zoom.us",
+        "https://zoom.us"
     ];
     
     const meetingTab = tabs.find(tab => {
@@ -92,6 +110,220 @@ async function getActiveMeetingTab() {
 
 // Keep old function name for compatibility
 const getActiveTeamsTab = getActiveMeetingTab;
+
+// --- Multi-Session Management Functions ---
+async function loadActiveSessions() {
+    try {
+        const response = await chrome.runtime.sendMessage({ action: 'getActiveSessions' });
+        if (response && response.sessions) {
+            activeSessions = response.sessions;
+            updateSessionSelector();
+            
+            // Show session manager if multiple sessions
+            if (activeSessions.length > 1) {
+                UI_ELEMENTS.sessionManager.style.display = 'block';
+            } else if (activeSessions.length === 1) {
+                // Auto-select single session
+                selectedSessionId = activeSessions[0].sessionId;
+            }
+        }
+    } catch (error) {
+        console.error('Failed to load active sessions:', error);
+    }
+}
+
+function updateSessionSelector() {
+    const selector = UI_ELEMENTS.sessionSelector;
+    selector.innerHTML = '<option value="">Select a meeting session...</option>';
+    
+    activeSessions.forEach(session => {
+        const option = document.createElement('option');
+        option.value = session.sessionId;
+        
+        // Format session display
+        const platform = session.platform ? session.platform.charAt(0).toUpperCase() + session.platform.slice(1) : 'Unknown';
+        const title = session.meetingTitle || 'Untitled Meeting';
+        const captions = session.captionCount || 0;
+        
+        option.textContent = `${platform}: ${title} (${captions} captions)`;
+        
+        // Set color based on platform
+        if (session.platform === 'teams') {
+            option.style.color = '#6264a7';
+        } else if (session.platform === 'zoom') {
+            option.style.color = '#2d8cff';
+        } else if (session.platform === 'meet') {
+            option.style.color = '#00897b';
+        }
+        
+        selector.appendChild(option);
+    });
+    
+    // Restore selected session
+    if (selectedSessionId && activeSessions.find(s => s.sessionId === selectedSessionId)) {
+        selector.value = selectedSessionId;
+        updateSessionInfo(selectedSessionId);
+    }
+}
+
+function updateSessionInfo(sessionId) {
+    const session = activeSessions.find(s => s.sessionId === sessionId);
+    if (!session) {
+        UI_ELEMENTS.sessionInfo.style.display = 'none';
+        return;
+    }
+    
+    UI_ELEMENTS.sessionInfo.style.display = 'block';
+    
+    // Update platform with color coding
+    const platform = session.platform ? session.platform.charAt(0).toUpperCase() + session.platform.slice(1) : 'Unknown';
+    UI_ELEMENTS.sessionPlatform.textContent = platform;
+    
+    // Set platform color
+    if (session.platform === 'teams') {
+        UI_ELEMENTS.sessionPlatform.style.color = '#6264a7';
+    } else if (session.platform === 'zoom') {
+        UI_ELEMENTS.sessionPlatform.style.color = '#2d8cff';
+    } else if (session.platform === 'meet') {
+        UI_ELEMENTS.sessionPlatform.style.color = '#00897b';
+    }
+    
+    // Update duration
+    const duration = formatDuration(session.duration || 0);
+    UI_ELEMENTS.sessionDuration.textContent = duration;
+    
+    // Update caption count
+    UI_ELEMENTS.sessionCaptions.textContent = `${session.captionCount || 0} captions`;
+    
+    // Update attendee count
+    UI_ELEMENTS.sessionAttendees.textContent = `${session.attendeeCount || 0} attendees`;
+}
+
+function formatDuration(seconds) {
+    if (!seconds || seconds === 0) return '0 min';
+    
+    const minutes = Math.floor(seconds / 60);
+    
+    if (minutes < 60) {
+        return `${minutes} min`;
+    } else {
+        const hours = Math.floor(minutes / 60);
+        const mins = minutes % 60;
+        return `${hours}h ${mins}m`;
+    }
+}
+
+// Session selector change handler
+if (UI_ELEMENTS.sessionSelector) {
+    UI_ELEMENTS.sessionSelector.addEventListener('change', (e) => {
+        selectedSessionId = e.target.value;
+        if (selectedSessionId) {
+            updateSessionInfo(selectedSessionId);
+            // Update the status based on selected session
+            updateStatus();
+        } else {
+            UI_ELEMENTS.sessionInfo.style.display = 'none';
+        }
+    });
+}
+
+// Refresh sessions button handler
+if (UI_ELEMENTS.refreshSessions) {
+    UI_ELEMENTS.refreshSessions.addEventListener('click', async () => {
+        await loadActiveSessions();
+        updateStatus();
+    });
+}
+
+// Export All Sessions button handler
+if (UI_ELEMENTS.exportAllSessions) {
+    UI_ELEMENTS.exportAllSessions.addEventListener('click', async () => {
+        UI_ELEMENTS.statusMessage.textContent = 'Exporting all sessions...';
+        
+        try {
+            // Get all session data
+            const allSessionData = [];
+            for (const session of activeSessions) {
+                const response = await chrome.runtime.sendMessage({ 
+                    action: 'getSessionData', 
+                    sessionId: session.sessionId 
+                });
+                
+                if (response?.sessionData) {
+                    allSessionData.push({
+                        ...session,
+                        ...response.sessionData
+                    });
+                }
+            }
+            
+            if (allSessionData.length === 0) {
+                UI_ELEMENTS.statusMessage.textContent = 'No sessions to export';
+                return;
+            }
+            
+            // Create combined export
+            const combinedTranscript = [];
+            let combinedContent = `=== MULTI-SESSION EXPORT ===\n`;
+            combinedContent += `Total Sessions: ${allSessionData.length}\n`;
+            combinedContent += `Export Time: ${new Date().toLocaleString()}\n\n`;
+            
+            for (const sessionData of allSessionData) {
+                const platform = sessionData.platform ? sessionData.platform.charAt(0).toUpperCase() + sessionData.platform.slice(1) : 'Unknown';
+                const title = sessionData.meetingTitle || 'Untitled Meeting';
+                
+                combinedContent += `\n${'='.repeat(50)}\n`;
+                combinedContent += `SESSION: ${title}\n`;
+                combinedContent += `Platform: ${platform}\n`;
+                combinedContent += `Start Time: ${new Date(sessionData.startTime).toLocaleString()}\n`;
+                combinedContent += `Duration: ${formatDuration(sessionData.duration)}\n`;
+                combinedContent += `Captions: ${sessionData.captionCount || 0}\n`;
+                combinedContent += `Attendees: ${sessionData.attendeeCount || 0}\n`;
+                combinedContent += `${'='.repeat(50)}\n\n`;
+                
+                // Add attendee section if available
+                if (sessionData.attendeeReport && sessionData.attendeeReport.totalUniqueAttendees > 0) {
+                    combinedContent += '--- ATTENDEES ---\n';
+                    sessionData.attendeeReport.attendeeList.forEach(name => {
+                        combinedContent += `- ${name}\n`;
+                    });
+                    combinedContent += '\n';
+                }
+                
+                // Add transcript
+                if (sessionData.transcript && sessionData.transcript.length > 0) {
+                    combinedContent += '--- TRANSCRIPT ---\n';
+                    sessionData.transcript.forEach(entry => {
+                        const prefix = entry.Type === 'chat' ? '[CHAT] ' : '';
+                        combinedContent += `${prefix}[${entry.Time}] ${entry.Name}: ${entry.Text}\n`;
+                    });
+                }
+                
+                combinedContent += '\n';
+            }
+            
+            // Download the combined file
+            const blob = new Blob([combinedContent], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+            const filename = `MultiSession_Export_${timestamp}.txt`;
+            
+            chrome.downloads.download({
+                url: url,
+                filename: filename,
+                saveAs: true
+            });
+            
+            UI_ELEMENTS.statusMessage.textContent = `Exported ${allSessionData.length} sessions!`;
+            UI_ELEMENTS.statusMessage.style.color = '#28a745';
+            
+        } catch (error) {
+            console.error('Failed to export all sessions:', error);
+            UI_ELEMENTS.statusMessage.textContent = 'Export failed';
+            UI_ELEMENTS.statusMessage.style.color = '#dc3545';
+        }
+    });
+}
 
 async function formatTranscript(transcript, aliases, type = 'standard') {
     const processed = transcript.map(entry => ({
@@ -152,13 +384,16 @@ async function updateStatusUI({ capturing, captionCount, isInMeeting, attendeeCo
     }
 }
 
-function updateButtonStates(hasData) {
-    const buttons = [
+function updateButtonStates(hasData, isInMeeting) {
+    // Copy and Save buttons require actual data
+    const dataButtons = [
         UI_ELEMENTS.copyButton, UI_ELEMENTS.copyDropdownButton,
-        UI_ELEMENTS.saveButton, UI_ELEMENTS.saveDropdownButton,
-        UI_ELEMENTS.viewButton
+        UI_ELEMENTS.saveButton, UI_ELEMENTS.saveDropdownButton
     ];
-    buttons.forEach(btn => btn.disabled = !hasData);
+    dataButtons.forEach(btn => btn.disabled = !hasData);
+    
+    // View button should be enabled as soon as we're in a meeting
+    UI_ELEMENTS.viewButton.disabled = !isInMeeting && !hasData;
 }
 
 function updateSaveButtonText(format) {
@@ -288,6 +523,7 @@ async function loadSettings() {
     UI_ELEMENTS.autoSaveOnEndToggle.checked = !!settings.autoSaveOnEnd;
     UI_ELEMENTS.trackCaptionsToggle.checked = settings.trackCaptions !== false; // Default to true
     UI_ELEMENTS.trackAttendeesToggle.checked = settings.trackAttendees !== false; // Default to true
+    UI_ELEMENTS.chatCaptureToggle.checked = settings.chatCapture !== false; // Default to true
     if (UI_ELEMENTS.autoOpenAttendeesToggle) {
         UI_ELEMENTS.autoOpenAttendeesToggle.checked = !!settings.autoOpenAttendees;
         UI_ELEMENTS.autoOpenAttendeesToggle.disabled = !UI_ELEMENTS.trackAttendeesToggle.checked;
@@ -344,6 +580,19 @@ function setupEventListeners() {
                 UI_ELEMENTS.autoOpenAttendeesToggle.disabled = false;
             }
         }
+    });
+
+    UI_ELEMENTS.chatCaptureToggle.addEventListener('change', (e) => {
+        chrome.storage.sync.set({ chatCapture: e.target.checked });
+        // Send message to content script to enable/disable chat capture
+        getActiveTeamsTab().then(tab => {
+            if (tab) {
+                chrome.tabs.sendMessage(tab.id, { 
+                    message: "toggle_chat_capture", 
+                    enabled: e.target.checked 
+                });
+            }
+        });
     });
     
     if (UI_ELEMENTS.autoOpenAttendeesToggle) {
@@ -504,15 +753,30 @@ async function handleCopy(target) {
     const copyType = target.dataset.copyType;
     if (!copyType) return;
 
-    const tab = await getActiveTeamsTab();
-    if (!tab) return;
-    
     UI_ELEMENTS.statusMessage.textContent = "Preparing text to copy...";
     try {
-        const response = await chrome.tabs.sendMessage(tab.id, { message: "get_transcript_for_copying" });
-        if (response?.transcriptArray) {
+        let transcriptArray = null;
+        
+        // Check if we have a selected session (multi-meeting mode)
+        if (selectedSessionId) {
+            const response = await chrome.runtime.sendMessage({ 
+                action: 'getSessionData', 
+                sessionId: selectedSessionId 
+            });
+            if (response?.sessionData?.transcript) {
+                transcriptArray = response.sessionData.transcript;
+            }
+        } else {
+            // Fallback to current tab
+            const tab = await getActiveTeamsTab();
+            if (!tab) return;
+            const response = await chrome.tabs.sendMessage(tab.id, { message: "get_transcript_for_copying" });
+            transcriptArray = response?.transcriptArray;
+        }
+        
+        if (transcriptArray) {
             const { speakerAliases = {} } = await chrome.storage.session.get('speakerAliases');
-            const formattedText = await formatTranscript(response.transcriptArray, speakerAliases, copyType);
+            const formattedText = await formatTranscript(transcriptArray, speakerAliases, copyType);
             await navigator.clipboard.writeText(formattedText);
             UI_ELEMENTS.statusMessage.textContent = "Copied to clipboard!";
             UI_ELEMENTS.statusMessage.style.color = '#28a745';
@@ -527,10 +791,37 @@ async function handleSave(target) {
     const format = target.dataset.format;
     if (!format) return;
     
-    const tab = await getActiveTeamsTab();
-    if (tab) {
-        UI_ELEMENTS.statusMessage.textContent = `Saving as ${format === 'ai' ? 'AI' : format.toUpperCase()}...`;
-        chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format });
+    UI_ELEMENTS.statusMessage.textContent = `Saving as ${format === 'ai' ? 'AI' : format.toUpperCase()}...`;
+    
+    // Check if we have a selected session (multi-meeting mode)
+    if (selectedSessionId) {
+        // Get session data and send to service worker for download
+        const response = await chrome.runtime.sendMessage({ 
+            action: 'getSessionData', 
+            sessionId: selectedSessionId 
+        });
+        
+        if (response?.sessionData) {
+            const { transcript, attendeeReport, metadata } = response.sessionData;
+            const meetingTitle = metadata?.meetingTitle || 'Meeting';
+            const recordingStartTime = metadata?.startTime || new Date().toISOString();
+            
+            // Send to service worker to handle download
+            chrome.runtime.sendMessage({
+                message: "save_from_session",
+                transcriptArray: transcript,
+                meetingTitle: meetingTitle,
+                format: format,
+                recordingStartTime: recordingStartTime,
+                attendeeReport: attendeeReport
+            });
+        }
+    } else {
+        // Fallback to current tab
+        const tab = await getActiveTeamsTab();
+        if (tab) {
+            chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format });
+        }
     }
 }
 
@@ -563,7 +854,7 @@ async function initializeSessionHistory() {
         
         // Check if we have saved sessions and update button text
         const sessionManager = new SessionManager();
-        const sessions = await sessionManager.getSessionIndex();
+        const sessions = await sessionManager.getAllSessions();
         
         if (sessions && sessions.length > 0) {
             UI_ELEMENTS.historyButton.innerHTML = `📁 View Previous Sessions (${sessions.length})`;
@@ -578,7 +869,7 @@ async function initializeSessionHistory() {
 async function loadSessionList() {
     try {
         const sessionManager = new SessionManager();
-        const sessions = await sessionManager.getSessionIndex();
+        const sessions = await sessionManager.getAllSessions();
         const stats = await sessionManager.getStorageStats();
         
         if (!sessions || sessions.length === 0) {
@@ -588,21 +879,40 @@ async function loadSessionList() {
         
         let html = '';
         for (const session of sessions) {
-            const timeAgo = getTimeAgo(new Date(session.timestamp));
+            // Handle both old and new session formats
+            const sessionId = session.sessionId || session.id;
+            const title = session.meetingTitle || session.title || 'Untitled Meeting';
+            const startTime = session.startTime || session.timestamp;
+            const timeAgo = getTimeAgo(new Date(startTime));
+            const date = new Date(startTime).toLocaleDateString();
+            const duration = session.duration ? formatDuration(session.duration) : (session.duration || '0 min');
+            const captionCount = session.captionCount || 0;
+            const speakerCount = session.speakerCount || (session.speakers ? session.speakers.length : 0);
+            const platform = session.platform || 'unknown';
+            
+            // Platform color
+            let platformColor = '#6c757d';
+            if (platform === 'teams') platformColor = '#6264a7';
+            else if (platform === 'zoom') platformColor = '#2d8cff';
+            else if (platform === 'meet') platformColor = '#00897b';
+            
             html += `
-                <div class="session-item" data-id="${session.id}">
-                    <div class="session-title">${escapeHtml(session.title)}</div>
+                <div class="session-item" data-id="${sessionId}">
+                    <div class="session-title">
+                        <span style="color: ${platformColor}; font-weight: bold;">[${platform.toUpperCase()}]</span>
+                        ${escapeHtml(title)}
+                    </div>
                     <div class="session-meta">
-                        <span>${session.date} • ${session.duration} • ${session.captionCount} captions</span>
-                        <span>${session.speakers.length} speakers</span>
+                        <span>${date} • ${duration} • ${captionCount} captions</span>
+                        <span>${speakerCount} speakers</span>
                     </div>
                     <div class="session-meta" style="margin-top: 4px;">
                         <span style="font-size: 11px; color: #888;">${timeAgo}</span>
                     </div>
                     <div class="session-actions">
-                        <button class="session-btn view-btn" data-id="${session.id}">View</button>
-                        <button class="session-btn export-btn" data-id="${session.id}">Export</button>
-                        <button class="session-btn delete" data-id="${session.id}">Delete</button>
+                        <button class="session-btn view-btn" data-id="${sessionId}">View</button>
+                        <button class="session-btn export-btn" data-id="${sessionId}">Export</button>
+                        <button class="session-btn delete" data-id="${sessionId}">Delete</button>
                     </div>
                 </div>
             `;
@@ -642,14 +952,14 @@ async function loadSessionList() {
 async function viewSession(sessionId) {
     try {
         const sessionManager = new SessionManager();
-        const sessionData = await sessionManager.loadSession(sessionId);
+        const sessionData = await sessionManager.loadSessionData(sessionId);
         
         // Store in chrome.storage.local for viewer to access - using the correct key
         await chrome.storage.local.set({
             captionsToView: sessionData.transcript,
             viewerData: {
                 transcriptArray: sessionData.transcript,
-                meetingTitle: sessionData.metadata.title,
+                meetingTitle: sessionData.metadata?.meetingTitle || sessionData.metadata?.title || 'Untitled Meeting',
                 attendeeReport: sessionData.attendeeReport,
                 isHistorical: true
             }
@@ -667,7 +977,7 @@ async function viewSession(sessionId) {
 async function exportSession(sessionId) {
     try {
         const sessionManager = new SessionManager();
-        const sessionData = await sessionManager.loadSession(sessionId);
+        const sessionData = await sessionManager.loadSessionData(sessionId);
         
         // Use existing export logic - correct message type
         const format = currentDefaultFormat;
@@ -675,9 +985,9 @@ async function exportSession(sessionId) {
             message: "download_captions",  // Fixed: was "save_transcript"
             transcriptArray: sessionData.transcript,
             format: format,
-            meetingTitle: sessionData.metadata.title,
+            meetingTitle: sessionData.metadata?.meetingTitle || sessionData.metadata?.title || 'Meeting',
             attendeeReport: sessionData.attendeeReport,
-            recordingStartTime: sessionData.metadata.timestamp
+            recordingStartTime: sessionData.metadata?.startTime || sessionData.metadata?.timestamp || new Date().toISOString()
         });
         
         // Visual feedback
@@ -757,21 +1067,52 @@ async function initializePopup() {
     await loadCustomTemplates();
     setupEventListeners();
     await initializeSessionHistory(); // Initialize session history
+    
+    // Load active sessions for multi-meeting support
+    await loadActiveSessions();
 
     const tab = await getActiveTeamsTab();
     if (!tab) {
-        UI_ELEMENTS.statusMessage.innerHTML = 'Please open a <a href="https://teams.microsoft.com" target="_blank">Teams</a> or <a href="https://meet.google.com" target="_blank">Google Meet</a> tab to use this extension.';
-        UI_ELEMENTS.statusMessage.style.color = '#dc3545';
+        // Check if we have any active sessions from other tabs
+        if (activeSessions.length > 0) {
+            UI_ELEMENTS.statusMessage.textContent = `${activeSessions.length} active session(s). Select one above to manage.`;
+            UI_ELEMENTS.statusMessage.style.color = '#17a2b8';
+        } else {
+            UI_ELEMENTS.statusMessage.innerHTML = 'Please open a <a href="https://teams.microsoft.com" target="_blank">Teams</a>, <a href="https://meet.google.com" target="_blank">Google Meet</a>, or <a href="https://web.zoom.us" target="_blank">Zoom</a> tab to use this extension.';
+            UI_ELEMENTS.statusMessage.style.color = '#dc3545';
+        }
         return;
     }
 
     try {
+        // For Zoom, we might get multiple responses (main frame + iframe)
+        // Use the one that shows "in meeting" or has captions
         const status = await chrome.tabs.sendMessage(tab.id, { message: "get_status" });
+        
+        // If we get a "not in meeting" response, wait a bit to see if iframe responds
+        if (status && !status.isInMeeting && !status.capturing) {
+            // Try once more with a slight delay to get iframe response
+            await new Promise(resolve => setTimeout(resolve, 200));
+            try {
+                const secondStatus = await chrome.tabs.sendMessage(tab.id, { message: "get_status" });
+                if (secondStatus && (secondStatus.isInMeeting || secondStatus.capturing)) {
+                    // Use the iframe's response instead
+                    console.log('[Popup] Using iframe status (in meeting)');
+                    status.isInMeeting = secondStatus.isInMeeting;
+                    status.capturing = secondStatus.capturing;
+                    status.captionCount = Math.max(status.captionCount, secondStatus.captionCount);
+                    status.attendeeCount = Math.max(status.attendeeCount, secondStatus.attendeeCount);
+                }
+            } catch (e) {
+                // Ignore, use first response
+            }
+        }
+        
         if (status) {
             await updateStatusUI(status);
             // Enable buttons if we have either captions or attendees
             const hasData = status.captionCount > 0 || (status.attendeeCount > 0 && status.isInMeeting === false);
-            updateButtonStates(hasData);
+            updateButtonStates(hasData, status.isInMeeting);
             if (status.captionCount > 0) {
                 renderSpeakerAliases(tab);
             }

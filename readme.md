@@ -1,8 +1,8 @@
 ![](IMG/logo.png)
 
-# MS Teams Live Captions Saver Browser Extension v4.5
+# Live Captions Saver Browser Extension v5.1
 
-The MS Teams Live Captions Saver is a powerful Chrome extension that captures, saves, and analyzes live captions from Microsoft Teams meetings. With advanced features like AI-powered summaries, speaker tracking, attendee monitoring, and automated exports, it's the perfect tool for meeting documentation and accessibility.
+The Live Captions Saver is a powerful Chrome extension that captures, saves, and analyzes live captions from Microsoft Teams, Google Meet, and Zoom meetings. With advanced features like AI-powered summaries, speaker tracking, attendee monitoring, and automated exports, it's the perfect tool for meeting documentation and accessibility across all major video conferencing platforms.
 
 ## Key Features
 
@@ -23,13 +23,19 @@ The MS Teams Live Captions Saver is a powerful Chrome extension that captures, s
 
 ## Install from the Chrome Store
 
-[MS Teams Live Captions Saver - Chrome Web Store](https://chromewebstore.google.com/detail/ms-teams-live-captions-sa/ffjfmokaelmhincapcajcnaoelgmpoih)
+[Live Captions Saver - Chrome Web Store](https://chromewebstore.google.com/detail/ms-teams-live-captions-sa/ffjfmokaelmhincapcajcnaoelgmpoih)
+
+## Supported Platforms
+
+- **Microsoft Teams** - https://teams.microsoft.com
+- **Google Meet** - https://meet.google.com
+- **Zoom** - https://zoom.us (web client)
 
 ## Quick Start
 
 ### Using the Extension
 
-1. **Navigate to Microsoft Teams** in your browser: https://teams.microsoft.com
+1. **Navigate to your meeting platform** (Teams, Meet, or Zoom)
 2. **Join a meeting**
 3. **The extension will automatically enable live captions** (if auto-start is enabled)
 4. **Capture is automatic** - The extension starts recording once captions appear
@@ -129,6 +135,40 @@ Includes special formatting and instructions for AI analysis:
 - Action item extraction
 - Decision tracking
 
+## Consistent File Structure
+
+All exported files follow a consistent structure across all platforms (Teams, Meet, Zoom):
+
+### Standard File Structure
+```
+=== MEETING ATTENDEES ===
+Total Attendees: [number]
+Meeting Start: [date/time]
+
+Attendee List:
+- [Attendee Name 1]
+- [Attendee Name 2]
+...
+
+=== TRANSCRIPT ===
+[timestamp] Speaker Name: Caption text
+[CHAT] [timestamp] Speaker Name: Chat message
+...
+```
+
+### Features Consistent Across Platforms
+- **Attendee Tracking** - Lists all participants with join/leave history
+- **Caption Capture** - Real-time transcription with speaker identification  
+- **Chat Integration** - Chat messages marked with [CHAT] prefix
+- **Timestamp Formats** - Respects user's chosen format (12hr/24hr/relative)
+- **Speaker Aliases** - Custom names applied consistently
+- **Export Formats** - All formats available for all platforms
+
+### Platform-Specific Notes
+- **Teams**: Full feature support with robust attendee tracking
+- **Google Meet**: Speaker detection from captions and participant list
+- **Zoom**: Requires web client; attendee tracking via participant panel
+
 ## Manual Installation (Developer Mode)
 
 1. Download the `teams-captions-saver` folder
@@ -221,6 +261,6 @@ For issues, feature requests, or questions:
 
 ---
 
-**Version:** 4.5  
+**Version:** 5.1  
 **Last Updated:** August 2025  
 **Compatibility:** Chrome/Edge/Brave with Manifest V3

@@ -8,19 +8,19 @@ const PLATFORM_CONFIGS = {
             speakerName: '[data-tid="author"]',
             captionText: '[data-tid="closed-caption-text"]',
             hangupButton: "button[data-tid='hangup-main-btn'], button[data-tid='hangup-leave-button'], button[data-tid='hangup-end-meeting-button']",
-            attendeeList: "[role='tree'][aria-label='Attendees']",
-            attendeeItem: "[data-tid^='participantsInCall-']",
+            attendeeList: ".fui-FlatTree[role='tree'][aria-label='Attendees'], [data-tid='calling-roster'], [role='tree'][aria-label='Attendees']",
+            attendeeItem: "[data-cid='roster-participant'], [data-tid^='participantsInCall-']",
             // Teams-specific selectors for auto-enable
             MORE_BUTTON: "button[data-tid='more-button'], button[id='callingButtons-showMoreBtn']",
             MORE_BUTTON_EXPANDED: "button[data-tid='more-button'][aria-expanded='true'], button[id='callingButtons-showMoreBtn'][aria-expanded='true']",
             LANGUAGE_SPEECH_BUTTON: "div[id='LanguageSpeechMenuControl-id']",
             TURN_ON_CAPTIONS_BUTTON: "div[id='closed-captions-button']",
             PEOPLE_BUTTON: "button[data-tid='calling-toolbar-people-button'], button[id='roster-button']",
-            ATTENDEE_NAME: "[id^='roster-avatar-img-']",
-            ATTENDEE_ROLE: "[data-tid='ts-roster-organizer-status']",
+            ATTENDEE_NAME: "[title], .fui-TreeItemPersonaLayout__main .fui-StyledText, [id^='roster-avatar-img-']",
+            ATTENDEE_ROLE: "[data-tid='ts-roster-organizer-status'], .fui-TreeItemPersonaLayout__description .fui-StyledText",
             ATTENDEE_COUNT: "#roster-title-section-2",
-            ATTENDEE_TREE: "[role='tree'][aria-label='Attendees']",
-            ATTENDEE_ITEM: "[data-tid^='participantsInCall-']"
+            ATTENDEE_TREE: ".fui-FlatTree[role='tree'][aria-label='Attendees'], [data-tid='calling-roster'], [role='tree'][aria-label='Attendees']",
+            ATTENDEE_ITEM: "[data-cid='roster-participant'], [data-tid^='participantsInCall-']"
         },
         getCaptionData: (element) => {
             const author = element.querySelector('[data-tid="author"]');
@@ -35,11 +35,133 @@ const PLATFORM_CONFIGS = {
         },
         isMeetingActive: () => {
             return !!document.querySelector("button[data-tid='hangup-main-btn'], button[data-tid='hangup-leave-button']");
+        },
+        
+        // Chat capture methods for Teams
+        chatCapture: {
+            isSupported: () => true,
+            
+            detectCurrentPanel: () => {
+                const chatPanel = document.querySelector('#chat-pane-list, [data-tid="message-pane-list-viewport"]');
+                const peoplePanel = document.querySelector('[data-tid="calling-roster"], .fui-FlatTree[role="tree"][aria-label="Attendees"]');
+                
+                if (chatPanel && chatPanel.offsetParent !== null) {
+                    return 'chat';
+                } else if (peoplePanel && peoplePanel.offsetParent !== null) {
+                    return 'people';
+                }
+                return 'none';
+            },
+            
+            openChatPanel: async () => {
+                const chatButton = document.querySelector('[data-inp="chat-button"]');
+                if (chatButton) {
+                    chatButton.click();
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    return true;
+                }
+                return false;
+            },
+            
+            openPeoplePanel: async () => {
+                const peopleButton = document.querySelector('[data-tid="calling-roster-button"], button[aria-label*="People"]');
+                if (peopleButton) {
+                    peopleButton.click();
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    return true;
+                }
+                return false;
+            },
+            
+            isUserTyping: () => {
+                const chatInput = document.querySelector(
+                    'div[contenteditable="true"][data-tid="ckeditor"], ' +
+                    'div[contenteditable="true"][role="textbox"], ' +
+                    'div.ck-editor__editable, ' +
+                    'div[data-tid="chat-pane-compose"]'
+                );
+                
+                if (chatInput) {
+                    const hasFocus = document.activeElement === chatInput || chatInput.contains(document.activeElement);
+                    const hasContent = chatInput.textContent && chatInput.textContent.trim().length > 0;
+                    return hasFocus && hasContent;
+                }
+                
+                // Check for modal dialogs
+                const hasModal = document.querySelector('[role="dialog"]:not([aria-hidden="true"])');
+                return !!hasModal;
+            },
+            
+            getChatMessages: () => {
+                return document.querySelectorAll('[data-tid="chat-pane-message"]');
+            },
+            
+            getChatMessageData: (msgElement) => {
+                const messageId = msgElement.getAttribute('data-mid');
+                const container = msgElement.closest('.fui-unstable-ChatItem');
+                const authorEl = container?.querySelector('[data-tid="message-author-name"]');
+                const contentEl = msgElement.querySelector('[id^="content-"]');
+                
+                if (!contentEl || !contentEl.textContent) return null;
+                
+                return {
+                    id: messageId,
+                    author: authorEl?.textContent || 'Unknown',
+                    text: contentEl.textContent || contentEl.getAttribute('aria-label'),
+                    time: null // Will be replaced with formatted timestamp in content_script
+                };
+            }
         }
     },
     
     'meet.google.com': {
         name: 'Google Meet',
+        
+        // Function to get current user's name
+        getCurrentUserName: () => {
+            // Try multiple methods to find the user's name
+            
+            // Method 1: Look for "(You)" indicator in participants list
+            const youIndicators = document.querySelectorAll('.NnTWjc');
+            for (const indicator of youIndicators) {
+                if (indicator.textContent.includes('You')) {
+                    // Find the name element in the same container
+                    const container = indicator.closest('.jKwXVe, .cxdMu, .SKWIhd');
+                    if (container) {
+                        const nameEl = container.querySelector('.zWGUib');
+                        if (nameEl) {
+                            const name = nameEl.textContent.trim();
+                            if (name && name !== 'You') {
+                                window.currentUserName = name;
+                                console.log('[Caption Saver] Detected user name from participants:', name);
+                                return name;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Method 2: Check in contributors section
+            const contributorsList = document.querySelector('.RJRKn, .m3Uzve.RJRKn');
+            if (contributorsList) {
+                const yourItem = contributorsList.querySelector('.cxdMu[role="listitem"]');
+                if (yourItem) {
+                    const nameEl = yourItem.querySelector('.zWGUib');
+                    const youEl = yourItem.querySelector('.NnTWjc');
+                    if (nameEl && youEl && youEl.textContent.includes('You')) {
+                        const name = nameEl.textContent.trim();
+                        if (name && name !== 'You') {
+                            window.currentUserName = name;
+                            console.log('[Caption Saver] Detected user name from contributors:', name);
+                            return name;
+                        }
+                    }
+                }
+            }
+            
+            return window.currentUserName || 'You';
+        },
+        
         selectors: {
             // Caption selectors
             captionsContainer: '.ZPyPXe[aria-label="Captions"]',
@@ -86,8 +208,15 @@ const PLATFORM_CONFIGS = {
             
             // If speaker is "You", try to get the actual name
             if (speakerName === 'You') {
-                // First try stored name
-                if (window.currentUserName) {
+                // First try to get current user name from participants
+                const config = PLATFORM_CONFIGS['meet.google.com'];
+                if (config.getCurrentUserName) {
+                    const actualName = config.getCurrentUserName();
+                    if (actualName && actualName !== 'You') {
+                        speakerName = actualName;
+                    }
+                } else if (window.currentUserName) {
+                    // Fall back to stored name
                     speakerName = window.currentUserName;
                 } else {
                     // Try to get name from the avatar area in the caption
@@ -113,8 +242,16 @@ const PLATFORM_CONFIGS = {
             
             if (!nameElement) return null;
             
+            let attendeeName = nameElement.textContent.trim();
+            
+            // Store the actual name if this is the current user
+            if (isYou && attendeeName && attendeeName !== 'You') {
+                window.currentUserName = attendeeName;
+                console.log('[Caption Saver] Detected current user name from attendee list:', attendeeName);
+            }
+            
             return {
-                name: nameElement.textContent.trim(),
+                name: attendeeName,
                 role: roleElement ? roleElement.textContent.trim() : 'Participant',
                 isCurrentUser: isYou || false
             };
@@ -132,13 +269,13 @@ const PLATFORM_CONFIGS = {
             const inMeeting = hasLeaveButton && !leftMeetingPage && !hostEndedMeeting && !onLandingPage;
             
             if (!inMeeting && window.lastMeetingActiveState === true) {
-                console.log('[Caption Saver] Meeting ended detected:', {
-                    hasLeaveButton,
-                    leftMeetingPage,
-                    hostEndedMeeting,
-                    onLandingPage,
-                    pathname: window.location.pathname
-                });
+                // console.log('[Caption Saver] Meeting ended detected:', {
+                //     hasLeaveButton,
+                //     leftMeetingPage,
+                //     hostEndedMeeting,
+                //     onLandingPage,
+                //     pathname: window.location.pathname
+                // });
             }
             
             window.lastMeetingActiveState = inMeeting;
@@ -225,33 +362,183 @@ const PLATFORM_CONFIGS = {
                 return true;
             }
             return false;
+        },
+        
+        // Chat capture methods for Google Meet
+        chatCapture: {
+            isSupported: () => true,
+            
+            detectCurrentPanel: () => {
+                // Google Meet uses a side panel that can show different views
+                // Check which panel button is active (aria-expanded="true")
+                const chatButton = document.querySelector('button[aria-label*="Chat"][data-panel-id="2"]');
+                const peopleButton = document.querySelector('button[aria-label*="People"][data-panel-id="1"]');
+                
+                // Also check for visible chat messages as confirmation
+                const hasVisibleChat = document.querySelector('.RLrADb[data-message-id], .Ss4fHf');
+                
+                if (chatButton?.getAttribute('aria-expanded') === 'true' || hasVisibleChat) {
+                    return 'chat';
+                } else if (peopleButton?.getAttribute('aria-expanded') === 'true') {
+                    return 'people';
+                }
+                return 'none';
+            },
+            
+            openChatPanel: async () => {
+                const chatButton = document.querySelector('button[aria-label*="Chat"][data-panel-id="2"]');
+                if (chatButton && chatButton.getAttribute('aria-expanded') !== 'true') {
+                    chatButton.click();
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    return true;
+                }
+                return false;
+            },
+            
+            openPeoplePanel: async () => {
+                const peopleButton = document.querySelector('button[aria-label*="People"][data-panel-id="1"]');
+                if (peopleButton && peopleButton.getAttribute('aria-expanded') !== 'true') {
+                    peopleButton.click();
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    return true;
+                }
+                return false;
+            },
+            
+            isUserTyping: () => {
+                // Check for active chat input in Google Meet
+                const chatInput = document.querySelector('textarea[aria-label*="Send a message"], input[aria-label*="Send a message"]');
+                
+                if (chatInput) {
+                    const hasFocus = document.activeElement === chatInput;
+                    const hasContent = chatInput.value && chatInput.value.trim().length > 0;
+                    return hasFocus && hasContent;
+                }
+                
+                // Check for modal dialogs
+                const hasModal = document.querySelector('[role="dialog"]:not([aria-hidden="true"])');
+                return !!hasModal;
+            },
+            
+            getChatMessages: () => {
+                // Google Meet chat messages - look for the message containers
+                return document.querySelectorAll('.RLrADb[data-message-id], .Ss4fHf');
+            },
+            
+            getChatMessageData: (msgElement) => {
+                // Find the actual message container
+                let messageContainer = msgElement.querySelector('.RLrADb[data-message-id]');
+                if (!messageContainer && msgElement.classList.contains('RLrADb')) {
+                    messageContainer = msgElement;
+                }
+                if (!messageContainer) return null;
+                
+                // Get message ID
+                const messageId = messageContainer.getAttribute('data-message-id') || Date.now().toString();
+                
+                // Get parent container for author and time
+                const parentContainer = messageContainer.closest('.Ss4fHf');
+                
+                // Author name
+                const authorEl = parentContainer?.querySelector('.poVWob');
+                let authorName = authorEl?.textContent || 'Unknown';
+                
+                // If author is "You", get the actual name
+                if (authorName === 'You') {
+                    const config = PLATFORM_CONFIGS['meet.google.com'];
+                    if (config.getCurrentUserName) {
+                        const actualName = config.getCurrentUserName();
+                        if (actualName && actualName !== 'You') {
+                            authorName = actualName;
+                        }
+                    }
+                }
+                
+                // Message content - look inside the message container
+                const contentEl = messageContainer.querySelector('[jsname="dTKtvb"] > div, .ptNLrf > div');
+                
+                // Time
+                const timeEl = parentContainer?.querySelector('.MuzmKe');
+                
+                if (!contentEl || !contentEl.textContent) return null;
+                
+                return {
+                    id: messageId,
+                    author: authorName,
+                    text: contentEl.textContent.trim(),
+                    time: null // Will be replaced with formatted timestamp in content_script
+                };
+            }
         }
     },
     
-    'web.zoom.us': {
+    'zoom.us': {  // This will match both web.zoom.us and app.zoom.us
         name: 'Zoom',
+        // Store mapping of initials to full names
+        speakerNameCache: new Map(),
+        
+        // Build initial mapping from attendee list
+        buildSpeakerNameMapping: function() {
+            const participants = document.querySelectorAll('.participants-item-position .participants-li');
+            let mappingCount = 0;
+            
+            for (const participant of participants) {
+                const nameEl = participant.querySelector('.participants-item__display-name');
+                if (nameEl) {
+                    const fullName = nameEl.textContent.trim();
+                    if (fullName && fullName !== 'Unknown Speaker') {
+                        // Generate initials from the name
+                        const initials = fullName.split(' ')
+                            .filter(word => word.length > 0)
+                            .map(word => word.charAt(0).toUpperCase())
+                            .join('');
+                        
+                        if (initials && !this.speakerNameCache.has(initials)) {
+                            this.speakerNameCache.set(initials, fullName);
+                            mappingCount++;
+                        }
+                    }
+                }
+            }
+            
+            if (mappingCount > 0) {
+                console.log(`[Caption Saver] Built speaker name mapping for ${mappingCount} participants`);
+            }
+            
+            return mappingCount;
+        },
         selectors: {
             // Caption selectors
-            captionsContainer: '.transcript-list, .closed-caption-container',
-            captionBlock: '.transcript-message, .closed-caption-line',
-            speakerName: '.transcript-message-speaker, .closed-caption-speaker',
-            captionText: '.transcript-message-text, .closed-caption-text',
+            captionsContainer: '.live-transcription-subtitle__box, .transcript-list, .closed-caption-container, .closed-caption-box',
+            captionBlock: '#live-transcription-subtitle, .live-transcription-subtitle__box div[id="live-transcription-subtitle"], .transcript-message, .closed-caption-line, .closed-caption-box__message',
+            speakerName: '.transcript-message-speaker, .closed-caption-speaker, .closed-caption-box__name',
+            captionText: '.live-transcription-subtitle__item, .transcript-message-text, .closed-caption-text, .closed-caption-box__text',
+            speakerAvatar: '.zmu-data-selector-item__icon',
             
             // Meeting controls
-            hangupButton: 'button[aria-label*="Leave"], button[aria-label*="End"]',
-            turnOnCaptionsButton: 'button[aria-label*="Closed Caption"], button[aria-label*="Show captions"]',
-            turnOffCaptionsButton: null,  // Reserved for future use
+            hangupButton: 'button[aria-label="End"], button[aria-label="Leave"], .footer-button-base__button[aria-label*="End"], .footer-button-base__button[aria-label*="Leave"]',
+            moreButton: '.footer-button-base__button',
+            turnOnCaptionsButton: 'a[aria-label="Captions"], .more-button__item-box a[aria-label="Captions"], button[aria-label*="Closed Caption"], button[aria-label*="Show captions"], button[aria-label*="Show subtitle"]',
+            turnOffCaptionsButton: 'button[aria-label*="Hide subtitle"], button[aria-label*="Hide captions"]',
             
             // Attendee tracking selectors
-            peopleButton: null,  // Reserved for future use
-            attendeeList: 'div[aria-label="Participants panel"]',
-            attendeeItem: '.participants-item',
-            attendeeName: null,  // Reserved for future use
+            peopleButton: '#participant button[aria-label*="manage participants"], #participant button[aria-label*="close the manage participants"]',
+            attendeeList: '#participants-ul, .participants-list-container',
+            attendeeItem: '.participants-item-position .participants-li',
+            attendeeName: '.participants-item__display-name',
+            attendeeRole: '.participants-item__name-label',
+            attendeeCount: '.participants-header__title span[aria-label*="Participants"]',
+            
+            // Chat selectors
+            chatButton: '#chat button[aria-label*="open the chat"], #chat button[aria-label*="close the chat"]',
+            chatContainer: '.chat-container, .chat-virtualized-list',
+            chatMessage: '.chat-item-container',
+            chatSender: '.chat-item__sender',
+            chatText: '.new-chat-message__text-content ._rtfEditor_1n3rs_1',
+            chatTime: '.new-chat-item__chat-info-time-stamp',
             
             // Unused/Reserved selectors
-            sidePanel: null,
-            attendeeRole: null,
-            attendeeCount: null,
+            sidePanel: '.window-content-container',
             searchBox: null,
             moreButton: 'button[aria-label="More"]',
             
@@ -268,8 +555,99 @@ const PLATFORM_CONFIGS = {
             ATTENDEE_ITEM: null
         },
         getCaptionData: (element) => {
-            const speakerElement = element.querySelector('.transcript-message-speaker, .closed-caption-speaker');
-            const textElement = element.querySelector('.transcript-message-text, .closed-caption-text');
+            // Check if this is the live transcription format
+            const isLiveTranscription = element.id === 'live-transcription-subtitle' || 
+                                       element.querySelector('#live-transcription-subtitle') ||
+                                       element.classList.contains('live-transcription-subtitle__box');
+            
+            if (isLiveTranscription) {
+                // Find the text element - it should always have the caption text even if hidden
+                const textElement = element.querySelector('.live-transcription-subtitle__item') || 
+                                  element.querySelector('span[dir="auto"]');
+                
+                if (!textElement || !textElement.textContent.trim()) return null;
+                
+                // Get speaker name from the avatar element (the colored circle with initials)
+                let speakerName = 'Unknown Speaker';
+                const avatarElement = element.querySelector('.zmu-data-selector-item__icon');
+                
+                if (avatarElement) {
+                    // The avatar element contains initials as text content (e.g., "TS" for the user)
+                    const initials = avatarElement.textContent.trim().toUpperCase();
+                    
+                    if (initials) {
+                        // First check our cache
+                        const config = PLATFORM_CONFIGS['zoom.us'];
+                        if (config.speakerNameCache.has(initials)) {
+                            speakerName = config.speakerNameCache.get(initials);
+                        } else {
+                            // Try to find the active speaker's video tile to get their full name
+                            const activeVideoFooter = document.querySelector('.video-avatar__avatar-footer span[role="none"]');
+                            if (activeVideoFooter) {
+                                const fullName = activeVideoFooter.textContent.trim();
+                                // Check if this name's initials match
+                                const nameInitials = fullName.split(' ')
+                                    .filter(word => word.length > 0)
+                                    .map(word => word.charAt(0).toUpperCase())
+                                    .join('');
+                                if (nameInitials === initials) {
+                                    speakerName = fullName;
+                                    // Cache this mapping for future use
+                                    config.speakerNameCache.set(initials, fullName);
+                                    console.log(`[Caption Saver] Mapped initials '${initials}' to '${fullName}'`);
+                                }
+                            }
+                            
+                            // If still no match, try participants panel
+                            if (speakerName === 'Unknown Speaker') {
+                                const participants = document.querySelectorAll('.participants-item-position .participants-li');
+                                for (const participant of participants) {
+                                    const nameEl = participant.querySelector('.participants-item__display-name');
+                                    if (nameEl) {
+                                        const fullName = nameEl.textContent.trim();
+                                        // Check if initials match
+                                        const nameInitials = fullName.split(' ')
+                                            .filter(word => word.length > 0)
+                                            .map(word => word.charAt(0).toUpperCase())
+                                            .join('');
+                                        if (nameInitials === initials) {
+                                            speakerName = fullName;
+                                            // Cache this mapping
+                                            config.speakerNameCache.set(initials, fullName);
+                                            console.log(`[Caption Saver] Mapped initials '${initials}' to '${fullName}' from participants`);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // If still no match, use initials as fallback
+                            if (speakerName === 'Unknown Speaker') {
+                                speakerName = `Speaker (${initials})`;
+                            }
+                        }
+                    }
+                }
+                
+                // If still no name, try to get from current user info
+                if (speakerName === 'Unknown Speaker') {
+                    // Check if participants panel is open
+                    const currentUserElement = document.querySelector('.participants-item-position [aria-label*="me"] .participants-item__display-name');
+                    if (currentUserElement) {
+                        speakerName = currentUserElement.textContent.trim();
+                    }
+                }
+                
+                return {
+                    Name: speakerName,
+                    Text: textElement.textContent.trim(),
+                    Time: new Date().toLocaleTimeString()
+                };
+            }
+            
+            // Fallback to other caption formats
+            const speakerElement = element.querySelector('.transcript-message-speaker, .closed-caption-speaker, .closed-caption-box__name');
+            const textElement = element.querySelector('.live-transcription-subtitle__item, .transcript-message-text, .closed-caption-text, .closed-caption-box__text');
             if (!textElement) return null;
             
             return {
@@ -278,8 +656,451 @@ const PLATFORM_CONFIGS = {
                 Time: new Date().toLocaleTimeString()
             };
         },
+        getAttendeeData: (element) => {
+            const nameElement = element.querySelector('.participants-item__display-name');
+            const roleElement = element.querySelector('.participants-item__name-label');
+            const ariaLabel = element.querySelector('[role="application"]')?.getAttribute('aria-label') || '';
+            
+            if (!nameElement) return null;
+            
+            let attendeeName = nameElement.textContent.trim();
+            let role = 'Participant';
+            
+            // Also add this name to our speaker cache while we're scanning attendees
+            if (attendeeName && attendeeName !== 'Unknown Speaker') {
+                const config = PLATFORM_CONFIGS['zoom.us'];
+                const initials = attendeeName.split(' ')
+                    .filter(word => word.length > 0)
+                    .map(word => word.charAt(0).toUpperCase())
+                    .join('');
+                
+                if (initials && !config.speakerNameCache.has(initials)) {
+                    config.speakerNameCache.set(initials, attendeeName);
+                }
+            }
+            
+            // Extract role from label text or aria-label
+            if (roleElement) {
+                const roleText = roleElement.textContent.trim();
+                if (roleText.includes('Host')) role = 'Host';
+                else if (roleText.includes('Co-host')) role = 'Co-host';
+            } else if (ariaLabel.includes('Host')) {
+                role = 'Host';
+            }
+            
+            // Check if this is the current user
+            const isCurrentUser = roleElement?.textContent.includes('me') || ariaLabel.includes('me');
+            
+            return {
+                name: attendeeName,
+                role: role,
+                isCurrentUser: isCurrentUser
+            };
+        },
         isMeetingActive: () => {
-            return !!document.querySelector('button[aria-label*="Leave"], button[aria-label*="End"]');
+            // Check if we're on the Zoom home page - NOT a meeting
+            if (window.location.pathname === '/wc/home' || window.location.pathname.includes('/wc/home')) {
+                return false;
+            }
+            
+            // Check if we're on a Zoom meeting page
+            // Meeting URLs have patterns like /wc/{meetingId}/start or /wc/{meetingId}/join
+            const pathParts = window.location.pathname.split('/');
+            const isOnMeetingPage = (
+                // Check for /wc/{number}/start or /wc/{number}/join pattern
+                (pathParts[1] === 'wc' && pathParts[2] && !isNaN(pathParts[2]) && (pathParts[3] === 'start' || pathParts[3] === 'join')) ||
+                // Check for other meeting patterns
+                window.location.pathname.includes('/j/') ||
+                window.location.pathname.includes('/meeting')
+            );
+            
+            // Check for leave/end button and ensure we're not on the post-meeting page
+            const hasLeaveButton = !!document.querySelector('button[aria-label="End"], button[aria-label="Leave"], .footer-button-base__button[aria-label*="End"], .footer-button-base__button[aria-label*="Leave"]');
+            const onPostMeetingPage = window.location.pathname.includes('/postattendee') || 
+                                      document.querySelector('.post-meeting-container') ||
+                                      document.querySelector('.meeting-ended-container');
+            
+            // Also check for meeting controls presence (more reliable in iframe)
+            const hasMeetingControls = !!document.querySelector('.footer-button-base__button, .meeting-footer, .footer__btns-container');
+            
+            // Additional check: Look for video container or participant video
+            const hasVideoContainer = !!document.querySelector('.video-container, .speaker-active-container, .gallery-video-container__wrapper');
+            
+            // Check for the live transcription element as an indicator of being in a meeting
+            const hasTranscriptionElement = !!document.querySelector('.live-transcription-subtitle__box, #live-transcription-subtitle');
+            
+            // For Zoom, we consider it active if we have any strong indicators of being in a meeting
+            const inMeeting = ((isOnMeetingPage || hasLeaveButton || hasMeetingControls || hasVideoContainer || hasTranscriptionElement) && !onPostMeetingPage);
+            
+            // Log for debugging
+            if (window.debugZoomMeeting) {
+                console.log('[Zoom Meeting Detection]', {
+                    isOnMeetingPage,
+                    hasLeaveButton,
+                    hasMeetingControls,
+                    hasVideoContainer,
+                    hasTranscriptionElement,
+                    onPostMeetingPage,
+                    result: inMeeting
+                });
+            }
+            
+            return inMeeting;
+        },
+        areCaptionsEnabled: () => {
+            // Check if captions are enabled (they might be visually hidden but still present)
+            const liveTranscriptionBox = document.querySelector('.live-transcription-subtitle__box');
+            const transcriptElement = document.querySelector('#live-transcription-subtitle');
+            const captionsVisible = document.querySelector('.closed-caption-container, .closed-caption-box');
+            const hideButton = document.querySelector('button[aria-label*="Hide subtitle"], button[aria-label*="Hide captions"]');
+            
+            // Check if there's caption text present (even if hidden)
+            const hasCaptionText = document.querySelector('.live-transcription-subtitle__item')?.textContent?.trim();
+            
+            // Check if the caption container exists (even if empty)
+            const captionContainer = document.querySelector('.live-transcription-subtitle, .live-transcription-container, [class*="transcription"]');
+            
+            // For Zoom, the presence of the live transcription box is a strong indicator
+            const result = !!(liveTranscriptionBox || transcriptElement || captionsVisible || hideButton || hasCaptionText || captionContainer);
+            
+            // Log for debugging if needed
+            if (window.debugZoomCaptions) {
+                console.log('[Zoom Captions Detection]', {
+                    liveTranscriptionBox: !!liveTranscriptionBox,
+                    transcriptElement: !!transcriptElement,
+                    captionsVisible: !!captionsVisible,
+                    hideButton: !!hideButton,
+                    hasCaptionText: !!hasCaptionText,
+                    captionContainer: !!captionContainer,
+                    result
+                });
+            }
+            
+            return result;
+        },
+        async enableCaptions() {
+            try {
+                console.log('[Caption Saver] Starting Zoom caption enable process');
+                
+                // First check if captions are already enabled
+                if (this.areCaptionsEnabled()) {
+                    console.log('[Caption Saver] Captions are already enabled');
+                    return true;
+                }
+                
+                // Step 1: Find the More button in the meeting controls
+                let moreButton = null;
+                
+                // For Zoom in iframe - look for footer button
+                const footerButtons = document.querySelectorAll('.footer-button-base__button');
+                for (const btn of footerButtons) {
+                    const text = btn.textContent?.trim();
+                    const ariaLabel = btn.getAttribute('aria-label') || '';
+                    
+                    // Find the More button (not audio/video controls)
+                    if ((text === 'More' || ariaLabel.includes('More')) && 
+                        !ariaLabel.includes('audio') && 
+                        !ariaLabel.includes('video')) {
+                        moreButton = btn;
+                        console.log('[Caption Saver] Found More button in footer:', text || ariaLabel);
+                        break;
+                    }
+                }
+                
+                // Fallback: Look for button with "More" text
+                if (!moreButton) {
+                    const allButtons = document.querySelectorAll('button');
+                    for (const btn of allButtons) {
+                        if (btn.textContent?.trim() === 'More' && 
+                            !btn.closest('.home-header') &&  // Not in header
+                            btn.offsetParent !== null) {     // Visible
+                            moreButton = btn;
+                            console.log('[Caption Saver] Found More button by text');
+                            break;
+                        }
+                    }
+                }
+                
+                // Check if we need to click the More button or if menu is already open
+                const menuAlreadyOpen = document.querySelector('.WCL-footer-more-btn-container .dropdown-menu.show, .more-button__pop-menu.show');
+                
+                if (moreButton && !menuAlreadyOpen) {
+                    // console.log('[Caption Saver] Step 1: Clicking More button');
+                    
+                    // Try multiple click methods to ensure it works
+                    try {
+                        // Method 1: Direct click
+                        moreButton.click();
+                        
+                        // Method 2: Dispatch click event if first didn't work
+                        if (!document.querySelector('.dropdown-menu.show, .more-button__pop-menu.show')) {
+                            const clickEvent = new MouseEvent('click', {
+                                view: window,
+                                bubbles: true,
+                                cancelable: true
+                            });
+                            moreButton.dispatchEvent(clickEvent);
+                        }
+                    } catch (e) {
+                        console.log('[Caption Saver] Error clicking More button:', e);
+                    }
+                    
+                    await new Promise(resolve => setTimeout(resolve, 2000)); // Increased wait time
+                    
+                    // Verify menu opened
+                    const menuNowOpen = document.querySelector('.dropdown-menu.show, .more-button__pop-menu.show');
+                    if (!menuNowOpen) {
+                        console.log('[Caption Saver] Menu did not open after clicking More button');
+                        return false;
+                    }
+                    console.log('[Caption Saver] Menu opened successfully');
+                    
+                } else if (menuAlreadyOpen) {
+                    console.log('[Caption Saver] More menu is already open, proceeding to find Captions');
+                } else if (!moreButton) {
+                    // console.log('[Caption Saver] More button not found in meeting controls');
+                    return false;
+                }
+                
+                // Step 2: Find and click Captions option
+                await new Promise(resolve => setTimeout(resolve, 500)); // Wait for menu to fully render
+                
+                // Look for Captions link - the menu structure shows it's in .more-button__item-box
+                let captionsOption = null;
+                
+                // Primary method: Look for the Captions link directly
+                captionsOption = document.querySelector('.more-button__item-box a[aria-label="Captions"]');
+                
+                if (!captionsOption) {
+                    // Try finding via the SvgCaptions icon
+                    const svgCaptions = document.querySelector('.SvgCaptions');
+                    if (svgCaptions) {
+                        // Navigate from icon to the link
+                        const itemBox = svgCaptions.closest('.more-button__item-box');
+                        if (itemBox) {
+                            captionsOption = itemBox.querySelector('a[aria-label="Captions"]') || itemBox.querySelector('a');
+                            console.log('[Caption Saver] Found captions via SvgCaptions icon');
+                        }
+                    }
+                }
+                
+                if (!captionsOption) {
+                    // Fallback: Look through all dropdown items
+                    const dropdownItems = document.querySelectorAll('.dropdown-menu.show .dropdown-item');
+                    for (const item of dropdownItems) {
+                        if (item.getAttribute('aria-label') === 'Captions' || item.textContent.trim() === 'Captions') {
+                            captionsOption = item;
+                            console.log('[Caption Saver] Found captions in dropdown items');
+                            break;
+                        }
+                    }
+                }
+                
+                if (captionsOption) {
+                    // console.log('[Caption Saver] Step 2: Clicking Captions option');
+                    captionsOption.click();
+                    await new Promise(resolve => setTimeout(resolve, 700));
+                    
+                    // Step 3: Click on Show Captions in the submenu
+                    const showCaptionsButton = document.querySelector('a[aria-label*="Show Captions"], .dropdown-menu.show a[aria-label*="Show Captions"]');
+                    if (showCaptionsButton) {
+                        // console.log('[Caption Saver] Step 3: Clicking Show Captions');
+                        showCaptionsButton.click();
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        
+                        // Step 4: Handle the language selection dialog if it appears
+                        const languageDialog = document.querySelector('.zm-modal.lt-select-language, .new-LT__selector-language-dialog');
+                        if (languageDialog) {
+                            // console.log('[Caption Saver] Step 4: Language dialog detected, clicking Save');
+                            
+                            // Look for the Save button in the modal
+                            const saveButton = document.querySelector('.zm-modal-footer button.zm-btn--primary, .zm-modal-footer button:last-child');
+                            if (saveButton && (saveButton.textContent.includes('Save') || saveButton.textContent.includes('OK'))) {
+                                saveButton.click();
+                                await new Promise(resolve => setTimeout(resolve, 1000));
+                                // console.log('[Caption Saver] Language dialog saved');
+                            }
+                        }
+                        
+                        // Check if captions are now enabled
+                        const enabled = this.areCaptionsEnabled();
+                        // console.log('[Caption Saver] Captions enabled:', enabled);
+                        return enabled;
+                    } else {
+                        console.log('[Caption Saver] Could not find Show Captions button');
+                        
+                        // Try to close any open menus
+                        const closeButton = document.querySelector('.dropdown-menu.show .close, [aria-expanded="true"]');
+                        if (closeButton) closeButton.click();
+                    }
+                } else {
+                    console.log('[Caption Saver] Could not find Captions option in More menu');
+                    
+                    // Fallback to other caption button selectors for different Zoom layouts
+                    const directCaptionButton = document.querySelector('button[aria-label*="Closed Caption"], button[aria-label*="Show captions"], button[aria-label*="Show subtitle"]');
+                    if (directCaptionButton) {
+                        console.log('[Caption Saver] Using direct caption button (fallback)');
+                        directCaptionButton.click();
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        
+                        // Check for language dialog in fallback case too
+                        const languageDialog = document.querySelector('.zm-modal.lt-select-language');
+                        if (languageDialog) {
+                            const saveButton = document.querySelector('.zm-modal-footer button.zm-btn--primary');
+                            if (saveButton) {
+                                saveButton.click();
+                                await new Promise(resolve => setTimeout(resolve, 1000));
+                            }
+                        }
+                        
+                        return this.areCaptionsEnabled();
+                    }
+                }
+            } catch (error) {
+                console.error('[Caption Saver] Error enabling captions:', error);
+            }
+            
+            console.log('[Caption Saver] Could not enable captions on Zoom');
+            return false;
+        },
+        async openAttendeePanel() {
+            // Check if panel is already open
+            if (document.querySelector('.participants-section-container')) {
+                console.log('[Caption Saver] Zoom participant panel is already open');
+                return true;
+            }
+            
+            // Try to find and click the participants button
+            const peopleButton = document.querySelector('#participant button[aria-label*="participants" i], #participant button[aria-label*="manage" i]');
+            if (peopleButton) {
+                console.log('[Caption Saver] Opening attendee panel on Zoom');
+                peopleButton.click();
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                // Verify panel opened
+                if (document.querySelector('.participants-section-container')) {
+                    return true;
+                }
+            }
+            
+            console.log('[Caption Saver] Could not open Zoom participant panel');
+            return false;
+        },
+        
+        // Chat capture methods for Zoom
+        chatCapture: {
+            isSupported: () => true,
+            
+            detectCurrentPanel: () => {
+                // Check if chat panel is open
+                const chatPanel = document.querySelector('.chat-container, .chat-virtualized-list');
+                const participantsPanel = document.querySelector('.participants-section-container');
+                
+                // Zoom can have both open at the same time
+                if (chatPanel) {
+                    return 'chat';
+                } else if (participantsPanel) {
+                    return 'people';
+                }
+                return 'none';
+            },
+            
+            openChatPanel: async () => {
+                const chatButton = document.querySelector('#chat button[aria-label*="open the chat"]');
+                if (chatButton) {
+                    chatButton.click();
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    return true;
+                }
+                return false;
+            },
+            
+            openPeoplePanel: async () => {
+                const peopleButton = document.querySelector('#participant button[aria-label*="manage participants"]');
+                if (peopleButton && !document.querySelector('.participants-section-container')) {
+                    peopleButton.click();
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    return true;
+                }
+                return false;
+            },
+            
+            isUserTyping: () => {
+                // Check for active chat input in Zoom
+                const chatInput = document.querySelector('.chat-box__chat-textarea, [contenteditable="true"][aria-label*="chat"]');
+                
+                if (chatInput) {
+                    const hasFocus = document.activeElement === chatInput || chatInput.contains(document.activeElement);
+                    const hasContent = chatInput.textContent && chatInput.textContent.trim().length > 0;
+                    return hasFocus && hasContent;
+                }
+                
+                return false;
+            },
+            
+            getChatMessages: () => {
+                // Zoom chat messages
+                return document.querySelectorAll('.chat-item-container[data-id]');
+            },
+            
+            getChatMessageData: (msgElement) => {
+                // Get message ID
+                const messageId = msgElement.getAttribute('data-id') || Date.now().toString();
+                
+                // Get sender name - try multiple selectors
+                let senderEl = msgElement.querySelector('.chat-item__sender');
+                if (!senderEl) {
+                    senderEl = msgElement.querySelector('.chat-message-header__sender');
+                }
+                if (!senderEl) {
+                    senderEl = msgElement.querySelector('[class*="sender"]');
+                }
+                
+                let senderName = senderEl?.textContent?.trim();
+                
+                // If no sender found or sender is "You", try to get actual name
+                if (!senderName || senderName === 'You') {
+                    // Try to find current user's name from participants list
+                    const myParticipant = document.querySelector('.participants-li[aria-label*="me"]');
+                    if (myParticipant) {
+                        const myNameEl = myParticipant.querySelector('.participants-item__display-name');
+                        if (myNameEl) {
+                            senderName = myNameEl.textContent.trim();
+                        }
+                    }
+                    
+                    // If still no name, check if we stored it
+                    if (!senderName && window.currentUserName) {
+                        senderName = window.currentUserName;
+                    }
+                    
+                    // Final fallback
+                    if (!senderName) {
+                        senderName = 'You';
+                    }
+                }
+                
+                // Get message content - try multiple selectors
+                let contentEl = msgElement.querySelector('.new-chat-message__text-content ._rtfEditor_1n3rs_1');
+                if (!contentEl) {
+                    contentEl = msgElement.querySelector('[class*="chat-message__text"]');
+                }
+                if (!contentEl) {
+                    contentEl = msgElement.querySelector('[class*="message-content"]');
+                }
+                
+                // Get time
+                const timeEl = msgElement.querySelector('.new-chat-item__chat-info-time-stamp');
+                
+                if (!contentEl || !contentEl.textContent) return null;
+                
+                return {
+                    id: messageId,
+                    author: senderName,
+                    text: contentEl.textContent.trim(),
+                    time: null // Will be replaced with formatted timestamp in content_script
+                };
+            }
         }
     },
     
@@ -335,6 +1156,11 @@ const PLATFORM_CONFIGS = {
         },
         isMeetingActive: () => {
             return !!document.querySelector('button[aria-label*="Leave"], button[aria-label*="End meeting"]');
+        },
+        
+        // Chat capture not yet supported for Webex
+        chatCapture: {
+            isSupported: () => false  // Mark as not supported for now
         }
     }
 };
