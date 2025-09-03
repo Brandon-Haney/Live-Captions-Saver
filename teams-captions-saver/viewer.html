@@ -203,6 +203,49 @@
             border-bottom: 1px solid #f0f0f0;
             position: relative;
         }
+        
+        /* Chat message styling */
+        .chat-message {
+            background-color: #f0f7ff;
+            border-left: 3px solid #0078d4;
+            padding-left: 12px;
+            margin: 4px 0;
+        }
+        
+        .chat-message:hover {
+            background-color: #e6f3ff;
+        }
+        
+        /* Caption message styling */
+        .caption-message {
+            background-color: transparent;
+        }
+        
+        .caption-message:hover {
+            background-color: #f8f9fa;
+        }
+        
+        /* Message type icon */
+        .message-type {
+            display: inline-flex;
+            align-items: center;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        
+        .message-type svg {
+            width: 16px;
+            height: 16px;
+        }
+        
+        .chat-message .message-type svg {
+            stroke: #0078d4;
+        }
+        
+        .caption-message .message-type svg {
+            stroke: #666;
+        }
+        
         .caption:last-child {
             border-bottom: none;
         }
@@ -211,22 +254,31 @@
             opacity: 1;
         }
 
+        .caption-content {
+            display: block;
+            overflow: hidden; /* Prevents float from affecting layout */
+        }
         .caption-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: baseline;
-            margin-bottom: 6px;
+            display: inline;
+            margin-right: 6px;
         }
         .name {
             font-weight: bold;
             color: var(--primary-color);
         }
+        .name::after {
+            content: ":";
+            margin-right: 6px;
+        }
         .time {
             font-size: 0.85em;
             color: var(--secondary-text-color);
+            float: right;
+            margin-left: 10px;
         }
         .text {
             color: var(--primary-text-color);
+            display: inline;
         }
 
         .copy-btn {

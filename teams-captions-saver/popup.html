@@ -367,10 +367,31 @@
 </head>
 
 <body>
-    <h2>Live Captions Saver v5.0</h2>
-    <p class="subtitle" id="platform-info">Supporting Teams & Google Meet</p>
+    <h2>Live Captions Saver v5.1</h2>
+    <p class="subtitle" id="platform-info">Supporting Teams, Google Meet & Zoom</p>
     
-    <p id="manual-start-info" class="info-text">To begin, turn on live captions in your Teams meeting.</p>
+    <!-- Session Selector for Multiple Meetings -->
+    <div id="session-manager" style="display: none; width: 100%; margin: 10px 0;">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+            <select id="session-selector" style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: white; font-size: 14px;">
+                <option value="">Select a meeting session...</option>
+            </select>
+            <button id="refresh-sessions" style="padding: 8px 10px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 4px; cursor: pointer;" title="Refresh sessions">🔄</button>
+            <button id="export-all-sessions" style="padding: 8px 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;" title="Export all active sessions">Export All</button>
+        </div>
+        <div id="session-info" style="display: none; padding: 8px; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 4px; font-size: 12px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                <span id="session-platform" style="font-weight: bold;"></span>
+                <span id="session-duration" style="color: #6c757d;"></span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+                <span id="session-captions" style="color: #28a745;"></span>
+                <span id="session-attendees" style="color: #17a2b8;"></span>
+            </div>
+        </div>
+    </div>
+    
+    <p id="manual-start-info" class="info-text">To begin, turn on live captions in your meeting.</p>
 
     <p id="status-message">Checking status...</p>
 
@@ -452,6 +473,11 @@
                 <label class="toggle-switch"><input type="checkbox" id="trackAttendeesToggle"><span class="slider"></span></label>
             </div>
             <p class="small-info-text">Monitor who joins/leaves the meeting and include in exports.</p>
+            <div class="setting-item">
+                <label for="chatCaptureToggle" class="setting-label">Capture Chat Messages</label>
+                <label class="toggle-switch"><input type="checkbox" id="chatCaptureToggle"><span class="slider"></span></label>
+            </div>
+            <p class="small-info-text">Capture meeting chat messages and merge with transcript (Teams, Google Meet & Zoom).</p>
             
             <p class="settings-subheader">Automation Settings</p>
             <div class="setting-item">
@@ -463,7 +489,7 @@
                 <label for="autoOpenAttendeesToggle" class="setting-label">Auto-open Attendee Panel</label>
                 <label class="toggle-switch"><input type="checkbox" id="autoOpenAttendeesToggle"><span class="slider"></span></label>
             </div>
-            <p class="small-info-text">Automatically open roster panel for attendee tracking (requires "Track Meeting Attendees" to be enabled).</p>
+            <p class="small-info-text">Automatically open roster panel for attendee tracking (requires "Track Meeting Attendees" to be enabled). Note: This is disabled when Chat Capture is active to avoid panel conflicts.</p>
             <div class="setting-item">
                 <label for="timestampFormat" class="setting-label">Timestamp Format</label>
                 <select id="timestampFormat" style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">

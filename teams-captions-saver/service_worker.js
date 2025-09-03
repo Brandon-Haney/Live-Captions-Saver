@@ -1,3 +1,7 @@
+// --- Import SessionManager ---
+importScripts('sessionManager.js');
+const sessionManager = new SessionManager();
+
 // --- Utility Functions ---
 function getSanitizedMeetingName(fullTitle) {
     if (!fullTitle) return "Meeting";
@@ -52,12 +56,7 @@ function applyAliasesToAttendeeReport(attendeeReport, aliases = {}) {
 function formatAsTxt(transcript, attendeeReport) {
     let content = '';
     
-    console.log('[Teams Caption Saver] formatAsTxt called with:', {
-        transcriptLength: transcript?.length,
-        hasAttendeeReport: !!attendeeReport,
-        attendeeCount: attendeeReport?.totalUniqueAttendees || 0,
-        attendeeList: attendeeReport?.attendeeList || []
-    });
+    console.log('[formatAsTxt] Received attendeeReport:', attendeeReport);
     
     // Add attendee information if available
     if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
@@ -71,7 +70,11 @@ function formatAsTxt(transcript, attendeeReport) {
         content += '\n=== TRANSCRIPT ===\n';
     }
     
-    content += transcript.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n');
+    content += transcript.map(entry => {
+        // Add indicator for chat messages vs captions
+        const prefix = entry.Type === 'chat' ? '[CHAT] ' : '';
+        return `${prefix}[${entry.Time}] ${entry.Name}: ${entry.Text}`;
+    }).join('\n');
     return content;
 }
 
@@ -92,9 +95,11 @@ function formatAsMarkdown(transcript, attendeeReport) {
     
     let lastSpeaker = null;
     content += transcript.map(entry => {
+        // Add text indicator for chat messages
+        const typeIndicator = entry.Type === 'chat' ? '[CHAT] ' : '';
         if (entry.Name !== lastSpeaker) {
             lastSpeaker = entry.Name;
-            return `\n**${entry.Name}** (${entry.Time}):\n> ${entry.Text}`;
+            return `\n${typeIndicator}**${entry.Name}** (${entry.Time}):\n> ${entry.Text}`;
         }
         return `> ${entry.Text}`;
     }).join('\n').trim();
@@ -117,9 +122,11 @@ function formatAsDoc(transcript, attendeeReport) {
         body += '</ul><hr><h2>Transcript</h2>';
     }
     
-    body += transcript.map(entry =>
-        `<p><b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`
-    ).join('');
+    body += transcript.map(entry => {
+        // Add visual indicator for chat messages
+        const typePrefix = entry.Type === 'chat' ? '[CHAT] ' : '';
+        return `<p>${typePrefix}<b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`;
+    }).join('');
     
     return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Meeting Transcript</title></head><body>${body}</body></html>`;
 }
@@ -139,7 +146,11 @@ async function formatForAi(transcript, meetingName, recordingStartTime, attendee
         });
     }
     
-    const transcriptText = transcript.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n\n');
+    const transcriptText = transcript.map(entry => {
+        // Add indicator for chat messages in AI format
+        const prefix = entry.Type === 'chat' ? '[CHAT] ' : '';
+        return `${prefix}[${entry.Time}] ${entry.Name}: ${entry.Text}`;
+    }).join('\n\n');
 
     let finalContent = aiInstructions ? `${aiInstructions}\n\n---\n\n` : '';
     finalContent += `${metadataHeader}\n\n---\n\n${transcriptText}`;
@@ -266,11 +277,12 @@ async function createViewerTab(transcriptArray) {
 
 function updateBadge(isCapturing) {
     if (isCapturing) {
-        chrome.action.setBadgeText({ text: 'ON' });
-        chrome.action.setBadgeBackgroundColor({ color: '#28a745' }); // Green
+        // Red recording indicator (like a rec button)
+        chrome.action.setBadgeText({ text: '●' }); // Unicode filled circle
+        chrome.action.setBadgeBackgroundColor({ color: '#dc3545' }); // Red
     } else {
-        chrome.action.setBadgeText({ text: 'OFF' });
-        chrome.action.setBadgeBackgroundColor({ color: '#6c757d' }); // Grey
+        // Clear badge when not recording
+        chrome.action.setBadgeText({ text: '' });
     }
 }
 
@@ -381,11 +393,161 @@ chrome.runtime.onStartup.addListener(() => {
     updateBadge(false);
 });
 
+// Clear badge when meeting tabs are closed
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+    // When a tab is closed, check if any other tabs are capturing
+    chrome.tabs.query({}, (tabs) => {
+        const meetingDomains = ['teams.microsoft.com', 'meet.google.com', 'zoom.us', 'app.zoom.us'];
+        const hasMeetingTab = tabs.some(tab => 
+            tab.url && meetingDomains.some(domain => tab.url.includes(domain))
+        );
+        
+        if (!hasMeetingTab) {
+            // No meeting tabs open, clear the badge
+            updateBadge(false);
+        }
+    });
+});
+
+// Clear badge when navigating away from meeting pages
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.url) {
+        const meetingDomains = ['teams.microsoft.com', 'meet.google.com', 'zoom.us', 'app.zoom.us'];
+        const wasOnMeetingPage = meetingDomains.some(domain => changeInfo.url.includes(domain));
+        
+        if (!wasOnMeetingPage) {
+            // Navigated away from a meeting page, might need to clear badge
+            // Check if any other tabs are still on meeting pages
+            chrome.tabs.query({}, (tabs) => {
+                const hasMeetingTab = tabs.some(t => 
+                    t.id !== tabId && t.url && meetingDomains.some(domain => t.url.includes(domain))
+                );
+                
+                if (!hasMeetingTab) {
+                    updateBadge(false);
+                }
+            });
+        }
+    }
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
         const { speakerAliases } = await chrome.storage.session.get('speakerAliases');
 
+        // Handle session management actions first
+        if (message.action) {
+            switch (message.action) {
+                case 'createSession':
+                    // Get the actual tab ID from the sender
+                    const tabId = sender.tab ? sender.tab.id : message.tabId;
+                    const sessionId = sessionManager.createSession(tabId, message.platform, message.url);
+                    sendResponse({ sessionId });
+                    return;
+                    
+                case 'updateSession':
+                    const updated = await sessionManager.updateSession(message.sessionId, message.data);
+                    
+                    // If we have transcript data, save it
+                    if (message.data.transcript) {
+                        await sessionManager.saveSessionTranscript(
+                            message.sessionId,
+                            message.data.transcript,
+                            message.data.attendeeReport,
+                            message.data.chatMessages
+                        );
+                    }
+                    
+                    sendResponse({ success: updated });
+                    return;
+                    
+                case 'getActiveSessions':
+                    const sessions = sessionManager.getActiveSessions();
+                    sendResponse({ sessions });
+                    return;
+                    
+                case 'getSessionData':
+                    const sessionData = await sessionManager.loadSessionData(message.sessionId);
+                    sendResponse({ sessionData });
+                    return;
+                    
+                case 'endSession':
+                    const ended = await sessionManager.endSession(message.sessionId);
+                    sendResponse({ success: ended });
+                    return;
+            }
+        }
+
         switch (message.message) {
+            case 'save_from_session':
+                // Handle save from session data (multi-meeting support)
+                console.log('Saving transcript from session');
+                const { transcriptArray, meetingTitle, format, recordingStartTime, attendeeReport } = message;
+                
+                if (transcriptArray && transcriptArray.length > 0) {
+                    // Get speaker aliases if they exist
+                    const { speakerAliases = {} } = await chrome.storage.session.get('speakerAliases');
+                    
+                    await saveTranscript(
+                        meetingTitle || 'Meeting', 
+                        transcriptArray, 
+                        speakerAliases, 
+                        format || 'txt', 
+                        recordingStartTime || new Date().toISOString(), 
+                        false, 
+                        attendeeReport
+                    );
+                    
+                    sendResponse({ success: true });
+                } else {
+                    sendResponse({ success: false, error: 'No transcript data' });
+                }
+                return;
+                
+            case 'zoom_meeting_ended':
+                // Handle Zoom meeting end - retrieve data from storage
+                console.log('Zoom meeting ended signal received');
+                try {
+                    const { zoomMeetingEnded } = await chrome.storage.local.get('zoomMeetingEnded');
+                    if (zoomMeetingEnded && zoomMeetingEnded.shouldAutoSave) {
+                        const { autoSaveOnEnd, defaultSaveFormat } = await chrome.storage.sync.get(['autoSaveOnEnd', 'defaultSaveFormat']);
+                        
+                        if (autoSaveOnEnd && zoomMeetingEnded.transcript.length > 0) {
+                            console.log('Processing Zoom auto-save from stored data');
+                            console.log(`[Zoom] Auto-save data - Transcript: ${zoomMeetingEnded.transcript.length} items, Attendees: ${zoomMeetingEnded.attendeeReport?.totalUniqueAttendees || 0}`);
+                            const formatToSave = defaultSaveFormat || 'txt';
+                            
+                            // Get speaker aliases if they exist
+                            const { speakerAliases = {} } = await chrome.storage.session.get('speakerAliases');
+                            
+                            await saveTranscript(
+                                zoomMeetingEnded.meetingTitle, 
+                                zoomMeetingEnded.transcript, 
+                                speakerAliases, 
+                                formatToSave, 
+                                zoomMeetingEnded.recordingStartTime, 
+                                false, 
+                                zoomMeetingEnded.attendeeReport
+                            );
+                            
+                            console.log('Zoom auto-save completed');
+                            
+                            // Save to session history
+                            await saveSessionToHistory(
+                                zoomMeetingEnded.transcript, 
+                                zoomMeetingEnded.meetingTitle, 
+                                zoomMeetingEnded.attendeeReport
+                            );
+                            
+                            // Clean up storage
+                            await chrome.storage.local.remove('zoomMeetingEnded');
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error processing Zoom meeting end:', error);
+                }
+                break;
+                
             case 'live_caption_update':
             case 'live_attendee_update':
                 // Don't relay back to the sender (content script)
@@ -476,12 +638,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
                 
             case 'download_captions':
-                console.log('[Teams Caption Saver] Download request received:', {
-                    format: message.format,
-                    transcriptCount: message.transcriptArray?.length,
-                    hasAttendeeReport: !!message.attendeeReport,
-                    attendeeCount: message.attendeeReport?.totalUniqueAttendees || 0
-                });
                 await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, message.format, message.recordingStartTime, true, message.attendeeReport);
                 break;
 
@@ -539,7 +695,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 
             case 'error_logged':
                 // Central error logging - could send to analytics service
-                console.warn('[Teams Caption Saver] Error logged:', message.error);
+                console.warn('[Live Caption Saver] Error logged:', message.error);
                 // Could implement error reporting here
                 break;
         }

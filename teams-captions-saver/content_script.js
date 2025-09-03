@@ -1,6 +1,8 @@
 // --- Platform Detection and Configuration ---
 let platformConfig = null;
 let SELECTORS = {};
+let sessionManager = null;
+let currentSessionId = null;
 
 // Initialize platform configuration
 function initializePlatform() {
@@ -11,8 +13,36 @@ function initializePlatform() {
     }
     
     SELECTORS = platformConfig.selectors;
-    console.log(`[Caption Saver] Initialized for ${platformConfig.name}`);
+    // console.log(`[Caption Saver] Initialized for ${platformConfig.name}`);
+    
+    // Initialize SessionManager when platform is initialized
+    initializeSessionManager();
     return true;
+}
+
+// Initialize SessionManager for this tab
+async function initializeSessionManager() {
+    try {
+        // Get or create a session for this tab
+        const tabId = window.location.href; // Use URL as tab identifier for content script
+        const platform = platformConfig?.name?.toLowerCase() || 'unknown';
+        const url = window.location.href;
+        
+        // Request session creation from service worker
+        chrome.runtime.sendMessage({
+            action: 'createSession',
+            tabId: tabId,
+            platform: platform,
+            url: url
+        }, (response) => {
+            if (response && response.sessionId) {
+                currentSessionId = response.sessionId;
+                console.log(`[Caption Saver] Session initialized: ${currentSessionId}`);
+            }
+        });
+    } catch (error) {
+        console.error('[Caption Saver] Failed to initialize SessionManager:', error);
+    }
 }
 
 // --- Constants ---
@@ -23,7 +53,10 @@ const TIMING = {
     OBSERVER_CHECK_INTERVAL: 10000,
     TOOLTIP_DISPLAY_DURATION: 1500,
     ATTENDEE_UPDATE_INTERVAL: 60000,
-    INITIAL_ATTENDEE_DELAY: 1500,
+    INITIAL_ATTENDEE_DELAY: 3000, // Increased delay for Zoom to ensure panel is open
+    CHAT_CHECK_INTERVAL: 60000, // Check chat every 60 seconds
+    PANEL_SWITCH_DELAY: 1500,    // Wait after panel switch
+    TYPING_RECHECK_DELAY: 10000, // Recheck if user was typing
 };
 
 // --- State ---
@@ -58,29 +91,79 @@ let attendeeData = {
     meetingStartTime: null,
 };
 
-// --- Real-time Broadcasting ---
-function broadcastCaptionUpdate(data) {
+// --- Chat Capture State ---
+let chatCaptureState = {
+    enabled: false,
+    capturedMessageIds: new Set(),
+    lastChatCheck: null,
+    isRotating: false,
+    chatCheckInterval: null,
+    currentPanel: 'unknown',
+    sessionStartTime: null,  // Track when this capture session started
+    initialScanComplete: false,  // Track if we've done initial scan of existing messages
+    initialMessagesSkipped: 0  // Count of pre-existing messages we skipped
+};
+
+// --- Safe Message Sending Helpers ---
+function safeSendMessage(message, callback) {
     try {
-        // Send message and handle response
-        chrome.runtime.sendMessage({
-            message: "live_caption_update",
-            ...data
+        // Check if chrome.runtime is available
+        if (!chrome?.runtime?.sendMessage) {
+            return;
+        }
+        
+        // Send message with error handling
+        chrome.runtime.sendMessage(message, (response) => {
+            // Check for errors
+            if (chrome.runtime.lastError) {
+                // Extension context invalidated or other errors - ignore silently
+                return;
+            }
+            if (callback) {
+                callback(response);
+            }
         });
     } catch (error) {
-        // Silent fail - viewer might not be open
+        // Extension context invalidated or runtime not available
+        // This can happen during page unload or extension updates
     }
 }
 
+async function safeSendMessageAsync(message) {
+    return new Promise((resolve) => {
+        try {
+            // Check if chrome.runtime is available
+            if (!chrome?.runtime?.sendMessage) {
+                resolve(null);
+                return;
+            }
+            
+            chrome.runtime.sendMessage(message, (response) => {
+                if (chrome.runtime.lastError) {
+                    resolve(null);
+                } else {
+                    resolve(response);
+                }
+            });
+        } catch (error) {
+            resolve(null);
+        }
+    });
+}
+
+// --- Real-time Broadcasting ---
+function broadcastCaptionUpdate(data) {
+    safeSendMessage({
+        message: "live_caption_update",
+        ...data
+    });
+}
+
 async function broadcastAttendeeUpdate(data) {
-    try {
-        // Send message to all extension pages (viewer, popup, etc.)
-        await chrome.runtime.sendMessage({
-            message: "live_attendee_update",
-            ...data
-        });
-    } catch (error) {
-        // This is normal if viewer is not open - silent fail
-    }
+    await safeSendMessageAsync({
+        message: "live_attendee_update",
+        ...data
+    });
 }
 
 // --- Error Handling & Logging ---
@@ -90,19 +173,25 @@ class ErrorHandler {
         const errorInfo = {
             timestamp,
             context,
-            message: error.message || String(error),
-            stack: error.stack,
+            message: error?.message || String(error),
+            stack: error?.stack,
             url: window.location.href
         };
         
-        console.error(`[Teams Caption Saver] ${context}:`, errorInfo);
+        // Format error message properly
+        const errorMessage = errorInfo.message || 'Unknown error';
+        if (errorInfo.stack) {
+            console.error(`[Live Caption Saver] ${context}: ${errorMessage}\nStack:`, errorInfo.stack);
+        } else {
+            console.error(`[Live Caption Saver] ${context}: ${errorMessage}`);
+        }
         
         if (!silent) {
             // Could send to analytics or show user notification
-            chrome.runtime.sendMessage({
+            safeSendMessage({
                 message: "error_logged",
                 error: errorInfo
-            }).catch(() => {}); // Prevent recursive errors
+            });
         }
         
         return errorInfo;
@@ -137,7 +226,7 @@ class RetryHandler {
                 }
                 
                 const delayTime = baseDelay * Math.pow(2, attempt - 1); // Exponential backoff
-                console.log(`[Teams Caption Saver] ${context} - Attempt ${attempt} failed, retrying in ${delayTime}ms:`, error.message || error);
+                console.log(`[Live Caption Saver] ${context} - Attempt ${attempt} failed, retrying in ${delayTime}ms:`, error.message || error);
                 await delay(delayTime);
             }
         }
@@ -150,6 +239,54 @@ class RetryHandler {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const getCleanTranscript = () => transcriptArray.map(({ key, ...rest }) => rest);
+
+// --- Timestamp Formatting ---
+let timestampFormat = '12hr'; // Default format
+
+// Load timestamp format from storage
+chrome.storage.sync.get('timestampFormat').then(result => {
+    if (result.timestampFormat) {
+        timestampFormat = result.timestampFormat;
+    }
+});
+
+// Listen for changes to timestamp format
+chrome.storage.onChanged.addListener((changes, namespace) => {
+    if (namespace === 'sync' && changes.timestampFormat) {
+        timestampFormat = changes.timestampFormat.newValue;
+    }
+});
+
+function getFormattedTimestamp() {
+    const now = new Date();
+    
+    switch(timestampFormat) {
+        case '24hr':
+            return now.toLocaleTimeString('en-US', { 
+                hour12: false, 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit' 
+            });
+        case 'relative':
+            if (recordingStartTime) {
+                const elapsed = Math.floor((now - recordingStartTime) / 1000);
+                const hours = Math.floor(elapsed / 3600);
+                const minutes = Math.floor((elapsed % 3600) / 60);
+                const seconds = elapsed % 60;
+                return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            }
+            // Fall back to 12hr if no recording start time
+        case '12hr':
+        default:
+            return now.toLocaleTimeString('en-US', { 
+                hour12: true, 
+                hour: 'numeric', 
+                minute: '2-digit', 
+                second: '2-digit' 
+            });
+    }
+}
 
 // --- DOM Element Caching ---
 function getCachedElement(selector, expiry = 5000) {
@@ -173,7 +310,14 @@ function clearElementCache() {
 
 const isUserInMeeting = () => {
     if (!platformConfig) return false;
-    return platformConfig.isMeetingActive();
+    const inMeeting = platformConfig.isMeetingActive();
+    
+    // Debug logging for Zoom
+    if (platformConfig.name === 'Zoom' && wasInMeeting !== inMeeting) {
+        // console.log(`[Caption Saver] Zoom meeting state changed: ${wasInMeeting} -> ${inMeeting}`);
+    }
+    
+    return inMeeting;
 };
 
 // --- Core Logic ---
@@ -190,13 +334,54 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
             const captionData = platformConfig.getCaptionData(element);
             if (!captionData) return;
 
-            const { Name: name, Text: text, Time: time } = captionData;
+            // Use the formatted timestamp if Time is not provided correctly
+            const { Name: name, Text: text } = captionData;
+            const time = getFormattedTimestamp(); // Always use our formatted timestamp
             if (text.length === 0) return;
 
             let captionId = element.getAttribute('data-caption-id');
-            if (!captionId) {
-                captionId = `caption_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-                element.setAttribute('data-caption-id', captionId);
+            
+            // For Zoom, don't rely on element IDs since elements are destroyed/recreated
+            if (platformConfig.name === 'Zoom') {
+                // Use content-based tracking for Zoom
+                // Look for the last caption with the same speaker
+                let lastCaptionIndex = -1;
+                if (transcriptArray.length > 0) {
+                    // Get the last caption entry
+                    const lastEntry = transcriptArray[transcriptArray.length - 1];
+                    if (lastEntry.Name === name && lastEntry.Type === 'caption') {
+                        lastCaptionIndex = transcriptArray.length - 1;
+                    }
+                }
+                
+                // Check if this is a continuation of the last caption
+                const now = new Date();
+                const isContinuation = lastCaptionIndex !== -1 && 
+                    transcriptArray[lastCaptionIndex].timestamp && 
+                    (now - new Date(transcriptArray[lastCaptionIndex].timestamp)) < 10000; // Within 10 seconds
+                
+                if (isContinuation) {
+                    const lastText = transcriptArray[lastCaptionIndex].Text;
+                    
+                    // Check if this is an update (text starts with previous text)
+                    // OR if the text is completely different (new sentence)
+                    if (text.startsWith(lastText) || lastText.startsWith(text)) {
+                        // This is an update/continuation of the same caption
+                        captionId = transcriptArray[lastCaptionIndex].key;
+                    } else {
+                        // This is a new sentence from the same speaker
+                        captionId = `caption_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                    }
+                } else {
+                    // This is a new caption (different speaker or too much time passed)
+                    captionId = `caption_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                }
+            } else {
+                // For other platforms, use element-based tracking
+                if (!captionId) {
+                    captionId = `caption_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                    element.setAttribute('data-caption-id', captionId);
+                }
             }
 
             const existingIndex = transcriptArray.findIndex(entry => entry.key === captionId);
@@ -204,9 +389,9 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
             if (existingIndex !== -1) {
                 const existingEntry = transcriptArray[existingIndex];
                 
-                // For Google Meet: Just update the existing caption with the new text
-                // Google Meet continuously updates the same caption element
-                if (platformConfig.name === 'Google Meet') {
+                // For Google Meet and Zoom: Just update the existing caption with the new text
+                // Both platforms continuously update the same caption element
+                if (platformConfig.name === 'Google Meet' || platformConfig.name === 'Zoom') {
                     const speakerChanged = existingEntry.Name !== name;
                     
                     if (speakerChanged) {
@@ -215,8 +400,10 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                         const newCaption = { 
                             Name: name, 
                             Text: text, 
-                            Time: time, 
-                            key: newCaptionId 
+                            Time: time,
+                            Type: 'caption',  // Mark as caption
+                            key: newCaptionId,
+                            timestamp: new Date().toISOString() // Add timestamp
                         };
                         transcriptArray.push(newCaption);
                         
@@ -254,8 +441,15 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                     }
                 }
             } else {
-                // Add new entry
-                const newCaption = { Name: name, Text: text, Time: time, key: captionId };
+                // Add new entry with timestamp for Zoom tracking
+                const newCaption = { 
+                    Name: name, 
+                    Text: text, 
+                    Time: time, 
+                    Type: 'caption', 
+                    key: captionId,
+                    timestamp: new Date().toISOString() // Add timestamp for Zoom tracking
+                };
                 transcriptArray.push(newCaption);
                 // Broadcast new caption to viewer
                 broadcastCaptionUpdate({
@@ -276,6 +470,16 @@ function updateAttendeesFromTranscript() {
     const currentTime = new Date().toLocaleTimeString();
     
     speakers.forEach(name => {
+        // Skip "You" as it's not a real name
+        if (name === 'You') {
+            // For Google Meet, try to replace with actual name
+            if (window.currentUserName && window.currentUserName !== 'You') {
+                name = window.currentUserName;
+            } else {
+                return; // Skip this entry
+            }
+        }
+        
         if (!attendeeData.allAttendees.has(name)) {
             attendeeData.allAttendees.add(name);
             attendeeData.currentAttendees.set(name, 'Speaker');
@@ -300,15 +504,23 @@ function updateAttendeeList() {
         const attendeeListSelector = SELECTORS.attendeeList || SELECTORS.ATTENDEE_TREE;
         const attendeeTree = document.querySelector(attendeeListSelector);
         if (!attendeeTree) {
-            console.log("Attendee tree not found, roster might not be open");
+            if (platformConfig?.name === 'Zoom') {
+                console.log(`[Zoom] Attendee list not found with selector: ${attendeeListSelector}`);
+            }
             // Fallback: Add speakers from transcript as attendees
             updateAttendeesFromTranscript();
             return;
         }
         
+        // For Zoom, build speaker name mapping when we scan attendees
+        if (platformConfig?.name === 'Zoom' && platformConfig.buildSpeakerNameMapping) {
+            platformConfig.buildSpeakerNameMapping();
+        }
+        
         // Platform-specific attendee item selector
         const attendeeItemSelector = SELECTORS.attendeeItem || SELECTORS.ATTENDEE_ITEM;
         const attendeeItems = document.querySelectorAll(attendeeItemSelector);
+        // console.log(`[Attendee Tracking] Found ${attendeeItems.length} attendees with selector: ${attendeeItemSelector}`);
         const currentTime = new Date().toLocaleTimeString();
         
         // Clear current attendees for fresh update
@@ -392,7 +604,7 @@ function updateAttendeeList() {
             }
         }
         
-        console.log(`Attendee update complete. Current: ${attendeeData.currentAttendees.size}, Total: ${attendeeData.allAttendees.size}`);
+        console.log(`[${platformConfig?.name}] Attendee update complete. Current: ${attendeeData.currentAttendees.size}, Total: ${attendeeData.allAttendees.size}`);
         
     } catch (error) {
         ErrorHandler.log(error, 'Updating attendee list', true);
@@ -442,33 +654,73 @@ async function startAttendeeTracking() {
     // Check if attendee tracking is enabled
     const { trackAttendees, autoOpenAttendees } = await chrome.storage.sync.get(['trackAttendees', 'autoOpenAttendees']);
     if (trackAttendees === false) {
-        console.log("Attendee tracking is disabled in settings");
+        // console.log("[Attendee Tracking] Disabled in settings");
         return;
     }
+    
+    // console.log(`[Attendee Tracking] Starting for ${platformConfig?.name || 'unknown platform'}`);
     
     if (attendeeUpdateInterval) {
         clearInterval(attendeeUpdateInterval);
     }
     
     // Reset attendee data for new meeting
+    const startTime = new Date().toISOString();
     attendeeData = {
         allAttendees: new Set(),
         currentAttendees: new Map(),
         attendeeHistory: [],
         lastUpdated: null,
-        meetingStartTime: new Date().toISOString(),
+        meetingStartTime: startTime,
     };
     
-    console.log("Starting attendee tracking...");
+    // Ensure meeting start time is also set in main recording start time
+    if (!recordingStartTime) {
+        recordingStartTime = new Date();
+    }
+    
+    // console.log(`Starting attendee tracking for ${platformConfig?.name}...`);
     
     // Initial update after delay
     setTimeout(async () => {
-        // Only auto-open participant panel if setting is enabled
-        if (autoOpenAttendees) {
-            await tryOpenParticipantPanel();
+        // For Google Meet, always try to open People panel initially to get attendees
+        if (platformConfig?.name === 'Google Meet') {
+            // console.log('[Attendee Tracking] Google Meet - opening People panel for initial attendee scan');
+            const opened = await tryOpenParticipantPanel();
+            if (opened) {
+                await delay(1000); // Give panel time to populate
+            }
+            updateAttendeeList();
+            
+            // For Google Meet, also check attendees from transcript speakers
+            updateAttendeesFromTranscript();
+        } else if (platformConfig?.name === 'Zoom') {
+            // For Zoom, try to open participant panel if enabled
+            if (autoOpenAttendees) {
+                const opened = await tryOpenParticipantPanel();
+                if (opened) {
+                    await delay(2000); // Give panel more time to populate
+                }
+            }
+            
+            // Update attendee list after delay
+            updateAttendeeList();
+            
+            // Also check transcript for speakers in case panel isn't available
+            updateAttendeesFromTranscript();
+        } else {
+            // Teams logic - check if chat capture is enabled to avoid conflicts
+            const { chatCapture } = await chrome.storage.sync.get(['chatCapture']);
+            
+            // Only auto-open participant panel if setting is enabled AND chat capture is not active
+            if (autoOpenAttendees && !chatCapture) {
+                await tryOpenParticipantPanel();
+            } else if (autoOpenAttendees && chatCapture) {
+                console.log("Chat capture is enabled - skipping auto-open attendees to avoid panel conflicts");
+            }
+            
+            updateAttendeeList();
         }
-        
-        updateAttendeeList();
         
         // Then update every minute
         attendeeUpdateInterval = setInterval(updateAttendeeList, TIMING.ATTENDEE_UPDATE_INTERVAL);
@@ -490,6 +742,19 @@ async function getAttendeeReport() {
         return null; // Return null if tracking is disabled
     }
     
+    // For Zoom, do a final attendee update before generating report
+    if (platformConfig?.name === 'Zoom') {
+        updateAttendeeList(); // Update from participant panel
+        updateAttendeesFromTranscript(); // Also check transcript
+        await delay(100); // Small delay to ensure updates complete
+    }
+    
+    // For Google Meet, ensure we have at least the speakers from the transcript
+    if (platformConfig?.name === 'Google Meet' && attendeeData.allAttendees.size === 0) {
+        // console.log('[Attendee Tracking] Google Meet - no attendees found, checking transcript for speakers');
+        updateAttendeesFromTranscript();
+    }
+    
     const report = {
         meetingStartTime: attendeeData.meetingStartTime,
         lastUpdated: attendeeData.lastUpdated,
@@ -503,12 +768,236 @@ async function getAttendeeReport() {
         attendeeHistory: attendeeData.attendeeHistory
     };
     
-    console.log("[Teams Caption Saver] Attendee report generated:", {
-        totalAttendees: report.totalUniqueAttendees,
-        attendees: report.attendeeList
-    });
+    if (platformConfig?.name === 'Zoom') {
+        console.log(`[Zoom] Attendee report generated: ${report.totalUniqueAttendees} attendees`, report.attendeeList);
+    }
     
     return report;
+}
+
+// --- Chat Capture Functions ---
+function detectCurrentPanel() {
+    if (!platformConfig?.chatCapture?.isSupported()) return 'none';
+    
+    const panel = platformConfig.chatCapture.detectCurrentPanel();
+    chatCaptureState.currentPanel = panel;
+    return panel;
+}
+
+function isUserTyping() {
+    if (!platformConfig?.chatCapture?.isSupported()) return false;
+    
+    const isTyping = platformConfig.chatCapture.isUserTyping();
+    if (isTyping) {
+        // console.log('[Chat Capture] User is actively typing - postponing panel switch');
+    }
+    return isTyping;
+}
+
+function captureChatMessages(skipInitialMessages = false) {
+    if (!chatCaptureState.enabled) return 0;
+    if (!platformConfig?.chatCapture?.isSupported()) {
+        // console.log('[Chat Capture] Not supported on this platform');
+        return 0;
+    }
+    
+    const messages = platformConfig.chatCapture.getChatMessages();
+    let newCount = 0;
+    let skippedCount = 0;
+    
+    messages.forEach(msgElement => {
+        const messageData = platformConfig.chatCapture.getChatMessageData(msgElement);
+        if (!messageData || !messageData.id) return;
+        
+        // Skip if already captured or marked as pre-existing
+        if (chatCaptureState.capturedMessageIds.has(messageData.id)) {
+            return;
+        }
+        
+        // During initial scan, mark all messages as "seen" but don't add to transcript
+        if (skipInitialMessages) {
+            chatCaptureState.capturedMessageIds.add(messageData.id);
+            skippedCount++;
+            return;
+        }
+        
+        // Create chat message with consistent format
+        // Use our formatted timestamp instead of the one from the element
+        const chatMessage = {
+            Name: messageData.author,
+            Text: messageData.text,
+            Time: getFormattedTimestamp(), // Use our consistent timestamp format
+            Type: 'chat',  // Mark as chat message
+            key: `chat_${messageData.id}`
+        };
+        
+        // Add to transcript array in chronological position
+        transcriptArray.push(chatMessage);
+        chatCaptureState.capturedMessageIds.add(messageData.id);
+        newCount++;
+        
+        // console.log(`[Chat Capture] New message from ${chatMessage.Name}: "${chatMessage.Text}"`);
+        
+        // Broadcast to viewer
+        broadcastCaptionUpdate({
+            type: 'new',
+            caption: chatMessage
+        });
+    });
+    
+    if (skipInitialMessages && skippedCount > 0) {
+        chatCaptureState.initialMessagesSkipped = skippedCount;
+        console.log(`[Chat Capture] Skipped ${skippedCount} pre-existing messages from recurring meeting`);
+    }
+    
+    if (newCount > 0) {
+        // console.log(`[Chat Capture] Captured ${newCount} new messages. Total transcript: ${transcriptArray.length}`);
+    }
+    
+    return newCount;
+}
+
+async function openChatPanel() {
+    if (!platformConfig?.chatCapture?.isSupported()) return false;
+    if (platformConfig.chatCapture.detectCurrentPanel() === 'chat') return true;
+    
+    return await platformConfig.chatCapture.openChatPanel();
+}
+
+async function openPeoplePanel() {
+    if (!platformConfig?.chatCapture?.isSupported()) return false;
+    if (platformConfig.chatCapture.detectCurrentPanel() === 'people') return true;
+    
+    return await platformConfig.chatCapture.openPeoplePanel();
+}
+
+async function performHybridRotation() {
+    if (chatCaptureState.isRotating || !chatCaptureState.enabled) return;
+    
+    // For Google Meet, we don't need panel rotation since both can be visible
+    if (platformConfig?.name === 'Google Meet') {
+        // Just capture chat messages if the panel is open
+        captureChatMessages(false);  // Normal capture, not initial scan
+        return;
+    }
+    
+    // Check if user is typing (Teams/other platforms)
+    if (isUserTyping()) {
+        // Silently postpone without logging (reduces console spam when tab is inactive)
+        setTimeout(performHybridRotation, TIMING.TYPING_RECHECK_DELAY);
+        return;
+    }
+    
+    chatCaptureState.isRotating = true;
+    // console.log('[Chat Capture] Starting hybrid rotation');
+    
+    try {
+        const currentPanel = detectCurrentPanel();
+        
+        // Quick attendee check
+        if (await openPeoplePanel()) {
+            updateAttendeeList();
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+        // Return to chat (our primary panel)
+        if (await openChatPanel()) {
+            captureChatMessages(false);  // Normal capture, not initial scan
+        }
+        
+        chatCaptureState.lastChatCheck = new Date();
+    } catch (error) {
+        console.error('[Chat Capture] Rotation error:', error);
+    } finally {
+        chatCaptureState.isRotating = false;
+    }
+}
+
+async function startChatCapture() {
+    // Check if platform supports chat capture
+    if (!platformConfig?.chatCapture?.isSupported()) {
+        // console.log('[Chat Capture] Not supported on this platform');
+        return;
+    }
+    
+    const { chatCapture } = await chrome.storage.sync.get(['chatCapture']);
+    if (chatCapture === false) {
+        // console.log('[Chat Capture] Disabled in settings');
+        return;
+    }
+    
+    chatCaptureState.enabled = true;
+    chatCaptureState.sessionStartTime = new Date();  // Record when we started capturing
+    chatCaptureState.initialScanComplete = false;  // Reset initial scan flag
+    chatCaptureState.initialMessagesSkipped = 0;  // Reset counter
+    // console.log('[Chat Capture] Starting capture system for', platformConfig.name);
+    
+    // Platform-specific initialization
+    if (platformConfig.name === 'Google Meet') {
+        // Google Meet: Simpler approach since panels can coexist
+        // console.log('[Chat Capture] Google Meet mode - monitoring chat continuously');
+        
+        // Open chat panel initially if not already open
+        const chatOpened = await openChatPanel();
+        if (chatOpened) {
+            // console.log('[Chat Capture] Opened chat panel for monitoring');
+            await delay(1000);
+            // Mark all existing messages as "already seen" on first capture
+            captureChatMessages(true);  // Skip initial messages
+            chatCaptureState.initialScanComplete = true;
+        }
+        
+        // Set up continuous chat monitoring (every 2 seconds)
+        // Don't rely on panel detection for Google Meet - just try to capture
+        chatCaptureState.chatCheckInterval = setInterval(() => {
+            captureChatMessages(false);  // Capture new messages normally
+        }, 2000);
+        
+    } else {
+        // Teams and other platforms: Use hybrid rotation
+        // console.log('[Chat Capture] Step 1: Checking People panel for initial attendees');
+        await openPeoplePanel();
+        await delay(1500); // Give time for panel to fully load
+        
+        // Capture initial attendees
+        const peoplePanel = document.querySelector('.fui-FlatTree[role="tree"][aria-label="Attendees"], .ts-calling-participants-grid-container');
+        if (peoplePanel) {
+            // console.log('[Chat Capture] Capturing initial attendee list');
+            updateAttendeeList(); // Use existing attendee capture function
+        }
+        
+        // Then switch to chat panel for ongoing capture
+        // console.log('[Chat Capture] Step 2: Switching to Chat panel for message capture');
+        await delay(500);
+        
+        // Start on chat panel
+        openChatPanel().then(() => {
+            // Initial scan - mark existing messages as seen but don't capture
+            captureChatMessages(true);  // Skip initial messages
+            chatCaptureState.initialScanComplete = true;
+            
+            // Set up continuous chat monitoring
+            setInterval(() => {
+                if (detectCurrentPanel() === 'chat' && !chatCaptureState.isRotating) {
+                    captureChatMessages(false);  // Capture new messages normally
+                }
+            }, 2000);
+            
+            // Set up periodic rotation for attendee checks
+            chatCaptureState.chatCheckInterval = setInterval(performHybridRotation, TIMING.CHAT_CHECK_INTERVAL);
+        });
+    }
+}
+
+function stopChatCapture() {
+    chatCaptureState.enabled = false;
+    chatCaptureState.initialScanComplete = false;
+    chatCaptureState.capturedMessageIds.clear();  // Clear the set of captured IDs for next session
+    if (chatCaptureState.chatCheckInterval) {
+        clearInterval(chatCaptureState.chatCheckInterval);
+        chatCaptureState.chatCheckInterval = null;
+    }
+    // console.log('[Chat Capture] Stopped');
 }
 
 // --- Event-Driven Meeting Detection ---
@@ -622,17 +1111,44 @@ function setupCaptionsObserver() {
 const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     const nowInMeeting = isUserInMeeting();
     
-    console.log(`[Caption Saver] Meeting state check - Was: ${wasInMeeting}, Now: ${nowInMeeting}`);
+    // console.log(`[Caption Saver] Meeting state check - Was: ${wasInMeeting}, Now: ${nowInMeeting}`);
     
     if (wasInMeeting && !nowInMeeting) {
-        console.log("Meeting transition detected: In -> Out. Checking for auto-save.");
+        const isMainFrame = window === window.top;
+        // console.log(`Meeting transition detected: In -> Out. Checking for auto-save in ${isMainFrame ? 'main frame' : 'iframe'}.`);
+        // console.log(`Platform: ${platformConfig?.name}, Transcript length: ${transcriptArray.length}, Capturing: ${capturing}`);
+        
+        // For Zoom, save immediately as iframe might be destroyed
+        if (platformConfig && platformConfig.name === 'Zoom') {
+            console.log(`[Zoom] Meeting end detected in ${isMainFrame ? 'main frame' : 'iframe'}, transcript: ${transcriptArray.length} items`);
+            if (transcriptArray.length > 0) {
+                // Save to local storage immediately
+                (async () => {
+                const attendeeReport = await getAttendeeReport();
+                console.log(`[Zoom iframe] Saving meeting data - Transcript: ${transcriptArray.length} items, Attendees: ${attendeeReport?.totalUniqueAttendees || 0}`);
+                await chrome.storage.local.set({
+                    zoomMeetingEnded: {
+                        transcript: getCleanTranscript(),
+                        meetingTitle: meetingTitleOnStart || document.title,
+                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                        attendeeReport: attendeeReport,
+                        timestamp: new Date().toISOString(),
+                        shouldAutoSave: true
+                    }
+                });
+                
+                // Send message to service worker
+                safeSendMessage({
+                    message: "zoom_meeting_ended"
+                });
+            })();
+            }
+        }
         
         // Send meeting ended signal to viewer
         try {
-            chrome.runtime.sendMessage({
+            safeSendMessage({
                 message: "meeting_ended"
-            }).catch(() => {
-                // Viewer might not be open, ignore error
             });
         } catch (error) {
             // Silent fail if no listeners
@@ -651,6 +1167,8 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         
         try {
             const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
+            console.log(`Auto-save check: enabled=${autoSaveOnEnd}, transcript=${transcriptArray.length} items`);
+            
             if (autoSaveOnEnd && transcriptArray.length > 0) {
                 console.log("Auto-save is ON and transcript has data. Triggering save.");
                 
@@ -660,15 +1178,67 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                 
                 // Send save message without retry (let service worker handle retries if needed)
                 const attendeeReport = await getAttendeeReport();
-                await chrome.runtime.sendMessage({
-                    message: "save_on_leave",
-                    transcriptArray: getCleanTranscript(),
-                    meetingTitle: meetingTitleOnStart,
-                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
-                    attendeeReport: attendeeReport
-                });
+                const cleanTranscript = getCleanTranscript();
                 
-                console.log("Auto-save message sent successfully.");
+                console.log(`Auto-save: Sending ${cleanTranscript.length} transcript items from ${window === window.top ? 'main frame' : 'iframe'}`);
+                
+                try {
+                    const response = await safeSendMessageAsync({
+                        message: "save_on_leave",
+                        transcriptArray: cleanTranscript,
+                        meetingTitle: meetingTitleOnStart || document.title,
+                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                        attendeeReport: attendeeReport
+                    });
+                    
+                    console.log("Auto-save message sent successfully. Response:", response);
+                } catch (sendError) {
+                    console.error("Failed to send auto-save message:", sendError);
+                    
+                    // Try alternative: save directly if we have permission
+                    if (cleanTranscript.length > 0) {
+                        console.log("Attempting direct save fallback...");
+                        // Store for manual save
+                        chrome.storage.local.set({
+                            pendingAutoSave: {
+                                transcript: cleanTranscript,
+                                meetingTitle: meetingTitleOnStart || document.title,
+                                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                                attendeeReport: attendeeReport,
+                                timestamp: new Date().toISOString()
+                            }
+                        });
+                    }
+                }
+            } else {
+                // console.log(`Auto-save skipped: enabled=${autoSaveOnEnd}, transcript=${transcriptArray.length} items`);
+                
+                // If this is Zoom and we have no transcript in this frame, check if it's in storage
+                if (platformConfig && platformConfig.name === 'Zoom' && autoSaveOnEnd && !transcriptArray.length) {
+                    console.log('[Zoom main frame] Checking for saved meeting data...');
+                    
+                    // First check for zoomMeetingEnded (saved by iframe)
+                    const { zoomMeetingEnded } = await chrome.storage.local.get('zoomMeetingEnded');
+                    if (zoomMeetingEnded && zoomMeetingEnded.transcript && zoomMeetingEnded.transcript.length > 0) {
+                        console.log(`[Zoom main frame] Found saved data - Transcript: ${zoomMeetingEnded.transcript.length} items, Attendees: ${zoomMeetingEnded.attendeeReport?.totalUniqueAttendees || 0}`);
+                        // Trigger the zoom_meeting_ended handler in service worker
+                        await safeSendMessageAsync({ message: "zoom_meeting_ended" });
+                    } else {
+                        // Fallback: check transcriptBackup
+                        const { transcriptBackup } = await chrome.storage.local.get('transcriptBackup');
+                        if (transcriptBackup && transcriptBackup.transcript && transcriptBackup.transcript.length > 0) {
+                            console.log(`[Zoom main frame] Found backup data - Transcript: ${transcriptBackup.transcript.length} items`);
+                            // Send save message with backup data
+                            await safeSendMessageAsync({
+                                message: "save_on_leave",
+                                transcriptArray: transcriptBackup.transcript,
+                                meetingTitle: transcriptBackup.meetingTitle || document.title,
+                                recordingStartTime: transcriptBackup.recordingStartTime || new Date().toISOString(),
+                                attendeeReport: transcriptBackup.attendeeData
+                            });
+                        }
+                    }
+                }
             }
         } catch (error) {
             ErrorHandler.log(error, 'Auto-save on meeting end', false);
@@ -687,7 +1257,7 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         return;
     } else if (!wasInMeeting && nowInMeeting) {
         // Reset auto-save state when joining a new meeting
-        console.log("Meeting transition detected: Out -> In. Resetting auto-save state.");
+        // console.log("Meeting transition detected: Out -> In. Resetting auto-save state.");
         autoSaveTriggered = false;
         lastMeetingId = null;
         captionRetryInProgress = false; // Reset retry flag
@@ -850,7 +1420,27 @@ async function startCaptureSession() {
     // Start attendee tracking
     startAttendeeTracking();
     
-    chrome.runtime.sendMessage({ message: "update_badge_status", capturing: true });
+    // For Google Meet, try to capture the user's name early
+    if (platformConfig && platformConfig.name === 'Google Meet' && platformConfig.getCurrentUserName) {
+        setTimeout(() => {
+            const userName = platformConfig.getCurrentUserName();
+            if (userName && userName !== 'You') {
+                console.log('[Caption Saver] Captured user name at meeting start:', userName);
+            }
+        }, 2000); // Give time for UI to load
+    }
+    
+    // Start chat capture if enabled (for platforms that support it)
+    if (platformConfig && platformConfig.chatCapture?.isSupported()) {
+        chrome.storage.sync.get(['chatCapture'], (result) => {
+            if (result.chatCapture) {
+                // console.log('[Caption Saver] Starting chat capture for', platformConfig.name);
+                startChatCapture();
+            }
+        });
+    }
+    
+    safeSendMessage({ message: "update_badge_status", capturing: true });
     
     ensureObserverIsActive();
 }
@@ -867,16 +1457,33 @@ function startPeriodicBackup() {
             try {
                 // Check if we have access to storage API
                 if (chrome.storage && chrome.storage.local) {
-                    await chrome.storage.local.set({
-                        transcriptBackup: {
-                            transcript: transcriptArray,
-                            meetingTitle: meetingTitleOnStart,
-                            recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
-                            lastBackup: new Date().toISOString(),
-                            attendeeData: attendeeData
-                        }
-                    });
-                    console.log(`[Caption Saver] Backup saved: ${transcriptArray.length} entries`);
+                    // Use session-based storage if we have a session ID
+                    if (currentSessionId) {
+                        // Update session with current data
+                        chrome.runtime.sendMessage({
+                            action: 'updateSession',
+                            sessionId: currentSessionId,
+                            data: {
+                                transcript: transcriptArray,
+                                attendeeReport: attendeeData,
+                                meetingTitle: meetingTitleOnStart,
+                                captionCount: transcriptArray.length,
+                                attendeeCount: attendeeData.allAttendees.size
+                            }
+                        });
+                    } else {
+                        // Fallback to old storage method
+                        await chrome.storage.local.set({
+                            transcriptBackup: {
+                                transcript: transcriptArray,
+                                meetingTitle: meetingTitleOnStart,
+                                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
+                                lastBackup: new Date().toISOString(),
+                                attendeeData: attendeeData
+                            }
+                        });
+                    }
+                    // console.log(`[Caption Saver] Backup saved: ${transcriptArray.length} entries`);
                 }
             } catch (error) {
                 // Silently fail on Google Meet if storage is restricted
@@ -891,6 +1498,9 @@ function startPeriodicBackup() {
 }
 
 function stopCaptureSession() {
+    // Always update badge to off when stopping, even if not currently capturing
+    safeSendMessage({ message: "update_badge_status", capturing: false });
+    
     if (!capturing) return;
 
     console.log("Captions turned off or meeting ended. Capture stopped. Data preserved.");
@@ -901,6 +1511,11 @@ function stopCaptureSession() {
     }
     observedElement = null;
     
+    // Stop chat capture if it's running
+    if (chatCaptureState.enabled) {
+        stopChatCapture();
+    }
+    
     // Stop periodic backup
     if (backupInterval) {
         clearInterval(backupInterval);
@@ -909,15 +1524,32 @@ function stopCaptureSession() {
     
     // Final backup before stopping
     if (transcriptArray.length > 0) {
-        chrome.storage.local.set({
-            transcriptBackup: {
-                transcript: transcriptArray,
-                meetingTitle: meetingTitleOnStart,
-                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
-                lastBackup: new Date().toISOString(),
-                attendeeData: attendeeData
-            }
-        });
+        if (currentSessionId) {
+            // Update session with final data
+            chrome.runtime.sendMessage({
+                action: 'updateSession',
+                sessionId: currentSessionId,
+                data: {
+                    transcript: transcriptArray,
+                    attendeeReport: attendeeData,
+                    meetingTitle: meetingTitleOnStart,
+                    captionCount: transcriptArray.length,
+                    attendeeCount: attendeeData.allAttendees.size,
+                    status: 'ended'
+                }
+            });
+        } else {
+            // Fallback to old storage method
+            chrome.storage.local.set({
+                transcriptBackup: {
+                    transcript: transcriptArray,
+                    meetingTitle: meetingTitleOnStart,
+                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
+                    lastBackup: new Date().toISOString(),
+                    attendeeData: attendeeData
+                }
+            });
+        }
         
         // Don't save to session history here - let auto-save handle it to prevent duplicates
     }
@@ -925,7 +1557,7 @@ function stopCaptureSession() {
     // Stop attendee tracking
     stopAttendeeTracking();
     
-    chrome.runtime.sendMessage({ message: "update_badge_status", capturing: false });
+    safeSendMessage({ message: "update_badge_status", capturing: false });
 }
 
 // Save current transcript to session history
@@ -940,7 +1572,7 @@ async function saveToSessionHistory() {
         const cleanTranscript = getCleanTranscript();
         
         // Send message to service worker
-        const response = await chrome.runtime.sendMessage({
+        const response = await safeSendMessageAsync({
             message: "save_session_history",
             transcriptArray: cleanTranscript,
             meetingTitle: meetingTitleOnStart || 'Untitled Meeting',
@@ -962,14 +1594,14 @@ async function saveToSessionHistory() {
 async function attemptAutoEnableCaptions() {
     // Prevent multiple simultaneous auto-enable attempts
     if (autoEnableInProgress) {
-        console.log("Auto-enable already in progress, skipping...");
+        // console.log("Auto-enable already in progress, skipping...");
         return;
     }
     
     // Prevent too frequent attempts (min 10 seconds between attempts)
     const now = Date.now();
     if (now - autoEnableLastAttempt < 10000) {
-        console.log("Auto-enable attempted too recently, skipping...");
+        // console.log("Auto-enable attempted too recently, skipping...");
         return;
     }
     
@@ -977,13 +1609,13 @@ async function attemptAutoEnableCaptions() {
     autoEnableLastAttempt = now;
     
     try {
-        console.log("Starting auto-enable captions attempt...");
+        // console.log("Starting auto-enable captions attempt...");
         
         // Check if platform has its own enableCaptions method (Google Meet)
         if (platformConfig && platformConfig.enableCaptions) {
             const enabled = await platformConfig.enableCaptions();
             if (enabled) {
-                console.log("Auto-enable SUCCESS: Captions enabled via platform method.");
+                // console.log("Auto-enable SUCCESS: Captions enabled via platform method.");
                 return;
             }
         }
@@ -1038,7 +1670,7 @@ async function attemptAutoEnableCaptions() {
             }
         }
         
-        console.log("Auto-enable captions attempt completed.");
+        // console.log("Auto-enable captions attempt completed.");
     } catch (e) {
         console.error("Error during auto-enable captions attempt:", e);
     } finally {
@@ -1060,7 +1692,10 @@ function debouncedAutoEnableCaptions() {
 function initializeEventDrivenSystem() {
     if (hasInitializedListeners) return;
     
-    console.log("Initializing event-driven caption system...");
+    // console.log("Initializing event-driven caption system...");
+    
+    // Clear badge on initialization (page load/refresh)
+    safeSendMessage({ message: "update_badge_status", capturing: false });
     
     // Set up observers for meeting state changes
     setupMeetingObserver();
@@ -1120,7 +1755,19 @@ function cleanupObservers() {
 }
 
 // Cleanup on page unload
-window.addEventListener('beforeunload', cleanupObservers);
+window.addEventListener('beforeunload', () => {
+    // Clear badge when page is unloading
+    safeSendMessage({ message: "update_badge_status", capturing: false });
+    cleanupObservers();
+});
+
+// Clear badge when page visibility changes (tab switching, minimizing)
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden && !capturing) {
+        // If the page is hidden and we're not actively capturing, clear the badge
+        safeSendMessage({ message: "update_badge_status", capturing: false });
+    }
+});
 
 // Initialize the system
 if (initializePlatform()) {
@@ -1140,14 +1787,43 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             });
             return true;
             
+        case 'toggle_chat_capture':
+            // Toggle chat capture on/off
+            if (request.enabled) {
+                startChatCapture();
+            } else {
+                stopChatCapture();
+            }
+            sendResponse({ success: true });
+            return true;
+            
         case 'get_status':
             (async () => {
+                // For Zoom, prioritize responses from frames with actual meeting content
+                if (platformConfig && platformConfig.name === 'Zoom') {
+                    const isMainFrame = window === window.top;
+                    const hasMeetingControls = !!document.querySelector('.footer-button-base__button');
+                    const isInMeeting = isUserInMeeting();
+                    
+                    // If we're in main frame, not in meeting, and not capturing,
+                    // wait a bit to let iframe respond first
+                    if (isMainFrame && !isInMeeting && !capturing && !hasMeetingControls) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                }
+                
                 const { trackCaptions } = await chrome.storage.sync.get('trackCaptions');
                 const attendeeReport = await getAttendeeReport();
+                const inMeeting = isUserInMeeting();
+                
+                // Add context info for debugging
+                const isMainFrame = window === window.top;
+                // console.log(`[Caption Saver] Sending status from ${isMainFrame ? 'main frame' : 'iframe'}: inMeeting=${inMeeting}, capturing=${capturing}`);
+                
                 sendResponse({
                     capturing: trackCaptions !== false ? capturing : false,
                     captionCount: transcriptArray.length,
-                    isInMeeting: isUserInMeeting(),
+                    isInMeeting: inMeeting,
                     attendeeCount: attendeeReport ? attendeeReport.totalUniqueAttendees : 0
                 });
             })();
@@ -1162,7 +1838,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                         attendeeCount: attendeeReport ? attendeeReport.totalUniqueAttendees : 0,
                         attendees: attendeeReport ? attendeeReport.attendeeList : []
                     });
-                    chrome.runtime.sendMessage({
+                    safeSendMessage({
                         message: "download_captions",
                         transcriptArray: getCleanTranscript(),
                         meetingTitle: meetingTitleOnStart,
@@ -1172,7 +1848,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                     });
                 })();
             } else {
-                alert("No captions were captured. Please ensure captions are turned on in the meeting.");
+                alert("No data to save yet. Please wait for captions or attendees to be detected.");
             }
             break;
 
@@ -1190,14 +1866,21 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             break;
 
         case 'get_captions_for_viewing':
-            if (transcriptArray.length > 0) {
-                chrome.runtime.sendMessage({
-                    message: "display_captions",
-                    transcriptArray: getCleanTranscript()
-                });
-            } else {
-                alert("No captions were captured. Please ensure captions are turned on in the meeting.");
+            // Only respond from the frame that's actually capturing
+            // to avoid opening multiple tabs
+            if (platformConfig && platformConfig.name === 'Zoom') {
+                // For Zoom, only respond if we're capturing or have transcript data
+                if (!capturing && transcriptArray.length === 0) {
+                    console.log('[Caption Saver] Ignoring view request - no captions in this frame');
+                    break;
+                }
             }
+            
+            // Always open the viewer - it will update live as captions come in
+            safeSendMessage({
+                message: "display_captions",
+                transcriptArray: getCleanTranscript()
+            });
             break;
 
         case 'get_unique_speakers':
@@ -1223,4 +1906,4 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true; // Indicates an asynchronous response may be sent.
 });
 
-console.log("Teams Captions Saver content script is running.");
+// Live Caption Saver content script is running
