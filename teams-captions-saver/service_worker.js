@@ -270,8 +270,11 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
 let lastAutoSaveId = null;
 let autoSaveInProgress = false;
 
-async function createViewerTab(transcriptArray) {
-    await chrome.storage.local.set({ captionsToView: transcriptArray });
+async function createViewerTab(transcriptArray, sessionId) {
+    await chrome.storage.local.set({ 
+        captionsToView: transcriptArray,
+        viewerSessionId: sessionId  // Store session ID for filtering live updates
+    });
     chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') });
 }
 
@@ -432,6 +435,37 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // Handle live updates synchronously for immediate relay
+    if (message.message === 'live_caption_update' || message.message === 'live_attendee_update') {
+        console.log('[Service Worker] Relaying live update:', message.message, 'sessionId:', message.sessionId, 'caption:', message.caption);
+        // Don't relay back to the sender (content script)
+        if (sender.tab && sender.tab.id) {
+            // Relay to viewer tabs
+            // Only use runtime.sendMessage - this reaches extension pages like viewer.html
+            try {
+                const messageToRelay = {
+                    ...message,
+                    sessionId: message.sessionId,
+                    fromServiceWorker: true  // Mark that this is from service worker
+                };
+                
+                // Broadcast to all extension pages (viewer.html will receive this)
+                // This is sufficient - we don't need tabs.sendMessage too
+                chrome.runtime.sendMessage(messageToRelay).then(() => {
+                    // Successfully sent
+                }).catch((error) => {
+                    // Nobody listening - this is OK
+                    console.log('[Service Worker] No listeners for live update (viewer might be closed)');
+                });
+            } catch (error) {
+                console.error('[Service Worker] Error broadcasting:', error);
+            }
+        }
+        // Send response immediately to unblock content script
+        sendResponse({received: true});
+        return; // Exit early for live updates
+    }
+    
     (async () => {
         const { speakerAliases } = await chrome.storage.session.get('speakerAliases');
 
@@ -474,6 +508,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 case 'endSession':
                     const ended = await sessionManager.endSession(message.sessionId);
                     sendResponse({ success: ended });
+                    return;
+                    
+                case 'deleteSession':
+                    const deleted = await sessionManager.deleteSession(message.sessionId);
+                    sendResponse({ success: deleted });
                     return;
             }
         }
@@ -548,28 +587,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 break;
                 
-            case 'live_caption_update':
-            case 'live_attendee_update':
-                // Don't relay back to the sender (content script)
-                if (sender.tab && sender.tab.id) {
-                    // Try to find and relay to viewer tabs
-                    chrome.tabs.query({}, async (tabs) => {
-                        for (const tab of tabs) {
-                            // Skip the sender tab
-                            if (tab.id === sender.tab.id) continue;
-                            
-                            // Try to send to every tab - the viewer will handle it if it's the right one
-                            try {
-                                await chrome.tabs.sendMessage(tab.id, message);
-                            } catch (error) {
-                                // Most tabs won't have a listener, that's expected
-                            }
-                        }
-                    });
-                }
-                // Send response immediately to unblock content script
-                sendResponse({received: true});
-                break;
+            // Live updates are now handled at the top of the listener
+            // case 'live_caption_update':
+            // case 'live_attendee_update':
+            //     Handled above for synchronous relay
+            //     break;
             case 'save_session_history':
                 // Save meeting to session history using chrome.storage directly
                 try {
@@ -680,7 +702,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case 'display_captions':
-                await createViewerTab(message.transcriptArray);
+                await createViewerTab(message.transcriptArray, message.sessionId);
                 break;
             
             case 'update_badge_status':

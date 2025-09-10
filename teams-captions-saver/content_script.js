@@ -15,33 +15,107 @@ function initializePlatform() {
     SELECTORS = platformConfig.selectors;
     // console.log(`[Caption Saver] Initialized for ${platformConfig.name}`);
     
-    // Initialize SessionManager when platform is initialized
-    initializeSessionManager();
+    // Don't create session on page load - wait until actually in a meeting
+    // Session will be created when entering a meeting
     return true;
 }
 
-// Initialize SessionManager for this tab
+// Initialize SessionManager for this tab - DEPRECATED, use createNewMeetingSession instead
 async function initializeSessionManager() {
+    // This function is no longer used - sessions are created when entering meetings
+    console.log('[Caption Saver] Legacy initializeSessionManager called - ignoring');
+}
+
+// Extract meeting title from page using platform-specific logic
+function extractMeetingTitle() {
+    // Use platform-specific title extraction if available
+    if (platformConfig?.extractMeetingTitle) {
+        return platformConfig.extractMeetingTitle();
+    }
+    
+    // Fallback to basic document title extraction
+    let title = document.title;
+    
+    // Remove common suffixes based on platform
+    if (platformConfig?.name === 'Microsoft Teams') {
+        title = title.replace(/ \| Microsoft Teams.*$/, '').trim();
+    } else if (platformConfig?.name === 'Zoom') {
+        title = title.replace(/ - Zoom.*$/, '').trim();
+    } else if (platformConfig?.name === 'Google Meet') {
+        title = title.replace(/ - Google Meet.*$/, '').trim();
+    }
+    
+    return title || 'Untitled Meeting';
+}
+
+// Create a new session for a new meeting
+async function createNewMeetingSession() {
     try {
-        // Get or create a session for this tab
-        const tabId = window.location.href; // Use URL as tab identifier for content script
-        const platform = platformConfig?.name?.toLowerCase() || 'unknown';
+        // Only end previous session if it has actual content
+        if (currentSessionId) {
+            // Check if the current session has any captions
+            if (transcriptArray.length > 0) {
+                console.log(`[Caption Saver] Ending previous session with ${transcriptArray.length} captions: ${currentSessionId}`);
+                chrome.runtime.sendMessage({
+                    action: 'endSession',
+                    sessionId: currentSessionId
+                });
+            } else {
+                console.log(`[Caption Saver] Deleting empty session: ${currentSessionId}`);
+                // Delete the empty session instead of ending it
+                chrome.runtime.sendMessage({
+                    action: 'deleteSession',
+                    sessionId: currentSessionId
+                });
+            }
+        }
+        
+        // Clear transcript and attendee data for the new meeting
+        transcriptArray.length = 0;
+        attendeeData = {
+            allAttendees: new Set(),
+            currentAttendees: new Map(),
+            attendeeHistory: [],
+            lastUpdated: null,
+            meetingStartTime: new Date().toISOString()
+        };
+        chatCaptureState.capturedMessageIds.clear();
+        chatCaptureState.initialScanComplete = false;
+        chatCaptureState.initialMessagesSkipped = 0;
+        
+        // Reset meeting metadata
+        currentMeetingTitle = '';
+        recordingStartTime = null;
+        
+        // Create a new session
+        const tabId = window.location.href;
+        // Convert platform name to short form: "Microsoft Teams" -> "teams"
+        let platform = 'unknown';
+        if (platformConfig?.name === 'Microsoft Teams') {
+            platform = 'teams';
+        } else if (platformConfig?.name === 'Zoom') {
+            platform = 'zoom';
+        } else if (platformConfig?.name === 'Google Meet') {
+            platform = 'meet';
+        }
         const url = window.location.href;
         
-        // Request session creation from service worker
-        chrome.runtime.sendMessage({
+        const response = await safeSendMessageAsync({
             action: 'createSession',
             tabId: tabId,
             platform: platform,
             url: url
-        }, (response) => {
-            if (response && response.sessionId) {
-                currentSessionId = response.sessionId;
-                console.log(`[Caption Saver] Session initialized: ${currentSessionId}`);
-            }
         });
+        
+        if (response && response.sessionId) {
+            currentSessionId = response.sessionId;
+            console.log(`[Caption Saver] New meeting session created: ${currentSessionId}`);
+            return true;
+        }
+        return false;
     } catch (error) {
-        console.error('[Caption Saver] Failed to initialize SessionManager:', error);
+        console.error('[Caption Saver] Failed to create new meeting session:', error);
+        return false;
     }
 }
 
@@ -62,7 +136,7 @@ const TIMING = {
 // --- State ---
 const transcriptArray = [];
 let capturing = false;
-let meetingTitleOnStart = '';
+let currentMeetingTitle = ''; // Current meeting title
 let recordingStartTime = null;
 let observer = null;
 let observedElement = null;
@@ -153,8 +227,12 @@ async function safeSendMessageAsync(message) {
 
 // --- Real-time Broadcasting ---
 function broadcastCaptionUpdate(data) {
+    if (!currentSessionId) {
+        console.warn('[Caption Saver] No session ID when broadcasting caption update');
+    }
     safeSendMessage({
         message: "live_caption_update",
+        sessionId: currentSessionId,  // Include session ID for filtering
         ...data
     });
 }
@@ -162,6 +240,7 @@ function broadcastCaptionUpdate(data) {
 async function broadcastAttendeeUpdate(data) {
     await safeSendMessageAsync({
         message: "live_attendee_update",
+        sessionId: currentSessionId,  // Include session ID for filtering
         ...data
     });
 }
@@ -1114,6 +1193,25 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     // console.log(`[Caption Saver] Meeting state check - Was: ${wasInMeeting}, Now: ${nowInMeeting}`);
     
     if (wasInMeeting && !nowInMeeting) {
+        // Handle session end
+        if (currentSessionId) {
+            if (transcriptArray.length === 0) {
+                // Delete empty session
+                console.log(`[Caption Saver] Deleting empty session on meeting end: ${currentSessionId}`);
+                chrome.runtime.sendMessage({
+                    action: 'deleteSession',
+                    sessionId: currentSessionId
+                });
+            } else {
+                // End session with content (this adds it to history)
+                console.log(`[Caption Saver] Ending session with ${transcriptArray.length} captions: ${currentSessionId}`);
+                chrome.runtime.sendMessage({
+                    action: 'endSession',
+                    sessionId: currentSessionId
+                });
+            }
+            currentSessionId = null;
+        }
         const isMainFrame = window === window.top;
         // console.log(`Meeting transition detected: In -> Out. Checking for auto-save in ${isMainFrame ? 'main frame' : 'iframe'}.`);
         // console.log(`Platform: ${platformConfig?.name}, Transcript length: ${transcriptArray.length}, Capturing: ${capturing}`);
@@ -1129,7 +1227,7 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                 await chrome.storage.local.set({
                     zoomMeetingEnded: {
                         transcript: getCleanTranscript(),
-                        meetingTitle: meetingTitleOnStart || document.title,
+                        meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                         recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
                         attendeeReport: attendeeReport,
                         timestamp: new Date().toISOString(),
@@ -1155,7 +1253,7 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         }
         
         // Generate a unique meeting session ID
-        const currentMeetingId = `${meetingTitleOnStart}_${recordingStartTime?.toISOString() || Date.now()}`;
+        const currentMeetingId = `${currentMeetingTitle}_${recordingStartTime?.toISOString() || Date.now()}`;
         
         // Prevent duplicate auto-saves for the same meeting session
         if (autoSaveTriggered && lastMeetingId === currentMeetingId) {
@@ -1186,7 +1284,7 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                     const response = await safeSendMessageAsync({
                         message: "save_on_leave",
                         transcriptArray: cleanTranscript,
-                        meetingTitle: meetingTitleOnStart || document.title,
+                        meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                         recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
                         attendeeReport: attendeeReport
                     });
@@ -1202,7 +1300,7 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                         chrome.storage.local.set({
                             pendingAutoSave: {
                                 transcript: cleanTranscript,
-                                meetingTitle: meetingTitleOnStart || document.title,
+                                meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                                 recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
                                 attendeeReport: attendeeReport,
                                 timestamp: new Date().toISOString()
@@ -1232,7 +1330,7 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                             await safeSendMessageAsync({
                                 message: "save_on_leave",
                                 transcriptArray: transcriptBackup.transcript,
-                                meetingTitle: transcriptBackup.meetingTitle || document.title,
+                                meetingTitle: transcriptBackup.meetingTitle || 'Untitled Meeting',
                                 recordingStartTime: transcriptBackup.recordingStartTime || new Date().toISOString(),
                                 attendeeReport: transcriptBackup.attendeeData
                             });
@@ -1257,38 +1355,43 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         return;
     } else if (!wasInMeeting && nowInMeeting) {
         // Reset auto-save state when joining a new meeting
-        // console.log("Meeting transition detected: Out -> In. Resetting auto-save state.");
+        console.log("Meeting transition detected: Out -> In. Creating new session.");
         autoSaveTriggered = false;
         lastMeetingId = null;
         captionRetryInProgress = false; // Reset retry flag
+        
+        // Create a new session for the new meeting
+        await createNewMeetingSession();
+        
         // Start attendee tracking when entering meeting
         startAttendeeTracking();
         
-        // For Google Meet, setup leave button listener and check if we need to auto-enable captions
+        // Auto-enable captions for all platforms if enabled
+        setTimeout(async () => {
+            const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
+            if (autoEnableCaptions) {
+                console.log('[Caption Saver] Checking if captions need to be auto-enabled...');
+                const captionsEnabled = platformConfig.areCaptionsEnabled ? platformConfig.areCaptionsEnabled() : false;
+                
+                if (!captionsEnabled) {
+                    console.log('[Caption Saver] Captions not enabled, attempting to enable...');
+                    await attemptAutoEnableCaptions();
+                } else {
+                    console.log('[Caption Saver] Captions already enabled');
+                }
+            }
+            
+            // Then check caption state
+            handleCaptionsStateChange();
+        }, 3000); // Give meeting UI more time to load
+        
+        // For Google Meet, also setup leave button listener
         if (platformConfig && platformConfig.name === 'Google Meet') {
             setupLeaveButtonListener();
-            
-            // Try to auto-enable captions after a delay
-            setTimeout(async () => {
-                const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
-                if (autoEnableCaptions) {
-                    console.log('[Caption Saver] Checking if captions need to be auto-enabled...');
-                    const captionsEnabled = platformConfig.areCaptionsEnabled();
-                    
-                    if (!captionsEnabled) {
-                        console.log('[Caption Saver] Captions not enabled, attempting to enable...');
-                        await attemptAutoEnableCaptions();
-                    } else {
-                        console.log('[Caption Saver] Captions already enabled');
-                    }
-                }
-                
-                // Then check caption state
-                handleCaptionsStateChange();
-            }, 3000); // Give meeting UI more time to load
         }
     }
     
+    // Check caption state after all transitions
     handleCaptionsStateChange();
 }, 'Meeting state change handler');
 
@@ -1409,10 +1512,27 @@ async function startCaptureSession() {
 
     capturing = true;
     wasInMeeting = true; // Ensure we know we're in a meeting when capturing starts
-    meetingTitleOnStart = document.title;
+    currentMeetingTitle = extractMeetingTitle();
     recordingStartTime = new Date();
     
-    console.log(`Capture started. Title: "${meetingTitleOnStart}", Time: ${recordingStartTime.toLocaleString()}`);
+    console.log(`Capture started. Title: "${currentMeetingTitle}", Time: ${recordingStartTime.toLocaleString()}`);
+    
+    // Create a session if we don't have one yet
+    if (!currentSessionId) {
+        console.log('[Caption Saver] No session exists, creating one now...');
+        await createNewMeetingSession();
+    }
+    
+    // Update session with proper meeting title
+    if (currentSessionId && currentMeetingTitle && currentMeetingTitle !== 'Untitled Meeting') {
+        chrome.runtime.sendMessage({
+            action: 'updateSession',
+            sessionId: currentSessionId,
+            data: {
+                meetingTitle: currentMeetingTitle
+            }
+        });
+    }
     
     // Start periodic backup
     startPeriodicBackup();
@@ -1459,14 +1579,22 @@ function startPeriodicBackup() {
                 if (chrome.storage && chrome.storage.local) {
                     // Use session-based storage if we have a session ID
                     if (currentSessionId) {
-                        // Update session with current data
+                        // Update session with current data and potentially updated meeting title
+                        const latestTitle = extractMeetingTitle();
+                        // Update currentMeetingTitle if we found a better one
+                        if (latestTitle !== 'Untitled Meeting' && 
+                            latestTitle !== 'Calendar' && 
+                            latestTitle !== 'Microsoft Teams' &&
+                            latestTitle.trim() !== '') {
+                            currentMeetingTitle = latestTitle;
+                        }
                         chrome.runtime.sendMessage({
                             action: 'updateSession',
                             sessionId: currentSessionId,
                             data: {
                                 transcript: transcriptArray,
                                 attendeeReport: attendeeData,
-                                meetingTitle: meetingTitleOnStart,
+                                meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                                 captionCount: transcriptArray.length,
                                 attendeeCount: attendeeData.allAttendees.size
                             }
@@ -1476,7 +1604,7 @@ function startPeriodicBackup() {
                         await chrome.storage.local.set({
                             transcriptBackup: {
                                 transcript: transcriptArray,
-                                meetingTitle: meetingTitleOnStart,
+                                meetingTitle: currentMeetingTitle,
                                 recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
                                 lastBackup: new Date().toISOString(),
                                 attendeeData: attendeeData
@@ -1525,14 +1653,16 @@ function stopCaptureSession() {
     // Final backup before stopping
     if (transcriptArray.length > 0) {
         if (currentSessionId) {
-            // Update session with final data
+            // Update session with final data - use the best title we've seen
+            const finalTitle = currentMeetingTitle || currentMeetingTitle || 'Untitled Meeting';
+            console.log(`[Caption Saver] Saving final session data - Session: ${currentSessionId}, Title: "${finalTitle}", Captions: ${transcriptArray.length}`);
             chrome.runtime.sendMessage({
                 action: 'updateSession',
                 sessionId: currentSessionId,
                 data: {
                     transcript: transcriptArray,
                     attendeeReport: attendeeData,
-                    meetingTitle: meetingTitleOnStart,
+                    meetingTitle: finalTitle,
                     captionCount: transcriptArray.length,
                     attendeeCount: attendeeData.allAttendees.size,
                     status: 'ended'
@@ -1543,7 +1673,7 @@ function stopCaptureSession() {
             chrome.storage.local.set({
                 transcriptBackup: {
                     transcript: transcriptArray,
-                    meetingTitle: meetingTitleOnStart,
+                    meetingTitle: currentMeetingTitle || currentMeetingTitle,
                     recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
                     lastBackup: new Date().toISOString(),
                     attendeeData: attendeeData
@@ -1575,7 +1705,7 @@ async function saveToSessionHistory() {
         const response = await safeSendMessageAsync({
             message: "save_session_history",
             transcriptArray: cleanTranscript,
-            meetingTitle: meetingTitleOnStart || 'Untitled Meeting',
+            meetingTitle: currentMeetingTitle || currentMeetingTitle || 'Untitled Meeting',
             attendeeReport: attendeeReport
         });
         
@@ -1841,7 +1971,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                     safeSendMessage({
                         message: "download_captions",
                         transcriptArray: getCleanTranscript(),
-                        meetingTitle: meetingTitleOnStart,
+                        meetingTitle: currentMeetingTitle,
                         format: request.format,
                         recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
                         attendeeReport: attendeeReport
@@ -1860,7 +1990,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             // Send current transcript to viewer for initial load
             sendResponse({ 
                 transcriptArray: getCleanTranscript(),
-                meetingTitle: meetingTitleOnStart,
+                meetingTitle: currentMeetingTitle,
                 isCapturing: capturing
             });
             break;
@@ -1876,10 +2006,11 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                 }
             }
             
-            // Always open the viewer - it will update live as captions come in
+            // Open the viewer with session ID for filtering live updates
             safeSendMessage({
                 message: "display_captions",
-                transcriptArray: getCleanTranscript()
+                transcriptArray: getCleanTranscript(),
+                sessionId: currentSessionId  // Pass session ID to viewer
             });
             break;
 

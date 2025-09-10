@@ -24,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let autoScroll = true;
     let pendingUpdates = [];
     let updateTimer = null;
+    let viewerSessionId = null;  // Session ID to filter live updates
 
     // --- Utility ---
     function escapeHtml(str) {
@@ -668,9 +669,13 @@ document.addEventListener('DOMContentLoaded', () => {
     async function initialize() {
         try {
             // Check if we have captions passed via storage (from popup)
-            const result = await chrome.storage.local.get(['captionsToView', 'viewerData']);
+            const result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId']);
             let transcript = result.captionsToView;
             let viewerData = result.viewerData;
+            
+            // Store the session ID for filtering live updates
+            viewerSessionId = result.viewerSessionId;
+            console.log(`[Viewer] Initialized with session ID: ${viewerSessionId}`);
             
             // Use viewerData if captionsToView is not available
             if (!transcript && viewerData && viewerData.transcriptArray) {
@@ -720,7 +725,9 @@ document.addEventListener('DOMContentLoaded', () => {
             captionsContainer.innerHTML = '<p class="status-message">Unable to load captions. Please try opening the extension popup again.</p>';
         } finally {
             // Clean up storage to prevent re-displaying on next open
+            // But keep viewerSessionId for filtering live updates
             chrome.storage.local.remove(['captionsToView', 'viewerData']);
+            // Note: viewerSessionId is kept for the duration of this viewer session
         }
     }
     
@@ -774,22 +781,30 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!messageListenerSetup) {
             messageListenerSetup = true;
             chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
+                // Accept live updates from service worker (no sender.tab) or marked as fromServiceWorker
+                const isFromServiceWorker = !sender.tab || request.fromServiceWorker;
+                
                 // For live updates, only process from service worker to avoid duplicates
-                // But allow other messages from content scripts (like initial connection)
-                if (sender.tab && (request.message === 'live_caption_update' || request.message === 'live_attendee_update')) {
+                if (!isFromServiceWorker && (request.message === 'live_caption_update' || request.message === 'live_attendee_update')) {
                     // This is a live update directly from content script - ignore it
-                    // We'll get it via service worker relay
+                    console.log('[Viewer] Ignoring direct live update from content script');
                     return;
                 }
                 
                 const source = sender.tab ? `tab ${sender.tab.id}` : 'service worker';
-                console.log('[Viewer] Received message:', request.message, 'from', source);
+                console.log('[Viewer] Received message:', request?.message || 'undefined', 'from', source, 'Full request:', request);
                 
                 // Log test messages
                 if (request.test) {
                     console.log('[Viewer] Received TEST broadcast with live update');
                 }
                 if (request.message === "live_caption_update") {
+                    // Filter by session ID if we have one
+                    if (viewerSessionId && request.sessionId && request.sessionId !== viewerSessionId) {
+                        console.log(`[Viewer] Ignoring caption from different session: ${request.sessionId} (viewing ${viewerSessionId})`);
+                        return;
+                    }
+                    
                     isLiveStreaming = true;
                     lastUpdateTime = Date.now(); // Update timestamp when receiving messages
                     queueUpdate(request);
@@ -799,6 +814,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     
                     console.log("[Viewer] Processing live caption update:", request.type, request.caption?.Name, request.caption?.Text?.substring(0, 30));
                 } else if (request.message === "live_attendee_update") {
+                    // Filter by session ID if we have one
+                    if (viewerSessionId && request.sessionId && request.sessionId !== viewerSessionId) {
+                        console.log(`[Viewer] Ignoring attendee update from different session: ${request.sessionId}`);
+                        return;
+                    }
+                    
                     // Handle attendee updates if needed
                     console.log("Attendee update:", request);
                     lastUpdateTime = Date.now(); // Update timestamp for attendee updates too

@@ -37,6 +37,24 @@ const PLATFORM_CONFIGS = {
             return !!document.querySelector("button[data-tid='hangup-main-btn'], button[data-tid='hangup-leave-button']");
         },
         
+        extractMeetingTitle: () => {
+            // For Teams, try to get from page title while in meeting
+            // Teams format: "Meeting Title | Microsoft Teams" or "Calendar | Meeting Title | Microsoft Teams"
+            const docTitle = document.title;
+            
+            // If title contains "Calendar |", extract the meeting name part
+            if (docTitle.includes('Calendar |')) {
+                const parts = docTitle.split('|');
+                if (parts.length >= 2) {
+                    // Return the second part (meeting title)
+                    return parts[1].trim();
+                }
+            }
+            
+            // Otherwise, remove the "| Microsoft Teams" suffix
+            return docTitle.replace(/ \| Microsoft Teams.*$/, '').replace(/^\(\d+\) /, '').trim() || 'Untitled Meeting';
+        },
+        
         // Chat capture methods for Teams
         chatCapture: {
             isSupported: () => true,
@@ -280,6 +298,29 @@ const PLATFORM_CONFIGS = {
             
             window.lastMeetingActiveState = inMeeting;
             return inMeeting;
+        },
+        
+        extractMeetingTitle: () => {
+            // For Google Meet, extract from page title
+            // Format: "Meeting Title - Google Meet" or just "Meet - Meeting Code"
+            const docTitle = document.title;
+            
+            // Remove the "- Google Meet" suffix
+            let title = docTitle.replace(/ - Google Meet.*$/, '').trim();
+            
+            // If it's just "Meet - xyz-abc-def", try to get a better title from the page
+            if (title.startsWith('Meet - ')) {
+                // Try to find meeting name in the UI if available
+                const meetingNameElement = document.querySelector('[data-meeting-title], .meeting-title, .rua5Nb');
+                if (meetingNameElement && meetingNameElement.textContent.trim()) {
+                    title = meetingNameElement.textContent.trim();
+                } else {
+                    // Use the meeting code as fallback
+                    title = title.replace('Meet - ', 'Meeting ');
+                }
+            }
+            
+            return title || 'Untitled Meeting';
         },
         isPanelOpen: () => {
             const panel = document.querySelector('aside[aria-label="Side panel"]');
@@ -747,6 +788,39 @@ const PLATFORM_CONFIGS = {
             
             return inMeeting;
         },
+        
+        extractMeetingTitle: () => {
+            // For Zoom, extract from page title or meeting info
+            // Format: "Zoom Meeting" or "Meeting Title - Zoom"
+            const docTitle = document.title;
+            
+            // Try to find meeting topic in the UI first
+            const topicElement = document.querySelector('.meeting-topic, .meeting-info-container__title, [aria-label*="Topic:"]');
+            if (topicElement && topicElement.textContent.trim()) {
+                return topicElement.textContent.trim();
+            }
+            
+            // Clean up the document title
+            let title = docTitle;
+            
+            // Remove common Zoom suffixes
+            title = title.replace(/ - Zoom.*$/, '').trim();
+            title = title.replace(/^Zoom Meeting$/, '').trim();
+            title = title.replace(/^Zoom$/, '').trim();
+            
+            // If we just have "Zoom Meeting" or empty, return a generic title
+            if (!title || title === 'Zoom Meeting' || title === 'Zoom') {
+                // Try to get meeting ID as last resort
+                const meetingId = window.location.pathname.match(/\/wc\/(\d+)/)?.[1];
+                if (meetingId) {
+                    return `Zoom Meeting ${meetingId}`;
+                }
+                return 'Zoom Meeting';
+            }
+            
+            return title;
+        },
+        
         areCaptionsEnabled: () => {
             // Check if captions are enabled (they might be visually hidden but still present)
             const liveTranscriptionBox = document.querySelector('.live-transcription-subtitle__box');
