@@ -224,8 +224,8 @@ class SessionManager {
         };
 
         this.sessions.set(sessionId, session);
-        this.persistSession(sessionId);
-        console.log(`[SessionManager] Created session ${sessionId} for ${platform}`);
+        // Don't persist to storage yet - wait until we have actual content
+        console.log(`[SessionManager] Created session ${sessionId} for ${platform} (not persisted yet)`);
         
         return sessionId;
     }
@@ -296,6 +296,12 @@ class SessionManager {
             Object.assign(session.metadata, data.metadata);
             session.metadata.lastActivity = new Date().toISOString();
         }
+        
+        // Update meeting title if provided
+        if (data.meetingTitle && data.meetingTitle !== 'Untitled Meeting') {
+            session.metadata.meetingTitle = data.meetingTitle;
+            console.log(`[SessionManager] Updated meeting title: ${data.meetingTitle}`);
+        }
 
         // Update stats
         if (data.stats) {
@@ -334,6 +340,12 @@ class SessionManager {
     async persistSession(sessionId) {
         const session = this.sessions.get(sessionId);
         if (!session) return;
+
+        // Only persist sessions with actual content
+        if (session.stats.captionCount === 0 && session.stats.attendeeCount === 0) {
+            console.log(`[SessionManager] Skipping persist for empty session ${sessionId}`);
+            return;
+        }
 
         try {
             // Save session metadata and stats
@@ -493,6 +505,13 @@ class SessionManager {
         }
 
         const session = this.sessions.get(sessionId);
+        
+        // Check if session has any content
+        if (session.stats.captionCount === 0 && session.stats.attendeeCount === 0) {
+            console.log(`[SessionManager] Session ${sessionId} has no content, deleting instead of ending`);
+            return await this.deleteSession(sessionId);
+        }
+        
         session.metadata.status = 'ended';
         session.metadata.endTime = new Date().toISOString();
         
@@ -502,7 +521,16 @@ class SessionManager {
         session.stats.duration = Math.round((end - start) / 1000); // in seconds
 
         await this.persistSession(sessionId);
-        console.log(`[SessionManager] Ended session ${sessionId}`);
+        
+        // Add to session history
+        const { sessionHistory = [] } = await chrome.storage.local.get('sessionHistory');
+        if (!sessionHistory.includes(sessionId)) {
+            sessionHistory.push(sessionId);
+            await chrome.storage.local.set({ sessionHistory });
+            console.log(`[SessionManager] Added session ${sessionId} to history`);
+        }
+        
+        console.log(`[SessionManager] Ended session ${sessionId} with ${session.stats.captionCount} captions`);
         
         return true;
     }

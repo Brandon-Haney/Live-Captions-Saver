@@ -890,16 +890,24 @@ async function loadSessionList() {
             const speakerCount = session.speakerCount || (session.speakers ? session.speakers.length : 0);
             const platform = session.platform || 'unknown';
             
-            // Platform color
+            // Platform color and display name
             let platformColor = '#6c757d';
-            if (platform === 'teams') platformColor = '#6264a7';
-            else if (platform === 'zoom') platformColor = '#2d8cff';
-            else if (platform === 'meet') platformColor = '#00897b';
+            let platformDisplay = 'UNKNOWN';
+            if (platform === 'teams' || platform === 'microsoft teams') {
+                platformColor = '#6264a7';
+                platformDisplay = 'TEAMS';
+            } else if (platform === 'zoom') {
+                platformColor = '#2d8cff';
+                platformDisplay = 'ZOOM';
+            } else if (platform === 'meet' || platform === 'google meet') {
+                platformColor = '#00897b';
+                platformDisplay = 'MEET';
+            }
             
             html += `
                 <div class="session-item" data-id="${sessionId}">
                     <div class="session-title">
-                        <span style="color: ${platformColor}; font-weight: bold;">[${platform.toUpperCase()}]</span>
+                        <span style="color: ${platformColor}; font-weight: bold;">[${platformDisplay}]</span>
                         ${escapeHtml(title)}
                     </div>
                     <div class="session-meta">
