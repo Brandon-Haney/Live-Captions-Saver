@@ -34,7 +34,16 @@ const PLATFORM_CONFIGS = {
             };
         },
         isMeetingActive: () => {
-            return !!document.querySelector("button[data-tid='hangup-main-btn'], button[data-tid='hangup-leave-button']");
+            // Multiple checks for Teams meeting state
+            const hasHangupButton = !!document.querySelector("button[data-tid='hangup-main-btn'], button[data-tid='hangup-leave-button']");
+            
+            // Additional checks for meeting indicators
+            const hasMeetingControls = !!document.querySelector('[data-tid="calling-toolbar"], [data-tid="calling-controls-container"]');
+            const hasStageView = !!document.querySelector('[data-tid="stage-view"], [data-tid="video-gallery"]');
+            const hasCallDuration = !!document.querySelector('[data-tid="call-duration"]');
+            
+            // Consider in meeting if we have hangup button OR other strong meeting indicators
+            return hasHangupButton || (hasMeetingControls && (hasStageView || hasCallDuration));
         },
         
         extractMeetingTitle: () => {
