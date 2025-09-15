@@ -1083,9 +1083,24 @@ function stopChatCapture() {
 let meetingStateDebounceTimer = null;
 let captionsStateDebounceTimer = null;
 let leaveButtonListener = null;
+let visibilityChangeHandler = null;
 
 function setupMeetingObserver() {
     if (meetingObserver) return;
+    
+    // Setup visibility change handler to recheck meeting state when tab becomes visible
+    if (!visibilityChangeHandler) {
+        visibilityChangeHandler = () => {
+            if (!document.hidden) {
+                console.log('[Caption Saver] Tab became visible, rechecking meeting state');
+                // Delay check to allow DOM to stabilize
+                setTimeout(() => {
+                    handleMeetingStateChange();
+                }, 500);
+            }
+        };
+        document.addEventListener('visibilitychange', visibilityChangeHandler);
+    }
     
     meetingObserver = new MutationObserver((mutations) => {
         // For Google Meet, check if meeting ended message appeared
@@ -1191,6 +1206,13 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     const nowInMeeting = isUserInMeeting();
     
     // console.log(`[Caption Saver] Meeting state check - Was: ${wasInMeeting}, Now: ${nowInMeeting}`);
+    
+    // Check if tab is hidden - if so, don't trigger auto-save as user might be switching to another meeting
+    if (document.hidden && wasInMeeting && !nowInMeeting) {
+        console.log('[Caption Saver] Tab is hidden and meeting state changed - likely switching tabs, not triggering auto-save');
+        // Don't update wasInMeeting state yet - wait for tab to become visible again
+        return;
+    }
     
     if (wasInMeeting && !nowInMeeting) {
         // Handle session end
