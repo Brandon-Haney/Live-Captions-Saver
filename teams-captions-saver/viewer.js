@@ -103,25 +103,60 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    function handleSpeakerClick(event) {
-        const nameElement = event.target;
-        if (!nameElement.classList.contains('editable-speaker')) return;
-        
-        console.log('[Speaker Edit] Clicked on speaker:', nameElement.textContent);
-        const originalName = nameElement.dataset.original;
+    function editSpeakerAlias(originalName, nameSpan, btn) {
         const currentAlias = speakerAliases[originalName] || originalName;
-        console.log('[Speaker Edit] Original name:', originalName, 'Current alias:', currentAlias);
+        console.log('[Speaker Edit] Editing speaker:', originalName, 'Current alias:', currentAlias);
         
         // Create inline editor
         const input = document.createElement('input');
         input.type = 'text';
         input.value = currentAlias;
         input.className = 'speaker-alias-input';
-        input.style.width = Math.max(100, nameElement.offsetWidth) + 'px';
+        input.style.cssText = `
+            padding: 4px 8px;
+            margin-right: 5px;
+            border: 2px solid #0078d4;
+            border-radius: 3px;
+            font-size: 14px;
+            width: 150px;
+        `;
         
-        // Replace name with input
-        nameElement.style.display = 'none';
-        nameElement.parentNode.insertBefore(input, nameElement.nextSibling);
+        // Hide the button temporarily
+        btn.style.display = 'none';
+        
+        // Insert input in its place
+        const inputContainer = document.createElement('div');
+        inputContainer.style.cssText = 'display: inline-flex; align-items: center; margin-right: 5px;';
+        inputContainer.appendChild(input);
+        
+        // Add save/cancel buttons
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = '✓';
+        saveBtn.style.cssText = `
+            padding: 4px 8px;
+            margin-left: 2px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+        `;
+        
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = '✕';
+        cancelBtn.style.cssText = `
+            padding: 4px 8px;
+            margin-left: 2px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+        `;
+        
+        inputContainer.appendChild(saveBtn);
+        inputContainer.appendChild(cancelBtn);
+        btn.parentNode.insertBefore(inputContainer, btn);
         input.focus();
         input.select();
         
@@ -130,14 +165,12 @@ document.addEventListener('DOMContentLoaded', () => {
             
             if (newAlias && newAlias !== originalName) {
                 speakerAliases[originalName] = newAlias;
-                nameElement.textContent = newAlias;
-                nameElement.classList.add('has-alias');
-                nameElement.title = `Original: ${originalName} (Click to edit)`;
+                nameSpan.textContent = newAlias;
+                btn.setAttribute('aria-label', `Filter by ${newAlias}`);
             } else {
                 delete speakerAliases[originalName];
-                nameElement.textContent = originalName;
-                nameElement.classList.remove('has-alias');
-                nameElement.title = 'Click to set alias';
+                nameSpan.textContent = originalName;
+                btn.setAttribute('aria-label', `Filter by ${originalName}`);
             }
             
             // Save aliases to storage
@@ -146,19 +179,25 @@ document.addEventListener('DOMContentLoaded', () => {
             // Update all instances of this speaker
             updateAllSpeakerInstances(originalName);
             
-            // Remove input and show name
-            input.remove();
-            nameElement.style.display = '';
+            // Clean up and show the button again
+            inputContainer.remove();
+            btn.style.display = '';
         };
         
-        input.addEventListener('blur', saveAlias);
+        const cancelEdit = () => {
+            inputContainer.remove();
+            btn.style.display = '';
+        };
+        
+        saveBtn.addEventListener('click', saveAlias);
+        cancelBtn.addEventListener('click', cancelEdit);
+        
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 saveAlias();
             } else if (e.key === 'Escape') {
-                input.remove();
-                nameElement.style.display = '';
+                cancelEdit();
             }
         });
     }
@@ -167,16 +206,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const displayName = speakerAliases[originalName] || originalName;
         const hasAlias = !!speakerAliases[originalName];
         
-        document.querySelectorAll(`.caption[data-original-speaker="${originalName}"] .editable-speaker`).forEach(elem => {
+        // Update all caption instances - use correct selector without 'editable-speaker' class
+        document.querySelectorAll(`.caption[data-original-speaker="${originalName}"] .name`).forEach(elem => {
             elem.textContent = displayName;
             elem.classList.toggle('has-alias', hasAlias);
-            elem.title = hasAlias ? `Original: ${originalName} (Click to edit)` : 'Click to set alias';
+            elem.title = hasAlias ? `Original: ${originalName}` : '';
         });
         
-        // Update speaker filter buttons
-        const filterBtn = speakerFiltersContainer.querySelector(`button[data-speaker="${originalName}"]`);
+        // Update speaker filter button if it exists
+        const filterBtn = speakerFiltersContainer.querySelector(`button[data-original-speaker="${originalName}"]`);
         if (filterBtn) {
-            filterBtn.textContent = displayName;
+            const nameSpan = filterBtn.querySelector('span:not(.speaker-edit-icon)');
+            if (nameSpan) {
+                nameSpan.textContent = displayName;
+            }
+            filterBtn.setAttribute('aria-label', `Filter by ${displayName}`);
         }
     }
     
@@ -336,14 +380,10 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function updateAnalyticsIncremental(caption) {
         // Check if this is a new speaker we haven't seen before
-        const speakerButton = speakerFiltersContainer.querySelector(`button[data-speaker="${caption.Name}"]`);
-        if (!speakerButton) {
+        const speakerContainer = speakerFiltersContainer.querySelector(`.speaker-filter-container button[data-original-speaker="${caption.Name}"]`);
+        if (!speakerContainer) {
             // New speaker detected, add their button
-            const btn = document.createElement('button');
-            btn.textContent = caption.Name;
-            btn.dataset.speaker = caption.Name;
-            btn.setAttribute('aria-label', `Filter by ${caption.Name}`);
-            speakerFiltersContainer.appendChild(btn);
+            createSpeakerFilterButton(caption.Name);
         }
         
         // Recalculate and display analytics
@@ -420,9 +460,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="caption-content">
                     <span class="message-type" title="${typeLabel}">${typeIcon}</span>
                     <span class="caption-header">
-                        <span class="name editable-speaker ${hasAlias ? 'has-alias' : ''}" 
+                        <span class="name ${hasAlias ? 'has-alias' : ''}" 
                               data-original="${escapeHtml(item.Name)}" 
-                              title="${hasAlias ? 'Original: ' + escapeHtml(item.Name) + ' (Click to edit)' : 'Click to set alias'}">
+                              title="${hasAlias ? 'Original: ' + escapeHtml(item.Name) : ''}">
                             ${escapeHtml(displayName)}
                         </span>
                     </span>
@@ -446,18 +486,60 @@ document.addEventListener('DOMContentLoaded', () => {
         // Get existing speaker buttons (to track what we already have)
         const existingSpeakers = new Set();
         speakerFiltersContainer.querySelectorAll('button:not(#show-all-btn)').forEach(btn => {
-            existingSpeakers.add(btn.dataset.speaker);
+            const originalSpeaker = btn.dataset.originalSpeaker || btn.dataset.speaker;
+            existingSpeakers.add(originalSpeaker);
         });
         
         // Only add new speakers that don't already have buttons
         speakers.forEach(speaker => {
             if (!existingSpeakers.has(speaker)) {
-                const btn = document.createElement('button');
-                btn.textContent = speaker;
-                btn.dataset.speaker = speaker;
-                btn.setAttribute('aria-label', `Filter by ${speaker}`);
-                speakerFiltersContainer.appendChild(btn);
+                createSpeakerFilterButton(speaker);
             }
+        });
+    }
+    
+    function createSpeakerFilterButton(speaker) {
+        const btn = document.createElement('button');
+        const displayName = speakerAliases[speaker] || speaker;
+        btn.dataset.speaker = speaker;
+        btn.dataset.originalSpeaker = speaker;
+        btn.setAttribute('aria-label', `Filter by ${displayName}`);
+        btn.className = 'speaker-filter-btn';
+        btn.style.cssText = 'position: relative; padding-right: 24px;'; // Extra padding for edit icon
+        
+        // Create span for the speaker name
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = displayName;
+        btn.appendChild(nameSpan);
+        
+        // Add edit icon as a small superscript-style element
+        const editBtn = document.createElement('span');
+        editBtn.className = 'speaker-edit-icon';
+        editBtn.innerHTML = '✏️';
+        editBtn.style.cssText = `
+            position: absolute;
+            top: 2px;
+            right: 4px;
+            font-size: 10px;
+            cursor: pointer;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+        `;
+        editBtn.title = `Edit alias for ${speaker}`;
+        editBtn.onclick = (e) => {
+            e.stopPropagation();
+            editSpeakerAlias(speaker, nameSpan, btn);
+        };
+        
+        btn.appendChild(editBtn);
+        speakerFiltersContainer.appendChild(btn);
+        
+        // Show edit icon more prominently on hover
+        btn.addEventListener('mouseenter', () => {
+            editBtn.style.opacity = '1';
+        });
+        btn.addEventListener('mouseleave', () => {
+            editBtn.style.opacity = '0.6';
         });
     }
 
@@ -506,10 +588,25 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function handleSpeakerFilterClick(e) {
-        if (e.target.tagName !== 'BUTTON') return;
+        // Handle clicks on the button or its children (except edit icon)
+        if (e.target.classList.contains('speaker-edit-icon')) return;
         
+        // Find the actual button element (could be the target or its parent)
+        let filterBtn = e.target;
+        if (!filterBtn.classList.contains('speaker-filter-btn') && filterBtn.id !== 'show-all-btn') {
+            filterBtn = e.target.closest('.speaker-filter-btn');
+            if (!filterBtn && e.target.parentElement?.id !== 'show-all-btn') {
+                filterBtn = e.target.closest('#show-all-btn');
+            }
+        }
+        
+        if (!filterBtn) return;
+        
+        // Remove active from all buttons
         speakerFiltersContainer.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-        e.target.classList.add('active');
+        speakerFiltersContainer.querySelectorAll('.speaker-filter-btn').forEach(b => b.classList.remove('active'));
+        
+        filterBtn.classList.add('active');
         applyFilters();
     }
 
@@ -717,12 +814,7 @@ document.addEventListener('DOMContentLoaded', () => {
         copyAllBtn.addEventListener('click', handleCopyAllClick);
         saveAllBtn.addEventListener('click', handleSaveAllClick);
         
-        // Speaker alias editing - use event delegation for dynamic elements
-        captionsContainer.addEventListener('click', (e) => {
-            if (e.target.classList.contains('editable-speaker')) {
-                handleSpeakerClick(e);
-            }
-        });
+        // No longer need inline caption editing since we use filter buttons
         
         // Smart scroll monitoring
         window.addEventListener('scroll', () => {
