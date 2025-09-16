@@ -495,6 +495,51 @@
         #scroll-to-bottom-btn:hover {
             background: #106ebe !important;
         }
+        
+        /* Speaker Filter Button Styles */
+        .speaker-filter-btn {
+            position: relative;
+            padding: 6px 24px 6px 12px;
+            margin-right: 5px;
+            border: 1px solid #ccc;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .speaker-filter-btn:hover {
+            background: #f0f0f0;
+        }
+        
+        .speaker-filter-btn.active {
+            background: #0078d4;
+            color: white;
+            border-color: #0078d4;
+        }
+        
+        .speaker-filter-btn .speaker-edit-icon {
+            position: absolute;
+            top: 2px;
+            right: 4px;
+            font-size: 10px;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+        }
+        
+        .speaker-filter-btn:hover .speaker-edit-icon {
+            opacity: 1;
+        }
+        
+        .speaker-filter-btn.active .speaker-edit-icon {
+            opacity: 0.8;
+        }
+        
+        /* Keep has-alias style for captions */
+        .name.has-alias {
+            font-style: italic;
+            color: #0078d4;
+        }
     </style>
     <script src="viewer.js" defer></script>
 </head>
