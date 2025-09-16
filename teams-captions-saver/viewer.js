@@ -1117,11 +1117,12 @@ document.addEventListener('DOMContentLoaded', () => {
         // Try to connect to content script if it exists
         // Also request current transcript if viewer opened mid-meeting
         try {
-            // Check for Teams, Google Meet, and Zoom tabs
-            const teamsTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+            // Check for Teams (both work and personal), Google Meet, and Zoom tabs
+            const teamsWorkTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+            const teamsPersonalTabs = await chrome.tabs.query({ url: "https://teams.live.com/*" });
             const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
             const zoomTabs = await chrome.tabs.query({ url: "https://*.zoom.us/*" });
-            const tabs = [...teamsTabs, ...meetTabs, ...zoomTabs];
+            const tabs = [...teamsWorkTabs, ...teamsPersonalTabs, ...meetTabs, ...zoomTabs];
             
             // Try each tab until we find one with a content script
             for (const tab of tabs) {
@@ -1251,11 +1252,12 @@ document.addEventListener('DOMContentLoaded', () => {
             await addMeetingEndedMessage();
             
             // Try to reconnect
-            // Check for Teams, Google Meet, and Zoom tabs
-            const teamsTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+            // Check for Teams (both work and personal), Google Meet, and Zoom tabs
+            const teamsWorkTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+            const teamsPersonalTabs = await chrome.tabs.query({ url: "https://teams.live.com/*" });
             const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
             const zoomTabs = await chrome.tabs.query({ url: "https://*.zoom.us/*" });
-            const tabs = [...teamsTabs, ...meetTabs, ...zoomTabs];
+            const tabs = [...teamsWorkTabs, ...teamsPersonalTabs, ...meetTabs, ...zoomTabs];
             if (tabs.length > 0) {
                 try {
                     const response = await chrome.tabs.sendMessage(tabs[0].id, { message: "viewer_ready" });

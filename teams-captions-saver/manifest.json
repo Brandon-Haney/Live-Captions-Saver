@@ -18,6 +18,7 @@
 
   "host_permissions": [
     "https://teams.microsoft.com/*",
+    "https://teams.live.com/*",
     "https://meet.google.com/*",
     "https://web.zoom.us/*",
     "https://app.zoom.us/*",
@@ -38,6 +39,7 @@
     {
       "matches": [
         "https://teams.microsoft.com/*",
+        "https://teams.live.com/*",
         "https://meet.google.com/*",
         "https://web.zoom.us/*",
         "https://app.zoom.us/*",

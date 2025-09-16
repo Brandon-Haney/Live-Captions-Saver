@@ -141,6 +141,9 @@ const PLATFORM_CONFIGS = {
         }
     },
     
+    // Teams Live uses the same interface as Teams Microsoft, so we'll reuse the configuration
+    'teams.live.com': null, // Will be set below after teams.microsoft.com is defined
+    
     'meet.google.com': {
         name: 'Google Meet',
         
@@ -1246,6 +1249,12 @@ const PLATFORM_CONFIGS = {
             isSupported: () => false  // Mark as not supported for now
         }
     }
+};
+
+// Copy the Teams configuration for teams.live.com (personal accounts use the same interface)
+PLATFORM_CONFIGS['teams.live.com'] = {
+    ...PLATFORM_CONFIGS['teams.microsoft.com'],
+    name: 'Microsoft Teams (Personal)' // Slightly different name to distinguish
 };
 
 // Helper function to get current platform config
