@@ -82,6 +82,7 @@ async function getActiveMeetingTab() {
     // Check for supported platforms
     const supportedPlatforms = [
         "https://teams.microsoft.com",
+        "https://teams.live.com",
         "https://meet.google.com",
         "https://web.zoom.us",
         "https://app.zoom.us",
@@ -98,6 +99,8 @@ async function getActiveMeetingTab() {
         if (platformInfo) {
             if (meetingTab.url.includes('teams.microsoft.com')) {
                 platformInfo.textContent = 'Connected to Microsoft Teams';
+            } else if (meetingTab.url.includes('teams.live.com')) {
+                platformInfo.textContent = 'Connected to Microsoft Teams (Personal)';
             } else if (meetingTab.url.includes('meet.google.com')) {
                 platformInfo.textContent = 'Connected to Google Meet';
             }
@@ -1049,7 +1052,7 @@ async function initializePopup() {
             UI_ELEMENTS.statusMessage.textContent = `${activeSessions.length} active session(s). Select one above to manage.`;
             UI_ELEMENTS.statusMessage.style.color = '#17a2b8';
         } else {
-            UI_ELEMENTS.statusMessage.innerHTML = 'Please open a <a href="https://teams.microsoft.com" target="_blank">Teams</a>, <a href="https://meet.google.com" target="_blank">Google Meet</a>, or <a href="https://web.zoom.us" target="_blank">Zoom</a> tab to use this extension.';
+            UI_ELEMENTS.statusMessage.innerHTML = 'Please open a <a href="https://teams.microsoft.com" target="_blank">Teams</a>, <a href="https://teams.live.com" target="_blank">Teams Personal</a>, <a href="https://meet.google.com" target="_blank">Google Meet</a>, or <a href="https://web.zoom.us" target="_blank">Zoom</a> tab to use this extension.';
             UI_ELEMENTS.statusMessage.style.color = '#dc3545';
         }
         return;
