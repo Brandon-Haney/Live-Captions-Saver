@@ -427,6 +427,74 @@
             font-size: 13px;
             color: #6c757d;
         }
+        
+        /* Speaker Alias Styles */
+        .editable-speaker {
+            cursor: pointer;
+            padding: 2px 4px;
+            border-radius: 3px;
+            transition: background-color 0.2s;
+            display: inline-block;
+        }
+        
+        .editable-speaker:hover {
+            background-color: rgba(0, 120, 212, 0.1);
+        }
+        
+        .editable-speaker.has-alias {
+            font-style: italic;
+            color: #0078d4;
+        }
+        
+        .speaker-alias-input {
+            padding: 2px 4px;
+            border: 2px solid #0078d4;
+            border-radius: 3px;
+            font-size: inherit;
+            font-family: inherit;
+            outline: none;
+        }
+        
+        /* New Caption Indicator */
+        .new-caption-indicator {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+            display: none;
+        }
+        
+        .new-caption-indicator button {
+            padding: 10px 20px;
+            background: #0078d4;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            box-shadow: 0 4px 12px rgba(0, 120, 212, 0.3);
+            animation: pulse 2s infinite;
+        }
+        
+        .new-caption-indicator button:hover {
+            background: #106ebe;
+        }
+        
+        /* Viewer Controls */
+        #viewer-controls {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        
+        #viewer-controls input[type="checkbox"] {
+            margin-right: 5px;
+        }
+        
+        #scroll-to-bottom-btn:hover {
+            background: #106ebe !important;
+        }
     </style>
     <script src="viewer.js" defer></script>
 </head>

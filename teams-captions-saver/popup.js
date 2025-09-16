@@ -24,7 +24,6 @@ const UI_ELEMENTS = {
     deleteTemplateBtn: document.getElementById('deleteTemplateBtn'),
     customTemplatesGroup: document.getElementById('customTemplatesGroup'),
     aiInstructions: document.getElementById('aiInstructions'),
-    speakerAliasList: document.getElementById('speaker-alias-list'),
     promptButtons: document.querySelectorAll('.prompt-button'),
     // Session History Elements
     sessionHistory: document.getElementById('sessionHistory'),
@@ -400,32 +399,6 @@ function updateSaveButtonText(format) {
     UI_ELEMENTS.saveButton.textContent = format === 'ai' ? 'Save for AI' : `Save as ${format.toUpperCase()}`;
 }
 
-async function renderSpeakerAliases(tab) {
-    const { speakerAliasList } = UI_ELEMENTS;
-    try {
-        const response = await chrome.tabs.sendMessage(tab.id, { message: "get_unique_speakers" });
-        if (!response?.speakers?.length) {
-            speakerAliasList.innerHTML = '<p>No speakers detected yet.</p>';
-            return;
-        }
-
-        const { speakerAliases = {} } = await chrome.storage.session.get('speakerAliases');
-        speakerAliasList.innerHTML = ''; // Clear existing
-
-        response.speakers.forEach(speaker => {
-            const item = document.createElement('div');
-            item.className = 'alias-item';
-            item.innerHTML = `
-                <label title="${escapeHtml(speaker)}">${escapeHtml(speaker)}</label>
-                <input type="text" data-original-name="${escapeHtml(speaker)}" placeholder="Enter alias..." value="${escapeHtml(speakerAliases[speaker] || '')}">
-            `;
-            speakerAliasList.appendChild(item);
-        });
-    } catch (error) {
-        console.error("Could not fetch or render speaker aliases:", error);
-        speakerAliasList.innerHTML = '<p>Unable to load speakers. Please refresh the Teams tab and try again.</p>';
-    }
-}
 
 // --- Template Management ---
 async function loadCustomTemplates() {
@@ -663,15 +636,6 @@ function setupEventListeners() {
         chrome.storage.sync.set({ aiInstructions: e.target.value });
     });
 
-    UI_ELEMENTS.speakerAliasList.addEventListener('change', async (e) => {
-        if (e.target.tagName === 'INPUT') {
-            const { originalName } = e.target.dataset;
-            const newAlias = e.target.value.trim();
-            const { speakerAliases = {} } = await chrome.storage.session.get('speakerAliases');
-            speakerAliases[originalName] = newAlias;
-            await chrome.storage.session.set({ speakerAliases });
-        }
-    });
 
     // Action Button Listeners
     UI_ELEMENTS.saveButton.addEventListener('click', async () => {
@@ -775,8 +739,7 @@ async function handleCopy(target) {
         }
         
         if (transcriptArray) {
-            const { speakerAliases = {} } = await chrome.storage.session.get('speakerAliases');
-            const formattedText = await formatTranscript(transcriptArray, speakerAliases, copyType);
+            const formattedText = await formatTranscript(transcriptArray, {}, copyType);
             await navigator.clipboard.writeText(formattedText);
             UI_ELEMENTS.statusMessage.textContent = "Copied to clipboard!";
             UI_ELEMENTS.statusMessage.style.color = '#28a745';
@@ -1121,9 +1084,6 @@ async function initializePopup() {
             // Enable buttons if we have either captions or attendees
             const hasData = status.captionCount > 0 || (status.attendeeCount > 0 && status.isInMeeting === false);
             updateButtonStates(hasData, status.isInMeeting);
-            if (status.captionCount > 0) {
-                renderSpeakerAliases(tab);
-            }
         }
     } catch (error) {
         // This error is expected when content script isn't loaded yet

@@ -21,16 +21,163 @@ document.addEventListener('DOMContentLoaded', () => {
     let isLiveStreaming = false;
     let lastUpdateTime = Date.now();
     let activeSearch = '';
-    let autoScroll = true;
+    let autoScroll = true;  // Default to true for auto-following captions
     let pendingUpdates = [];
     let updateTimer = null;
     let viewerSessionId = null;  // Session ID to filter live updates
+    let speakerAliases = {};  // Session-specific speaker aliases
+    let isNearBottom = true;  // Track if user is near bottom of scroll
 
     // --- Utility ---
     function escapeHtml(str) {
         const p = document.createElement("p");
         p.textContent = str;
         return p.innerHTML;
+    }
+    
+    // --- Smart Scroll Functions ---
+    function checkIfNearBottom() {
+        // Check the actual scrollable container (body or document element)
+        const scrollPosition = window.pageYOffset + window.innerHeight;
+        const scrollHeight = document.body.scrollHeight;
+        isNearBottom = (scrollHeight - scrollPosition) < 150; // Within 150px of bottom
+        // console.log(`[Scroll Check] Position: ${scrollPosition}, Height: ${scrollHeight}, Near bottom: ${isNearBottom}`);
+    }
+    
+    function scrollToBottom() {
+        const lastCaption = captionsContainer.lastElementChild;
+        if (lastCaption) {
+            lastCaption.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            // Add a small extra scroll to ensure the last caption is fully visible
+            setTimeout(() => {
+                window.scrollBy(0, 50);
+            }, 300); // Wait for smooth scroll to finish
+        }
+        const indicator = document.getElementById('new-caption-indicator');
+        if (indicator) {
+            indicator.style.display = 'none';
+        }
+    }
+    
+    function showNewCaptionIndicator() {
+        let indicator = document.getElementById('new-caption-indicator');
+        if (!indicator) {
+            indicator = document.createElement('div');
+            indicator.id = 'new-caption-indicator';
+            indicator.className = 'new-caption-indicator';
+            
+            const button = document.createElement('button');
+            button.textContent = '↓ New captions available';
+            button.addEventListener('click', scrollToBottom);
+            
+            indicator.appendChild(button);
+            document.body.appendChild(indicator);
+        }
+        indicator.style.display = 'block';
+    }
+    
+    // --- Speaker Alias Functions ---
+    async function loadSessionAliases() {
+        if (!viewerSessionId) return;
+        
+        try {
+            const key = `aliases_${viewerSessionId}`;
+            const result = await chrome.storage.local.get(key);
+            speakerAliases = result[key] || {};
+            console.log(`[Viewer] Loaded aliases for session ${viewerSessionId}:`, speakerAliases);
+        } catch (error) {
+            console.error('Error loading session aliases:', error);
+            speakerAliases = {};
+        }
+    }
+    
+    async function saveSessionAliases() {
+        if (!viewerSessionId) return;
+        
+        try {
+            const key = `aliases_${viewerSessionId}`;
+            await chrome.storage.local.set({ [key]: speakerAliases });
+            console.log(`[Viewer] Saved aliases for session ${viewerSessionId}:`, speakerAliases);
+        } catch (error) {
+            console.error('Error saving session aliases:', error);
+        }
+    }
+    
+    function handleSpeakerClick(event) {
+        const nameElement = event.target;
+        if (!nameElement.classList.contains('editable-speaker')) return;
+        
+        console.log('[Speaker Edit] Clicked on speaker:', nameElement.textContent);
+        const originalName = nameElement.dataset.original;
+        const currentAlias = speakerAliases[originalName] || originalName;
+        console.log('[Speaker Edit] Original name:', originalName, 'Current alias:', currentAlias);
+        
+        // Create inline editor
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = currentAlias;
+        input.className = 'speaker-alias-input';
+        input.style.width = Math.max(100, nameElement.offsetWidth) + 'px';
+        
+        // Replace name with input
+        nameElement.style.display = 'none';
+        nameElement.parentNode.insertBefore(input, nameElement.nextSibling);
+        input.focus();
+        input.select();
+        
+        const saveAlias = async () => {
+            const newAlias = input.value.trim();
+            
+            if (newAlias && newAlias !== originalName) {
+                speakerAliases[originalName] = newAlias;
+                nameElement.textContent = newAlias;
+                nameElement.classList.add('has-alias');
+                nameElement.title = `Original: ${originalName} (Click to edit)`;
+            } else {
+                delete speakerAliases[originalName];
+                nameElement.textContent = originalName;
+                nameElement.classList.remove('has-alias');
+                nameElement.title = 'Click to set alias';
+            }
+            
+            // Save aliases to storage
+            await saveSessionAliases();
+            
+            // Update all instances of this speaker
+            updateAllSpeakerInstances(originalName);
+            
+            // Remove input and show name
+            input.remove();
+            nameElement.style.display = '';
+        };
+        
+        input.addEventListener('blur', saveAlias);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                saveAlias();
+            } else if (e.key === 'Escape') {
+                input.remove();
+                nameElement.style.display = '';
+            }
+        });
+    }
+    
+    function updateAllSpeakerInstances(originalName) {
+        const displayName = speakerAliases[originalName] || originalName;
+        const hasAlias = !!speakerAliases[originalName];
+        
+        document.querySelectorAll(`.caption[data-original-speaker="${originalName}"] .editable-speaker`).forEach(elem => {
+            elem.textContent = displayName;
+            elem.classList.toggle('has-alias', hasAlias);
+            elem.title = hasAlias ? `Original: ${originalName} (Click to edit)` : 'Click to set alias';
+        });
+        
+        // Update speaker filter buttons
+        const filterBtn = speakerFiltersContainer.querySelector(`button[data-speaker="${originalName}"]`);
+        if (filterBtn) {
+            filterBtn.textContent = displayName;
+        }
     }
     
     // --- Helper Functions ---
@@ -91,9 +238,21 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         
-        // Auto-scroll if enabled
-        if (autoScroll) {
+        // Smart auto-scroll logic
+        checkIfNearBottom();
+        
+        // Auto-scroll if:
+        // 1. User has auto-scroll enabled AND is near bottom, OR
+        // 2. User is very close to bottom (within 150px) regardless of setting
+        if ((autoScroll && isNearBottom) || isNearBottom) {
             newCaptionElement.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            // Add a small extra scroll to ensure the caption is fully visible
+            setTimeout(() => {
+                window.scrollBy(0, 50);
+            }, 300); // Wait for smooth scroll to finish
+        } else {
+            // Show indicator if not following and not near bottom
+            showNewCaptionIndicator();
         }
         
         // Update analytics
@@ -247,8 +406,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const typeIcon = isChat ? chatIconSVG : captionIconSVG;
         const typeLabel = isChat ? 'Chat' : 'Caption';
         
+        // Apply speaker alias if exists
+        const displayName = speakerAliases[item.Name] || item.Name;
+        const hasAlias = speakerAliases[item.Name] ? true : false;
+        
         return `
-            <div class="caption ${typeClass}" data-speaker="${escapeHtml(item.Name)}" data-index="${index}" data-type="${item.Type || 'caption'}">
+            <div class="caption ${typeClass}" data-speaker="${escapeHtml(item.Name)}" data-original-speaker="${escapeHtml(item.Name)}" data-index="${index}" data-type="${item.Type || 'caption'}">
                 <button class="copy-btn" title="Copy this line" aria-label="Copy this line">
                     ${copyIconSVG}
                     <span class="tooltip-text">Copy</span>
@@ -257,7 +420,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="caption-content">
                     <span class="message-type" title="${typeLabel}">${typeIcon}</span>
                     <span class="caption-header">
-                        <span class="name">${escapeHtml(item.Name)}</span>
+                        <span class="name editable-speaker ${hasAlias ? 'has-alias' : ''}" 
+                              data-original="${escapeHtml(item.Name)}" 
+                              title="${hasAlias ? 'Original: ' + escapeHtml(item.Name) + ' (Click to edit)' : 'Click to set alias'}">
+                            ${escapeHtml(displayName)}
+                        </span>
                     </span>
                     <span class="text">${escapeHtml(item.Text)}</span>
                 </div>
@@ -550,6 +717,25 @@ document.addEventListener('DOMContentLoaded', () => {
         copyAllBtn.addEventListener('click', handleCopyAllClick);
         saveAllBtn.addEventListener('click', handleSaveAllClick);
         
+        // Speaker alias editing - use event delegation for dynamic elements
+        captionsContainer.addEventListener('click', (e) => {
+            if (e.target.classList.contains('editable-speaker')) {
+                handleSpeakerClick(e);
+            }
+        });
+        
+        // Smart scroll monitoring
+        window.addEventListener('scroll', () => {
+            checkIfNearBottom();
+            // Hide new caption indicator if user scrolled to bottom
+            if (isNearBottom) {
+                const indicator = document.getElementById('new-caption-indicator');
+                if (indicator) {
+                    indicator.style.display = 'none';
+                }
+            }
+        });
+        
         // Session history handlers
         historyBtn.addEventListener('click', showSessionHistory);
         closeModal.addEventListener('click', () => sessionModal.style.display = 'none');
@@ -693,6 +879,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     displayAnalytics(analytics);
                 }
                 
+                // Load session-specific aliases before rendering
+                await loadSessionAliases();
+                
                 renderCaptions(transcript);
                 populateSpeakerFilters(transcript);
                 setupEventListeners();
@@ -759,8 +948,9 @@ document.addEventListener('DOMContentLoaded', () => {
         
         captionsContainer.appendChild(endedMessage);
         
-        // Auto-scroll to show the message
-        if (autoScroll) {
+        // Smart auto-scroll to show the message
+        checkIfNearBottom();
+        if (autoScroll && isNearBottom) {
             endedMessage.scrollIntoView({ behavior: 'smooth', block: 'end' });
         }
     }
@@ -890,19 +1080,68 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function setupAutoScrollToggle() {
-        // Create auto-scroll toggle button
-        const searchContainer = document.querySelector('.search-container');
-        if (searchContainer && !document.getElementById('auto-scroll-toggle')) {
-            const autoScrollBtn = document.createElement('button');
-            autoScrollBtn.id = 'auto-scroll-toggle';
-            autoScrollBtn.className = 'filter-btn active';
-            autoScrollBtn.textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
-            autoScrollBtn.onclick = () => {
-                autoScroll = !autoScroll;
-                autoScrollBtn.textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
-                autoScrollBtn.classList.toggle('active', autoScroll);
+        // Create controls container if it doesn't exist
+        let controlsContainer = document.getElementById('viewer-controls');
+        if (!controlsContainer) {
+            controlsContainer = document.createElement('div');
+            controlsContainer.id = 'viewer-controls';
+            controlsContainer.style.cssText = `
+                display: flex;
+                gap: 10px;
+                margin-bottom: 10px;
+                align-items: center;
+            `;
+            const searchContainer = document.querySelector('.search-container');
+            if (searchContainer) {
+                searchContainer.parentNode.insertBefore(controlsContainer, searchContainer.nextSibling);
+            }
+        }
+        
+        // Create auto-scroll toggle
+        if (!document.getElementById('auto-scroll-toggle')) {
+            const autoScrollContainer = document.createElement('div');
+            autoScrollContainer.style.cssText = 'display: flex; align-items: center; gap: 5px;';
+            
+            const autoScrollCheckbox = document.createElement('input');
+            autoScrollCheckbox.type = 'checkbox';
+            autoScrollCheckbox.id = 'auto-scroll-toggle';
+            autoScrollCheckbox.checked = autoScroll;
+            autoScrollCheckbox.onchange = () => {
+                autoScroll = autoScrollCheckbox.checked;
+                autoScrollLabel.textContent = `Follow Live Captions`;
+                if (autoScroll && isNearBottom) {
+                    const lastCaption = captionsContainer.lastElementChild;
+                    if (lastCaption) {
+                        lastCaption.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                    }
+                }
             };
-            searchContainer.appendChild(autoScrollBtn);
+            
+            const autoScrollLabel = document.createElement('label');
+            autoScrollLabel.htmlFor = 'auto-scroll-toggle';
+            autoScrollLabel.textContent = `Follow Live Captions`;
+            autoScrollLabel.style.cursor = 'pointer';
+            
+            autoScrollContainer.appendChild(autoScrollCheckbox);
+            autoScrollContainer.appendChild(autoScrollLabel);
+            controlsContainer.appendChild(autoScrollContainer);
+        }
+        
+        // Add scroll to bottom button
+        if (!document.getElementById('scroll-to-bottom-btn')) {
+            const scrollBtn = document.createElement('button');
+            scrollBtn.id = 'scroll-to-bottom-btn';
+            scrollBtn.textContent = '↓ Jump to Live';
+            scrollBtn.style.cssText = `
+                padding: 5px 10px;
+                background: #007bff;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+            `;
+            scrollBtn.onclick = scrollToBottom;
+            controlsContainer.appendChild(scrollBtn);
         }
     }
     
