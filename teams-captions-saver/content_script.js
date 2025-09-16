@@ -1308,7 +1308,8 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                         transcriptArray: cleanTranscript,
                         meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                         recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
-                        attendeeReport: attendeeReport
+                        attendeeReport: attendeeReport,
+                        sessionId: currentSessionId
                     });
                     
                     console.log("Auto-save message sent successfully. Response:", response);
@@ -1354,7 +1355,8 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                                 transcriptArray: transcriptBackup.transcript,
                                 meetingTitle: transcriptBackup.meetingTitle || 'Untitled Meeting',
                                 recordingStartTime: transcriptBackup.recordingStartTime || new Date().toISOString(),
-                                attendeeReport: transcriptBackup.attendeeData
+                                attendeeReport: transcriptBackup.attendeeData,
+                                sessionId: currentSessionId
                             });
                         }
                     }
@@ -1525,12 +1527,8 @@ async function startCaptureSession() {
     console.log("New caption session detected. Starting capture.");
     transcriptArray.length = 0;
     
-    // Try to clear speaker aliases, but don't fail if storage is restricted
-    try {
-        await chrome.storage.session.remove('speakerAliases');
-    } catch (e) {
-        // Expected on Google Meet, ignore
-    }
+    // Note: Speaker aliases are now managed per-session in the viewer
+    // No need to clear global aliases here
 
     capturing = true;
     wasInMeeting = true; // Ensure we know we're in a meeting when capturing starts
@@ -1996,7 +1994,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                         meetingTitle: currentMeetingTitle,
                         format: request.format,
                         recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
-                        attendeeReport: attendeeReport
+                        attendeeReport: attendeeReport,
+                        sessionId: currentSessionId
                     });
                 })();
             } else {

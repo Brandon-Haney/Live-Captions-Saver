@@ -467,7 +467,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     
     (async () => {
-        const { speakerAliases } = await chrome.storage.session.get('speakerAliases');
+        // Speaker aliases are now managed per-session in the viewer
+        // For downloads, we'll use the session-specific aliases if available
+        let speakerAliases = {};
 
         // Handle session management actions first
         if (message.action) {
@@ -524,8 +526,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const { transcriptArray, meetingTitle, format, recordingStartTime, attendeeReport } = message;
                 
                 if (transcriptArray && transcriptArray.length > 0) {
-                    // Get speaker aliases if they exist
-                    const { speakerAliases = {} } = await chrome.storage.session.get('speakerAliases');
+                    // Get session-specific aliases if they exist
+                    const sessionAliasKey = `aliases_${message.sessionId || 'default'}`;
+                    const aliasData = await chrome.storage.local.get(sessionAliasKey);
+                    const speakerAliases = aliasData[sessionAliasKey] || {};
                     
                     await saveTranscript(
                         meetingTitle || 'Meeting', 
@@ -556,8 +560,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             console.log(`[Zoom] Auto-save data - Transcript: ${zoomMeetingEnded.transcript.length} items, Attendees: ${zoomMeetingEnded.attendeeReport?.totalUniqueAttendees || 0}`);
                             const formatToSave = defaultSaveFormat || 'txt';
                             
-                            // Get speaker aliases if they exist
-                            const { speakerAliases = {} } = await chrome.storage.session.get('speakerAliases');
+                            // Get session-specific aliases if they exist
+                            const sessionAliasKey = `aliases_${currentSessionId || 'default'}`;
+                            const aliasData = await chrome.storage.local.get(sessionAliasKey);
+                            const speakerAliases = aliasData[sessionAliasKey] || {};
                             
                             await saveTranscript(
                                 zoomMeetingEnded.meetingTitle, 
@@ -659,9 +665,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 break;
                 
-            case 'download_captions':
-                await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, message.format, message.recordingStartTime, true, message.attendeeReport);
+            case 'download_captions': {
+                // Get session-specific aliases if they exist
+                const downloadSessionKey = `aliases_${message.sessionId || 'default'}`;
+                const downloadAliasData = await chrome.storage.local.get(downloadSessionKey);
+                const downloadAliases = downloadAliasData[downloadSessionKey] || {};
+                await saveTranscript(message.meetingTitle, message.transcriptArray, downloadAliases, message.format, message.recordingStartTime, true, message.attendeeReport);
                 break;
+            }
 
             case 'save_on_leave':
                 // Generate unique ID for this save request
@@ -681,7 +692,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     if (settings.autoSaveOnEnd && message.transcriptArray.length > 0) {
                         const formatToSave = settings.defaultSaveFormat || 'txt';
                         console.log(`Auto-saving transcript in ${formatToSave.toUpperCase()} format.`);
-                        await saveTranscript(message.meetingTitle, message.transcriptArray, speakerAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport);
+                        // Get session-specific aliases if they exist
+                        const autoSaveSessionKey = `aliases_${message.sessionId || 'default'}`;
+                        const autoSaveAliasData = await chrome.storage.local.get(autoSaveSessionKey);
+                        const autoSaveAliases = autoSaveAliasData[autoSaveSessionKey] || {};
+                        await saveTranscript(message.meetingTitle, message.transcriptArray, autoSaveAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport);
                         console.log('Auto-save completed successfully.');
                         
                         // Also save to session history
