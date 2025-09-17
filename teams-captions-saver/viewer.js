@@ -380,8 +380,8 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function updateAnalyticsIncremental(caption) {
         // Check if this is a new speaker we haven't seen before
-        const speakerContainer = speakerFiltersContainer.querySelector(`.speaker-filter-container button[data-original-speaker="${caption.Name}"]`);
-        if (!speakerContainer) {
+        const speakerButton = speakerFiltersContainer.querySelector(`button[data-original-speaker="${caption.Name}"]`);
+        if (!speakerButton) {
             // New speaker detected, add their button
             createSpeakerFilterButton(caption.Name);
         }
