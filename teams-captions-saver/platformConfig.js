@@ -51,17 +51,35 @@ const PLATFORM_CONFIGS = {
             // Teams format: "Meeting Title | Microsoft Teams" or "Calendar | Meeting Title | Microsoft Teams"
             const docTitle = document.title;
             
+            // Don't return generic page names that appear after redirect
+            if (docTitle === 'Calendar' || 
+                docTitle === 'Microsoft Teams' || 
+                docTitle === 'Teams' ||
+                docTitle.startsWith('Calendar |') && !docTitle.includes('|', 10)) {
+                return 'Untitled Meeting';
+            }
+            
             // If title contains "Calendar |", extract the meeting name part
             if (docTitle.includes('Calendar |')) {
                 const parts = docTitle.split('|');
                 if (parts.length >= 2) {
-                    // Return the second part (meeting title)
-                    return parts[1].trim();
+                    // Return the second part (meeting title) but validate it's not generic
+                    const meetingPart = parts[1].trim();
+                    if (meetingPart && meetingPart !== 'Microsoft Teams') {
+                        return meetingPart;
+                    }
                 }
             }
             
             // Otherwise, remove the "| Microsoft Teams" suffix
-            return docTitle.replace(/ \| Microsoft Teams.*$/, '').replace(/^\(\d+\) /, '').trim() || 'Untitled Meeting';
+            const cleanedTitle = docTitle.replace(/ \| Microsoft Teams.*$/, '').replace(/^\(\d+\) /, '').trim();
+            
+            // Final validation - don't return generic names
+            if (cleanedTitle === 'Calendar' || cleanedTitle === 'Teams' || cleanedTitle === '') {
+                return 'Untitled Meeting';
+            }
+            
+            return cleanedTitle || 'Untitled Meeting';
         },
         
         // Chat capture methods for Teams

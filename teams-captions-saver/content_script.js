@@ -83,9 +83,12 @@ async function createNewMeetingSession() {
         chatCaptureState.initialScanComplete = false;
         chatCaptureState.initialMessagesSkipped = 0;
         
-        // Reset meeting metadata
-        currentMeetingTitle = '';
-        recordingStartTime = null;
+        // Reset meeting metadata only if not already set
+        // This preserves the title if we're creating a new session after ending one
+        if (!currentMeetingTitle || currentMeetingTitle === '') {
+            currentMeetingTitle = '';
+            recordingStartTime = null;
+        }
         
         // Create a new session
         const tabId = window.location.href;
@@ -1300,13 +1303,31 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                 const attendeeReport = await getAttendeeReport();
                 const cleanTranscript = getCleanTranscript();
                 
+                // DON'T extract new title after meeting ends - use the cached one from when meeting was active
+                // extractMeetingTitle() will return "Calendar" after leaving the meeting!
+                // Also check transcriptBackup for title if currentMeetingTitle was cleared
+                let titleToUse = currentMeetingTitle;
+                
+                // If title was cleared, try to get it from backup storage
+                if (!titleToUse || titleToUse === 'Untitled Meeting') {
+                    const backupData = await chrome.storage.local.get('transcriptBackup');
+                    if (backupData.transcriptBackup?.meetingTitle) {
+                        titleToUse = backupData.transcriptBackup.meetingTitle;
+                        console.log(`Auto-save: Retrieved title from backup: "${titleToUse}"`);
+                    }
+                }
+                
+                // Final fallback
+                titleToUse = titleToUse || 'Untitled Meeting';
+                
                 console.log(`Auto-save: Sending ${cleanTranscript.length} transcript items from ${window === window.top ? 'main frame' : 'iframe'}`);
+                console.log(`Auto-save: Using title "${titleToUse}" (cached from active meeting)`);
                 
                 try {
                     const response = await safeSendMessageAsync({
                         message: "save_on_leave",
                         transcriptArray: cleanTranscript,
-                        meetingTitle: currentMeetingTitle || 'Untitled Meeting',
+                        meetingTitle: titleToUse,
                         recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
                         attendeeReport: attendeeReport,
                         sessionId: currentSessionId
@@ -1349,11 +1370,14 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                         const { transcriptBackup } = await chrome.storage.local.get('transcriptBackup');
                         if (transcriptBackup && transcriptBackup.transcript && transcriptBackup.transcript.length > 0) {
                             console.log(`[Zoom main frame] Found backup data - Transcript: ${transcriptBackup.transcript.length} items`);
+                            // Use the cached title from backup, don't extract from page
+                            const titleToUse = transcriptBackup.meetingTitle || currentMeetingTitle || 'Untitled Meeting';
+                            
                             // Send save message with backup data
                             await safeSendMessageAsync({
                                 message: "save_on_leave",
                                 transcriptArray: transcriptBackup.transcript,
-                                meetingTitle: transcriptBackup.meetingTitle || 'Untitled Meeting',
+                                meetingTitle: titleToUse,
                                 recordingStartTime: transcriptBackup.recordingStartTime || new Date().toISOString(),
                                 attendeeReport: transcriptBackup.attendeeData,
                                 sessionId: currentSessionId
@@ -1601,11 +1625,15 @@ function startPeriodicBackup() {
                     if (currentSessionId) {
                         // Update session with current data and potentially updated meeting title
                         const latestTitle = extractMeetingTitle();
-                        // Update currentMeetingTitle if we found a better one
+                        // Update currentMeetingTitle ONLY if we found a better one AND we're still in the meeting
+                        // Don't update if title is generic or if we've been redirected
                         if (latestTitle !== 'Untitled Meeting' && 
                             latestTitle !== 'Calendar' && 
                             latestTitle !== 'Microsoft Teams' &&
-                            latestTitle.trim() !== '') {
+                            latestTitle !== 'Teams' &&
+                            !latestTitle.includes('Calendar |') &&
+                            latestTitle.trim() !== '' &&
+                            platformConfig?.isMeetingActive?.()) {
                             currentMeetingTitle = latestTitle;
                         }
                         chrome.runtime.sendMessage({
@@ -1673,8 +1701,8 @@ function stopCaptureSession() {
     // Final backup before stopping
     if (transcriptArray.length > 0) {
         if (currentSessionId) {
-            // Update session with final data - use the best title we've seen
-            const finalTitle = currentMeetingTitle || currentMeetingTitle || 'Untitled Meeting';
+            // Update session with final data - use cached title (don't extract as page may have changed)
+            const finalTitle = currentMeetingTitle || 'Untitled Meeting';
             console.log(`[Caption Saver] Saving final session data - Session: ${currentSessionId}, Title: "${finalTitle}", Captions: ${transcriptArray.length}`);
             chrome.runtime.sendMessage({
                 action: 'updateSession',
@@ -1693,7 +1721,7 @@ function stopCaptureSession() {
             chrome.storage.local.set({
                 transcriptBackup: {
                     transcript: transcriptArray,
-                    meetingTitle: currentMeetingTitle || currentMeetingTitle,
+                    meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                     recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
                     lastBackup: new Date().toISOString(),
                     attendeeData: attendeeData
@@ -1725,7 +1753,7 @@ async function saveToSessionHistory() {
         const response = await safeSendMessageAsync({
             message: "save_session_history",
             transcriptArray: cleanTranscript,
-            meetingTitle: currentMeetingTitle || currentMeetingTitle || 'Untitled Meeting',
+            meetingTitle: currentMeetingTitle || extractMeetingTitle() || 'Untitled Meeting',
             attendeeReport: attendeeReport
         });
         
@@ -1988,10 +2016,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                         attendeeCount: attendeeReport ? attendeeReport.totalUniqueAttendees : 0,
                         attendees: attendeeReport ? attendeeReport.attendeeList : []
                     });
+                    // Use the cached meeting title, don't extract from page
+                    const titleToUse = currentMeetingTitle || 'Untitled Meeting';
+                    
                     safeSendMessage({
                         message: "download_captions",
                         transcriptArray: getCleanTranscript(),
-                        meetingTitle: currentMeetingTitle,
+                        meetingTitle: titleToUse,
                         format: request.format,
                         recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
                         attendeeReport: attendeeReport,

@@ -841,6 +841,52 @@ class SessionManager {
         this.sessions.clear();
         console.log('[SessionManager] Cleared all sessions');
     }
+    
+    // Get formatted session index for viewer display
+    async getSessionIndex() {
+        const allSessions = await this.getAllSessions();
+        const formattedSessions = [];
+        
+        for (const session of allSessions) {
+            try {
+                // Format platform name for display
+                let platformPrefix = '';
+                if (session.platform) {
+                    switch(session.platform) {
+                        case 'teams':
+                            platformPrefix = '[TEAMS] ';
+                            break;
+                        case 'zoom':
+                            platformPrefix = '[ZOOM] ';
+                            break;
+                        case 'meet':
+                            platformPrefix = '[MEET] ';
+                            break;
+                    }
+                }
+                
+                // Format the session for display
+                formattedSessions.push({
+                    id: session.sessionId,
+                    title: platformPrefix + (session.meetingTitle || 'Untitled Meeting'),
+                    timestamp: session.startTime,
+                    date: new Date(session.startTime).toLocaleDateString(),
+                    time: new Date(session.startTime).toLocaleTimeString(),
+                    duration: this.formatDuration(session.duration || 0),
+                    captionCount: session.captionCount || 0,
+                    attendeeCount: session.attendeeCount || 0,
+                    speakers: session.speakers || []
+                });
+            } catch (error) {
+                console.error(`[SessionManager] Error formatting session ${session.sessionId}:`, error);
+            }
+        }
+        
+        // Sort by timestamp (newest first)
+        formattedSessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        
+        return formattedSessions;
+    }
 }
 
 // Export for use in other scripts
