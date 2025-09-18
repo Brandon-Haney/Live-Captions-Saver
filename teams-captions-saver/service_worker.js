@@ -2,6 +2,9 @@
 importScripts('sessionManager.js');
 const sessionManager = new SessionManager();
 
+// --- Track pending downloads to set their filenames ---
+const pendingDownloads = new Map();
+
 // --- Utility Functions ---
 function getSanitizedMeetingName(fullTitle) {
     if (!fullTitle) return "Meeting";
@@ -131,11 +134,11 @@ function formatAsDoc(transcript, attendeeReport) {
     return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Meeting Transcript</title></head><body>${body}</body></html>`;
 }
 
-async function formatForAi(transcript, meetingName, recordingStartTime, attendeeReport) {
+async function formatForAi(transcript, meetingTitle, recordingStartTime, attendeeReport) {
     const { aiInstructions = '' } = await chrome.storage.sync.get('aiInstructions');
     const date = recordingStartTime ? new Date(recordingStartTime) : new Date();
     
-    let metadataHeader = `Meeting Title: ${meetingName}\nDate: ${date.toLocaleString()}`;
+    let metadataHeader = `Meeting Title: ${meetingTitle}\nDate: ${date.toLocaleString()}`;
     
     // Add attendee information if available
     if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
@@ -170,12 +173,49 @@ function escapeHtml(str) {
 
 // --- Core Actions ---
 async function downloadFile(filename, content, mimeType, saveAs) {
-    const url = `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`;
-    chrome.downloads.download({
-        url: url,
-        filename: filename,
-        saveAs: saveAs
-    });
+    // Ensure filename is not empty or undefined
+    if (!filename || filename.trim() === '') {
+        console.error('[downloadFile] ERROR: Filename is empty! Using fallback.');
+        filename = `transcript_${new Date().toISOString().split('T')[0]}.txt`;
+    }
+    
+    try {
+        const url = `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`;
+        
+        // Ensure filename is relative to Downloads directory (no leading slashes)
+        let finalFilename = filename.replace(/^[\/\\]+/, '');
+        
+        const downloadOptions = {
+            url: url,
+            filename: finalFilename,
+            saveAs: saveAs,
+            conflictAction: 'uniquify'  // Automatically rename if file exists
+        };
+        
+        // Store the desired filename for auto-downloads
+        // Chrome ignores the filename parameter when saveAs is false,
+        // so we need to use onDeterminingFilename to set it
+        if (!saveAs && finalFilename) {
+            pendingDownloads.set('next', finalFilename);
+        }
+        
+        const downloadId = await chrome.downloads.download(downloadOptions);
+        
+        // Associate download ID with filename for onDeterminingFilename handler
+        if (!saveAs && finalFilename) {
+            pendingDownloads.set(downloadId, finalFilename);
+            // Clean up after a delay
+            setTimeout(() => {
+                pendingDownloads.delete(downloadId);
+                pendingDownloads.delete('next');
+            }, 5000);
+        }
+        
+        console.log(`[downloadFile] Download initiated: ${finalFilename}`);
+        
+    } catch (error) {
+        console.error('[downloadFile] Download failed:', error.message);
+    }
     
     // Notify viewer that transcript was saved
     try {
@@ -196,15 +236,19 @@ async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
     const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-MM-SS
     const attendeeCount = attendeeReport ? attendeeReport.totalUniqueAttendees : 0;
     
+    const sanitizedTitle = getSanitizedMeetingName(meetingTitle);
+    
     const replacements = {
         '{date}': dateStr,
         '{time}': timeStr,
-        '{title}': getSanitizedMeetingName(meetingTitle),
+        '{title}': sanitizedTitle,
         '{format}': format,
         '{attendees}': attendeeCount > 0 ? `${attendeeCount}_attendees` : ''
     };
     
+    // Use the provided pattern or default
     let filename = pattern || '{date}_{title}_{format}';
+    
     for (const [key, value] of Object.entries(replacements)) {
         filename = filename.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), value);
     }
@@ -212,15 +256,26 @@ async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
     // Clean up any double underscores or trailing underscores
     filename = filename.replace(/__+/g, '_').replace(/_+$/, '');
     
+    // If filename is empty or just underscores, use a fallback
+    if (!filename || filename === '_' || filename === '') {
+        filename = `Meeting_${dateStr}`;
+    }
+    
     return filename;
 }
 
 async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt, attendeeReport = null) {
+    // Validate and fix meeting title
+    if (!meetingTitle || meetingTitle.trim() === '') {
+        meetingTitle = 'Untitled Meeting';
+    }
+    
     const processedTranscript = applyAliasesToTranscript(transcriptArray, aliases);
     const processedAttendeeReport = applyAliasesToAttendeeReport(attendeeReport, aliases);
     
     // Get filename pattern from settings
     const { filenamePattern } = await chrome.storage.sync.get('filenamePattern');
+    
     const filename = await generateFilename(filenamePattern, meetingTitle, format, processedAttendeeReport);
 
     let content, extension, mimeType;
@@ -234,7 +289,7 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
         case 'json':
             // For JSON, include both transcript and attendee data
             const jsonData = {
-                meetingTitle: meetingName,
+                meetingTitle: meetingTitle,
                 recordingStartTime,
                 transcript: processedTranscript,
                 attendees: processedAttendeeReport
@@ -249,7 +304,7 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
             mimeType = 'application/msword';
             break;
         case 'ai':
-            content = await formatForAi(processedTranscript, meetingName, recordingStartTime, processedAttendeeReport);
+            content = await formatForAi(processedTranscript, meetingTitle, recordingStartTime, processedAttendeeReport);
             extension = 'txt';
             mimeType = 'text/plain';
             break;
@@ -263,7 +318,7 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
     
     // Add extension to filename
     const fullFilename = `${filename}.${extension}`;
-    downloadFile(fullFilename, content, mimeType, saveAsPrompt);
+    await downloadFile(fullFilename, content, mimeType, saveAsPrompt);
 }
 
 // --- State Management ---
@@ -432,6 +487,27 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
             });
         }
     }
+});
+
+// --- Download Filename Handler ---
+// Chrome ignores the filename parameter when saveAs is false (auto-download)
+// This handler ensures our filenames are used for auto-downloads
+chrome.downloads.onDeterminingFilename?.addListener((downloadItem, suggest) => {
+    // Check if we have a pending filename for this download
+    const pendingFilename = pendingDownloads.get(downloadItem.id) || pendingDownloads.get('next');
+    
+    if (pendingFilename) {
+        suggest({
+            filename: pendingFilename,
+            conflictAction: 'uniquify'
+        });
+        // Clean up
+        pendingDownloads.delete(downloadItem.id);
+        pendingDownloads.delete('next');
+        return true;
+    }
+    
+    return false;
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -666,11 +742,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
                 
             case 'download_captions': {
+                console.log('[Service Worker] download_captions received with:', {
+                    meetingTitle: message.meetingTitle,
+                    transcriptCount: message.transcriptArray?.length,
+                    format: message.format,
+                    sessionId: message.sessionId,
+                    hasAttendeeReport: !!message.attendeeReport
+                });
+                
                 // Get session-specific aliases if they exist
                 const downloadSessionKey = `aliases_${message.sessionId || 'default'}`;
                 const downloadAliasData = await chrome.storage.local.get(downloadSessionKey);
                 const downloadAliases = downloadAliasData[downloadSessionKey] || {};
-                await saveTranscript(message.meetingTitle, message.transcriptArray, downloadAliases, message.format, message.recordingStartTime, true, message.attendeeReport);
+                
+                // Ensure meeting title is not undefined/empty
+                const titleToSave = message.meetingTitle || 'Untitled Meeting';
+                console.log('[Service Worker] Saving with title:', titleToSave);
+                
+                await saveTranscript(titleToSave, message.transcriptArray, downloadAliases, message.format, message.recordingStartTime, true, message.attendeeReport);
                 break;
             }
 
@@ -691,13 +780,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     const settings = await chrome.storage.sync.get(['autoSaveOnEnd', 'defaultSaveFormat']);
                     if (settings.autoSaveOnEnd && message.transcriptArray.length > 0) {
                         const formatToSave = settings.defaultSaveFormat || 'txt';
-                        console.log(`Auto-saving transcript in ${formatToSave.toUpperCase()} format.`);
+                        const meetingTitleToSave = message.meetingTitle || 'Untitled Meeting';
+                        
                         // Get session-specific aliases if they exist
                         const autoSaveSessionKey = `aliases_${message.sessionId || 'default'}`;
                         const autoSaveAliasData = await chrome.storage.local.get(autoSaveSessionKey);
                         const autoSaveAliases = autoSaveAliasData[autoSaveSessionKey] || {};
-                        await saveTranscript(message.meetingTitle, message.transcriptArray, autoSaveAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport);
-                        console.log('Auto-save completed successfully.');
+                        
+                        await saveTranscript(meetingTitleToSave, message.transcriptArray, autoSaveAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport);
+                        console.log(`Auto-save completed: ${meetingTitleToSave}`);
                         
                         // Also save to session history
                         try {
