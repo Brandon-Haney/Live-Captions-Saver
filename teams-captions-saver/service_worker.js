@@ -325,9 +325,10 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
 let lastAutoSaveId = null;
 let autoSaveInProgress = false;
 
-async function createViewerTab(transcriptArray, sessionId) {
-    await chrome.storage.local.set({ 
+async function createViewerTab(transcriptArray, meetingTitle, sessionId) {
+    await chrome.storage.local.set({
         captionsToView: transcriptArray,
+        meetingTitle: meetingTitle,
         viewerSessionId: sessionId  // Store session ID for filtering live updates
     });
     chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') });
@@ -808,7 +809,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case 'display_captions':
-                await createViewerTab(message.transcriptArray, message.sessionId);
+                await createViewerTab(message.transcriptArray, message.meetingTitle, message.sessionId);
                 break;
             
             case 'update_badge_status':
