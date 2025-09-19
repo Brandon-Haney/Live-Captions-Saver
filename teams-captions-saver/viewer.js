@@ -870,7 +870,7 @@ document.addEventListener('DOMContentLoaded', () => {
             for (const session of sessions) {
                 const timeAgo = getTimeAgo(new Date(session.timestamp));
                 html += `
-                    <div class="session-item" onclick="loadSessionFromHistory('${session.id}')">
+                    <div class="session-item" data-session-id="${session.id}">
                         <div class="session-title">${escapeHtml(session.title)}</div>
                         <div class="session-meta">
                             ${session.date} • ${session.duration} • ${session.captionCount} captions • ${timeAgo}
@@ -878,8 +878,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 `;
             }
-            
+
             sessionListModal.innerHTML = html;
+
+            // Add click handlers to session items
+            sessionListModal.querySelectorAll('.session-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const sessionId = item.dataset.sessionId;
+                    loadSessionFromHistory(sessionId);
+                });
+            });
             
         } catch (error) {
             console.error('[Session History] Failed to load:', error);
@@ -887,20 +895,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    window.loadSessionFromHistory = async function(sessionId) {
+    async function loadSessionFromHistory(sessionId) {
         try {
             const sessionManager = new SessionManager();
-            const sessionData = await sessionManager.loadSession(sessionId);
-            
+            const sessionData = await sessionManager.loadSessionData(sessionId);
+
             // Close modal
             sessionModal.style.display = 'none';
-            
+
             // Load the transcript
             allCaptions = sessionData.transcript;
             isLiveStreaming = false; // Historical data, not live
-            
-            // Update title
-            document.querySelector('h1').innerHTML = `${escapeHtml(sessionData.metadata.title)} <span style="font-size: 0.5em; color: #666;">(Historical)</span>`;
+
+            // Update title with proper format
+            const h1 = document.querySelector('h1');
+            const meetingTitle = sessionData.metadata?.meetingTitle || sessionData.metadata?.title || 'Untitled Meeting';
+            h1.innerHTML = `Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
             
             // Calculate and display analytics
             const analytics = calculateAnalytics(allCaptions);
@@ -947,7 +957,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function initialize() {
         try {
             // Check if we have captions passed via storage (from popup)
-            const result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId']);
+            const result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId', 'meetingTitle']);
             let transcript = result.captionsToView;
             let viewerData = result.viewerData;
             
@@ -958,22 +968,30 @@ document.addEventListener('DOMContentLoaded', () => {
             // Use viewerData if captionsToView is not available
             if (!transcript && viewerData && viewerData.transcriptArray) {
                 transcript = viewerData.transcriptArray;
-                // Update title if it's historical data
-                if (viewerData.isHistorical && viewerData.meetingTitle) {
-                    document.querySelector('h1').innerHTML = `${escapeHtml(viewerData.meetingTitle)} <span style="font-size: 0.5em; color: #666;">(Historical)</span>`;
-                }
             }
 
             if (transcript && transcript.length > 0) {
+                // Update meeting title if provided (from either direct meetingTitle or viewerData)
+                const meetingTitle = result.meetingTitle || viewerData?.meetingTitle;
+                if (meetingTitle) {
+                    const h1 = document.querySelector('h1');
+                    const isHistorical = viewerData?.isHistorical;
+                    if (isHistorical) {
+                        h1.innerHTML = `Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
+                    } else {
+                        h1.innerHTML = `Live Transcript<span class="live-indicator"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
+                    }
+                }
+
                 // Calculate and display analytics
                 const analytics = calculateAnalytics(transcript);
                 if (analytics) {
                     displayAnalytics(analytics);
                 }
-                
+
                 // Load session-specific aliases before rendering
                 await loadSessionAliases();
-                
+
                 renderCaptions(transcript);
                 populateSpeakerFilters(transcript);
                 setupEventListeners();
@@ -1143,6 +1161,13 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (transcriptResponse && transcriptResponse.transcriptArray) {
                                 // Load the existing captions
                                 allCaptions = transcriptResponse.transcriptArray;
+
+                                // Update meeting title if provided
+                                if (transcriptResponse.meetingTitle) {
+                                    const h1 = document.querySelector('h1');
+                                    h1.innerHTML = `Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(transcriptResponse.meetingTitle)}</span>`;
+                                }
+
                                 renderCaptions(allCaptions);
                                 populateSpeakerFilters(allCaptions);
                                 

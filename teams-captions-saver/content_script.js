@@ -2062,6 +2062,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             safeSendMessage({
                 message: "display_captions",
                 transcriptArray: getCleanTranscript(),
+                meetingTitle: currentMeetingTitle,
                 sessionId: currentSessionId  // Pass session ID to viewer
             });
             break;
