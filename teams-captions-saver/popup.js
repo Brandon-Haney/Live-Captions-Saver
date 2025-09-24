@@ -821,7 +821,7 @@ async function initializeSessionHistory() {
         // Check if we have saved sessions and update button text
         const sessionManager = new SessionManager();
         const sessions = await sessionManager.getAllSessions();
-        
+
         if (sessions && sessions.length > 0) {
             UI_ELEMENTS.historyButton.innerHTML = `📁 View Previous Sessions (${sessions.length})`;
         } else {
@@ -877,8 +877,7 @@ async function loadSessionList() {
                         ${escapeHtml(title)}
                     </div>
                     <div class="session-meta">
-                        <span>${date} • ${duration} • ${captionCount} captions</span>
-                        <span>${speakerCount} speakers</span>
+                        <span>${date} • ${duration} • ${captionCount} captions • ${speakerCount} speakers</span>
                     </div>
                     <div class="session-meta" style="margin-top: 4px;">
                         <span style="font-size: 11px; color: #888;">${timeAgo}</span>
@@ -934,6 +933,7 @@ async function viewSession(sessionId) {
             viewerData: {
                 transcriptArray: sessionData.transcript,
                 meetingTitle: sessionData.metadata?.meetingTitle || sessionData.metadata?.title || 'Untitled Meeting',
+                platform: sessionData.metadata?.platform || '',
                 attendeeReport: sessionData.attendeeReport,
                 isHistorical: true
             }
@@ -997,15 +997,50 @@ async function deleteSession(sessionId) {
 }
 
 async function clearAllSessions() {
-    if (!confirm('Delete ALL saved sessions? This cannot be undone.')) return;
-    
-    try {
-        const sessionManager = new SessionManager();
-        await sessionManager.clearAllSessions();
-        UI_ELEMENTS.sessionList.style.display = 'none';
-        UI_ELEMENTS.sessionHistory.style.display = 'none';
-    } catch (error) {
-        console.error('[Session History] Failed to clear sessions:', error);
+    const sessionManager = new SessionManager();
+    const stats = await sessionManager.getStorageStats();
+
+    // Check if storage is over quota
+    if (parseFloat(stats.percentUsed) > 90) {
+        // Storage is critical, offer emergency cleanup
+        const message = `Storage is at ${stats.percentUsed}% (${stats.usedMB}MB / ${stats.quotaMB}MB).\n\n` +
+                       `Would you like to:\n` +
+                       `• OK = Run emergency cleanup (deletes oldest 50% of sessions)\n` +
+                       `• Cancel = Delete ALL sessions`;
+
+        if (confirm(message)) {
+            // Run emergency cleanup
+            try {
+                console.log('[Popup] Running emergency cleanup...');
+                await sessionManager.emergencyCleanup();
+                alert('Emergency cleanup complete. Storage has been optimized.');
+                await loadSessionList(); // Reload the list
+            } catch (error) {
+                console.error('[Session History] Emergency cleanup failed:', error);
+                alert('Emergency cleanup failed. You may need to delete all sessions.');
+            }
+        } else if (confirm('Delete ALL saved sessions? This cannot be undone.')) {
+            // Delete everything
+            try {
+                await sessionManager.clearAllSessions();
+                UI_ELEMENTS.sessionList.style.display = 'none';
+                UI_ELEMENTS.sessionHistory.style.display = 'none';
+                alert('All sessions have been deleted.');
+            } catch (error) {
+                console.error('[Session History] Failed to clear sessions:', error);
+            }
+        }
+    } else {
+        // Normal clear all
+        if (!confirm('Delete ALL saved sessions? This cannot be undone.')) return;
+
+        try {
+            await sessionManager.clearAllSessions();
+            UI_ELEMENTS.sessionList.style.display = 'none';
+            UI_ELEMENTS.sessionHistory.style.display = 'none';
+        } catch (error) {
+            console.error('[Session History] Failed to clear sessions:', error);
+        }
     }
 }
 

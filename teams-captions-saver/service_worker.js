@@ -235,9 +235,11 @@ async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
     const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
     const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-MM-SS
     const attendeeCount = attendeeReport ? attendeeReport.totalUniqueAttendees : 0;
-    
+
     const sanitizedTitle = getSanitizedMeetingName(meetingTitle);
-    
+
+    console.log('[generateFilename] Input:', { pattern, meetingTitle, sanitizedTitle, format });
+
     const replacements = {
         '{date}': dateStr,
         '{time}': timeStr,
@@ -245,38 +247,50 @@ async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
         '{format}': format,
         '{attendees}': attendeeCount > 0 ? `${attendeeCount}_attendees` : ''
     };
-    
-    // Use the provided pattern or default
-    let filename = pattern || '{date}_{title}_{format}';
-    
+
+    // Use the provided pattern or default - FIX: don't include {format} in default pattern
+    let filename = pattern || '{date}_{title}';
+
     for (const [key, value] of Object.entries(replacements)) {
         filename = filename.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), value);
     }
-    
+
     // Clean up any double underscores or trailing underscores
     filename = filename.replace(/__+/g, '_').replace(/_+$/, '');
-    
+
     // If filename is empty or just underscores, use a fallback
     if (!filename || filename === '_' || filename === '') {
+        console.warn('[generateFilename] Filename was empty, using fallback');
         filename = `Meeting_${dateStr}`;
     }
-    
+
+    console.log('[generateFilename] Final filename:', filename);
     return filename;
 }
 
 async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt, attendeeReport = null) {
     // Validate and fix meeting title
     if (!meetingTitle || meetingTitle.trim() === '') {
+        console.log('[saveTranscript] Meeting title was empty, using "Untitled Meeting"');
         meetingTitle = 'Untitled Meeting';
     }
-    
+
+    console.log('[saveTranscript] Saving with:', {
+        meetingTitle,
+        format,
+        saveAsPrompt,
+        hasAttendeeReport: !!attendeeReport
+    });
+
     const processedTranscript = applyAliasesToTranscript(transcriptArray, aliases);
     const processedAttendeeReport = applyAliasesToAttendeeReport(attendeeReport, aliases);
-    
+
     // Get filename pattern from settings
     const { filenamePattern } = await chrome.storage.sync.get('filenamePattern');
-    
+    console.log('[saveTranscript] Using filename pattern:', filenamePattern || '{date}_{title}');
+
     const filename = await generateFilename(filenamePattern, meetingTitle, format, processedAttendeeReport);
+    console.log('[saveTranscript] Generated filename (without extension):', filename);
 
     let content, extension, mimeType;
 
@@ -318,6 +332,7 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
     
     // Add extension to filename
     const fullFilename = `${filename}.${extension}`;
+    console.log('[saveTranscript] Final filename with extension:', fullFilename);
     await downloadFile(fullFilename, content, mimeType, saveAsPrompt);
 }
 
@@ -325,10 +340,11 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
 let lastAutoSaveId = null;
 let autoSaveInProgress = false;
 
-async function createViewerTab(transcriptArray, meetingTitle, sessionId) {
+async function createViewerTab(transcriptArray, meetingTitle, platform, sessionId) {
     await chrome.storage.local.set({
         captionsToView: transcriptArray,
         meetingTitle: meetingTitle,
+        platform: platform,  // Store platform for display
         viewerSessionId: sessionId  // Store session ID for filtering live updates
     });
     chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') });
@@ -809,7 +825,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case 'display_captions':
-                await createViewerTab(message.transcriptArray, message.meetingTitle, message.sessionId);
+                await createViewerTab(message.transcriptArray, message.meetingTitle, message.platform, message.sessionId);
                 break;
             
             case 'update_badge_status':

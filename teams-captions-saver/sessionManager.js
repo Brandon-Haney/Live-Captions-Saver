@@ -1,6 +1,13 @@
 // Session Manager - Handles multiple concurrent meeting sessions
 // Supports Teams, Zoom, and Google Meet with live session tracking
 
+// Wrap class definition to avoid redeclaration errors
+(function() {
+    // Skip if already defined (can happen when loaded in both service worker and popup)
+    if (typeof self.SessionManager !== 'undefined') {
+        return;
+    }
+
 class SessionManager {
     constructor() {
         this.sessions = new Map(); // Active sessions in memory
@@ -15,7 +22,10 @@ class SessionManager {
         try {
             // First, migrate any old sessions to new format
             await this.migrateOldSessions();
-            
+
+            // Fix any incorrectly detected platforms
+            await this.fixSessionPlatforms();
+
             const { activeSessions = [] } = await chrome.storage.local.get('activeSessions');
             
             // Load metadata for each active session
@@ -81,10 +91,12 @@ class SessionManager {
                     const attendeeReport = attendeeData[`${oldSession.id}_attendees`] || null;
                     
                     // Determine platform from old data
-                    let platform = 'teams'; // Default to teams for old sessions
+                    // Default to teams for old sessions (since this extension was originally Teams-only)
+                    let platform = 'teams';
+                    // Only check for specific platform names, not generic words
                     if (oldSession.title && oldSession.title.toLowerCase().includes('zoom')) {
                         platform = 'zoom';
-                    } else if (oldSession.title && oldSession.title.toLowerCase().includes('meet')) {
+                    } else if (oldSession.title && oldSession.title.toLowerCase().includes('google meet')) {
                         platform = 'meet';
                     }
                     
@@ -377,16 +389,30 @@ class SessionManager {
             }
 
             const chunks = this.chunkTranscript(transcriptArray);
-            
+
             // Check storage quota before saving
-            const currentUsage = await this.getStorageUsage();
-            const newDataSize = this.calculateSize(chunks) + 
+            let currentUsage = 0;
+            if (chrome.storage.local.getBytesInUse) {
+                try {
+                    currentUsage = await chrome.storage.local.getBytesInUse(null);
+                } catch (error) {
+                    currentUsage = await this.getStorageUsage();
+                }
+            } else {
+                currentUsage = await this.getStorageUsage();
+            }
+
+            const newDataSize = this.calculateSize(chunks) +
                                (attendeeReport ? this.calculateSize(attendeeReport) : 0) +
                                (chatMessages ? this.calculateSize(chatMessages) : 0);
-            
-            if (currentUsage + newDataSize > this.STORAGE_QUOTA) {
-                // Need to clean up old sessions
-                await this.cleanupOldSessions(newDataSize);
+
+            // Use 7MB as safe limit to leave room for other data
+            const SAFE_QUOTA = 7 * 1024 * 1024;
+
+            if (currentUsage + newDataSize > SAFE_QUOTA) {
+                console.log(`[SessionManager] Storage cleanup needed. Current: ${(currentUsage / 1024 / 1024).toFixed(2)}MB, New data: ${(newDataSize / 1024 / 1024).toFixed(2)}MB`);
+                // Need to clean up old sessions - free up enough space plus 1MB buffer
+                await this.cleanupOldSessions(newDataSize + 1024 * 1024);
             }
 
             // Save transcript chunks
@@ -435,17 +461,57 @@ class SessionManager {
     async loadSessionData(sessionId) {
         try {
             const session = this.sessions.get(sessionId);
-            if (!session) {
+            let metadata = null;
+            let stats = {};
+
+            if (session) {
+                metadata = session.metadata;
+                stats = session.stats;
+            } else {
                 // Try loading from storage
                 const metadataKey = `${sessionId}_metadata`;
                 const stored = await chrome.storage.local.get(metadataKey);
-                if (!stored[metadataKey]) {
+                if (stored[metadataKey]) {
+                    metadata = stored[metadataKey];
+                    const statsData = await chrome.storage.local.get(`${sessionId}_stats`);
+                    stats = statsData[`${sessionId}_stats`] || {};
+                }
+            }
+
+            // If no metadata found, check if this is an orphaned migrated session
+            if (!metadata && sessionId.includes('session_migrated_')) {
+                console.log(`[SessionManager] Loading orphaned migrated session: ${sessionId}`);
+                // Get all storage to find chunks
+                const allKeys = await chrome.storage.local.get(null);
+
+                // Find chunk count
+                let maxChunkIndex = -1;
+                for (const key in allKeys) {
+                    if (key.startsWith(`${sessionId}_chunk_`)) {
+                        const chunkIndex = parseInt(key.replace(`${sessionId}_chunk_`, ''));
+                        if (!isNaN(chunkIndex)) {
+                            maxChunkIndex = Math.max(maxChunkIndex, chunkIndex);
+                        }
+                    }
+                }
+
+                if (maxChunkIndex >= 0) {
+                    // Create basic metadata for orphaned session
+                    metadata = {
+                        sessionId,
+                        chunkCount: maxChunkIndex + 1,
+                        meetingTitle: 'Migrated Meeting',
+                        startTime: new Date(parseInt(sessionId.replace('session_migrated_', ''))).toISOString(),
+                        status: 'ended'
+                    };
+                } else {
                     throw new Error('Session not found');
                 }
             }
 
-            const metadata = session?.metadata || (await chrome.storage.local.get(`${sessionId}_metadata`))[`${sessionId}_metadata`];
-            const stats = session?.stats || (await chrome.storage.local.get(`${sessionId}_stats`))[`${sessionId}_stats`] || {};
+            if (!metadata) {
+                throw new Error('Session metadata not found');
+            }
             
             // Load all chunks
             const chunkKeys = [];
@@ -538,36 +604,85 @@ class SessionManager {
     // Delete a session
     async deleteSession(sessionId) {
         try {
-            // Get metadata to find chunk count
-            const metadata = this.sessions.get(sessionId)?.metadata;
-            const chunkCount = metadata?.chunkCount || 0;
-            
-            // Delete all session data
-            const keysToDelete = [
+            console.log(`[SessionManager] Deleting session: ${sessionId}`);
+
+            // Get metadata from memory or storage
+            let metadata = this.sessions.get(sessionId)?.metadata;
+            let chunkCount = 0;
+
+            // If not in memory, try loading from storage
+            if (!metadata) {
+                const storedMetadata = await chrome.storage.local.get(`${sessionId}_metadata`);
+                metadata = storedMetadata[`${sessionId}_metadata`];
+                if (metadata) {
+                    chunkCount = metadata.chunkCount || 0;
+                }
+            } else {
+                chunkCount = metadata.chunkCount || 0;
+            }
+
+            // If still no metadata, scan for chunks to find all related keys
+            const allKeys = await chrome.storage.local.get(null);
+            const keysToDelete = [];
+
+            // Find all keys related to this session
+            for (const key in allKeys) {
+                if (key.startsWith(sessionId)) {
+                    keysToDelete.push(key);
+                    console.log(`[SessionManager] Found key to delete: ${key}`);
+                }
+            }
+
+            // Also explicitly add standard keys
+            const standardKeys = [
                 `${sessionId}_metadata`,
                 `${sessionId}_stats`,
                 `${sessionId}_attendees`,
                 `${sessionId}_chat`
             ];
-            
-            // Add chunk keys
-            for (let i = 0; i < chunkCount; i++) {
-                keysToDelete.push(`${sessionId}_chunk_${i}`);
+
+            for (const key of standardKeys) {
+                if (!keysToDelete.includes(key)) {
+                    keysToDelete.push(key);
+                }
             }
-            
-            await chrome.storage.local.remove(keysToDelete);
-            
+
+            // Add chunk keys based on chunk count if we found it
+            if (chunkCount > 0) {
+                for (let i = 0; i < chunkCount; i++) {
+                    const chunkKey = `${sessionId}_chunk_${i}`;
+                    if (!keysToDelete.includes(chunkKey)) {
+                        keysToDelete.push(chunkKey);
+                    }
+                }
+            }
+
+            console.log(`[SessionManager] Deleting ${keysToDelete.length} keys for session ${sessionId}`);
+
+            // Delete all found keys
+            if (keysToDelete.length > 0) {
+                await chrome.storage.local.remove(keysToDelete);
+            }
+
             // Remove from memory
             this.sessions.delete(sessionId);
-            
+
             // Update active sessions list
             const activeSessions = Array.from(this.sessions.keys()).filter(id => {
                 const s = this.sessions.get(id);
                 return s && s.metadata.status === 'active';
             });
             await chrome.storage.local.set({ activeSessions });
-            
-            console.log(`[SessionManager] Deleted session ${sessionId}`);
+
+            // Also update sessionHistory to remove this session
+            const { sessionHistory = [] } = await chrome.storage.local.get('sessionHistory');
+            const updatedHistory = sessionHistory.filter(id => id !== sessionId);
+            if (updatedHistory.length !== sessionHistory.length) {
+                await chrome.storage.local.set({ sessionHistory: updatedHistory });
+                console.log(`[SessionManager] Removed ${sessionId} from sessionHistory`);
+            }
+
+            console.log(`[SessionManager] Successfully deleted session ${sessionId}`);
             
         } catch (error) {
             console.error('[SessionManager] Failed to delete session:', error);
@@ -578,7 +693,7 @@ class SessionManager {
     async getAllSessions() {
         const allSessions = [];
         const sessionIds = new Set();
-        
+
         // Get from memory first (active sessions)
         for (const [sessionId, session] of this.sessions) {
             allSessions.push({
@@ -589,7 +704,7 @@ class SessionManager {
             });
             sessionIds.add(sessionId);
         }
-        
+
         // Get migrated sessions from storage
         const { sessionHistory = [] } = await chrome.storage.local.get('sessionHistory');
         for (const sessionId of sessionHistory) {
@@ -597,7 +712,7 @@ class SessionManager {
                 try {
                     const metadata = await chrome.storage.local.get(`${sessionId}_metadata`);
                     const stats = await chrome.storage.local.get(`${sessionId}_stats`);
-                    
+
                     if (metadata[`${sessionId}_metadata`]) {
                         const session = {
                             sessionId,
@@ -613,9 +728,12 @@ class SessionManager {
                 }
             }
         }
-        
+
         // Also scan for any other sessions in storage (fallback)
+        // This is important for finding migrated sessions and sessions not in history
         const allKeys = await chrome.storage.local.get(null);
+
+        // First look for sessions with _metadata
         for (const key in allKeys) {
             if (key.endsWith('_metadata') && !key.includes('chunk')) {
                 const sessionId = key.replace('_metadata', '');
@@ -624,24 +742,162 @@ class SessionManager {
                         const metadata = allKeys[key];
                         const statsKey = `${sessionId}_stats`;
                         const stats = allKeys[statsKey] || {};
-                        
+
+                        console.log(`[SessionManager] Found session with metadata: ${sessionId}`);
+
                         allSessions.push({
                             sessionId,
                             ...metadata,
                             ...stats,
                             speakers: Array.from(stats.speakers || [])
                         });
+                        sessionIds.add(sessionId);
                     } catch (error) {
                         console.error(`Failed to load session from key ${key}:`, error);
                     }
                 }
             }
         }
+
+        // NEW: Reconstruct sessions from chunks if no metadata exists (for migrated sessions)
+        // Find all unique session IDs from chunk keys
+        const orphanedSessionIds = new Set();
+        for (const key in allKeys) {
+            if (key.includes('session_migrated_') && key.includes('_chunk_')) {
+                // Extract session ID from keys like session_migrated_1755108101254_chunk_0
+                const match = key.match(/(session_migrated_\d+)_chunk_/);
+                if (match && !sessionIds.has(match[1])) {
+                    orphanedSessionIds.add(match[1]);
+                }
+            }
+        }
+
+        console.log(`[SessionManager] Found ${orphanedSessionIds.size} orphaned migrated sessions to reconstruct`);
+
+        // Reconstruct metadata for orphaned sessions
+        for (const sessionId of orphanedSessionIds) {
+            try {
+                // Load all chunks for this session
+                const chunkKeys = [];
+                let maxChunkIndex = -1;
+
+                // Find all chunk keys for this session
+                for (const key in allKeys) {
+                    if (key.startsWith(`${sessionId}_chunk_`)) {
+                        const chunkIndex = parseInt(key.replace(`${sessionId}_chunk_`, ''));
+                        if (!isNaN(chunkIndex)) {
+                            maxChunkIndex = Math.max(maxChunkIndex, chunkIndex);
+                            chunkKeys.push(key);
+                        }
+                    }
+                }
+
+                if (chunkKeys.length === 0) continue;
+
+                // Load first chunk to get sample data
+                const firstChunk = allKeys[`${sessionId}_chunk_0`] || [];
+                if (!firstChunk || firstChunk.length === 0) continue;
+
+                // Extract info from first caption
+                const firstCaption = firstChunk[0];
+                const lastChunk = allKeys[`${sessionId}_chunk_${maxChunkIndex}`] || [];
+                const lastCaption = lastChunk[lastChunk.length - 1] || firstCaption;
+
+                // Count total captions
+                let totalCaptions = 0;
+                let speakers = new Set();
+                for (const chunkKey of chunkKeys) {
+                    const chunk = allKeys[chunkKey];
+                    if (Array.isArray(chunk)) {
+                        totalCaptions += chunk.length;
+                        chunk.forEach(caption => {
+                            if (caption.Name) speakers.add(caption.Name);
+                        });
+                    }
+                }
+
+                // Create reconstructed session info
+                const reconstructedSession = {
+                    sessionId,
+                    tabId: 'migrated',
+                    platform: 'teams', // Default to teams for migrated sessions
+                    url: '',
+                    meetingTitle: firstCaption.Name ? `Meeting with ${firstCaption.Name}` : 'Migrated Meeting',
+                    startTime: firstCaption.Time || new Date(parseInt(sessionId.replace('session_migrated_', ''))).toISOString(),
+                    endTime: lastCaption.Time || new Date().toISOString(),
+                    status: 'ended',
+                    lastActivity: new Date().toISOString(),
+                    chunkCount: maxChunkIndex + 1,
+                    captionCount: totalCaptions,
+                    attendeeCount: 0,
+                    chatCount: 0,
+                    duration: 0,
+                    speakers: Array.from(speakers),
+                    speakerCount: speakers.size
+                };
+
+                console.log(`[SessionManager] Reconstructed orphaned session: ${sessionId} with ${totalCaptions} captions`);
+                allSessions.push(reconstructedSession);
+                sessionIds.add(sessionId);
+
+            } catch (error) {
+                console.error(`Failed to reconstruct session ${sessionId}:`, error);
+            }
+        }
         
+        // Deduplicate sessions based on similar timestamps and content
+        // Sometimes the same session gets saved twice with slightly different IDs
+        const dedupedSessions = [];
+        const seenSessions = new Map();
+
+        for (const session of allSessions) {
+            // Create a key based on meeting title and approximate time (within 5 minutes)
+            const sessionTime = new Date(session.startTime || 0).getTime();
+            const timeWindow = Math.floor(sessionTime / (5 * 60 * 1000)); // 5-minute windows
+            const dedupKey = `${session.meetingTitle || 'untitled'}_${timeWindow}_${session.captionCount || 0}`;
+
+            // Check if we've seen a similar session
+            const existing = seenSessions.get(dedupKey);
+            if (existing) {
+                // Keep the session with more data or the newer one
+                const existingCaptions = existing.captionCount || 0;
+                const currentCaptions = session.captionCount || 0;
+                if (currentCaptions > existingCaptions ||
+                    (currentCaptions === existingCaptions && session.sessionId > existing.sessionId)) {
+                    // Replace with current session
+                    const index = dedupedSessions.findIndex(s => s.sessionId === existing.sessionId);
+                    if (index >= 0) {
+                        dedupedSessions[index] = session;
+                        seenSessions.set(dedupKey, session);
+                        console.log(`[SessionManager] Replaced duplicate session: ${existing.sessionId} with ${session.sessionId}`);
+                    }
+                }
+            } else {
+                dedupedSessions.push(session);
+                seenSessions.set(dedupKey, session);
+            }
+        }
+
         // Sort by start time (newest first)
-        allSessions.sort((a, b) => new Date(b.startTime || 0) - new Date(a.startTime || 0));
-        
-        return allSessions;
+        dedupedSessions.sort((a, b) => new Date(b.startTime || 0) - new Date(a.startTime || 0));
+
+        console.log(`[SessionManager] getAllSessions found ${allSessions.length} sessions, deduped to ${dedupedSessions.length}`);
+
+        // Update sessionHistory with all found sessions to ensure consistency
+        if (dedupedSessions.length > 0) {
+            const allSessionIds = dedupedSessions.map(s => s.sessionId);
+            const currentHistory = await chrome.storage.local.get('sessionHistory');
+            const existingHistory = currentHistory.sessionHistory || [];
+
+            // Merge and deduplicate
+            const mergedHistory = [...new Set([...existingHistory, ...allSessionIds])];
+            if (mergedHistory.length !== existingHistory.length) {
+                await chrome.storage.local.set({ sessionHistory: mergedHistory });
+                console.log(`[SessionManager] Updated sessionHistory with ${mergedHistory.length} sessions`);
+            }
+        }
+
+        return dedupedSessions;
     }
 
     // Clean up stale sessions (older than 24 hours and ended)
@@ -727,32 +983,139 @@ class SessionManager {
     async getStorageUsage() {
         const items = await chrome.storage.local.get(null);
         let totalSize = 0;
-        
+
         for (const key in items) {
-            if (key.startsWith('session_')) {
-                totalSize += this.calculateSize(items[key]);
+            // Count ALL items in storage, not just session_ prefixed ones
+            // This includes session data, metadata, viewer data, etc.
+            totalSize += this.calculateSize(items[key]);
+        }
+
+        return totalSize;
+    }
+
+    // Clean up orphaned data (data without valid sessions)
+    async cleanupOrphanedData() {
+        console.log('[SessionManager] Cleaning up orphaned data...');
+        const items = await chrome.storage.local.get(null);
+        const validSessionIds = new Set();
+        const keysToDelete = [];
+        let freedSize = 0;
+
+        // First, identify all valid session IDs
+        for (const key in items) {
+            if (key.endsWith('_metadata')) {
+                const sessionId = key.replace('_metadata', '');
+                validSessionIds.add(sessionId);
             }
         }
-        
-        return totalSize;
+
+        console.log(`[SessionManager] Found ${validSessionIds.size} valid sessions`);
+
+        // Now find orphaned data
+        for (const key in items) {
+            // Skip non-session data
+            if (!key.includes('session_') && !key.includes('chunk_') && !key.includes('_metadata') && !key.includes('_stats') && !key.includes('_attendees')) {
+                continue;
+            }
+
+            // Extract session ID from the key
+            let sessionId = null;
+            if (key.includes('session_')) {
+                // Keys like session_123_chunk_0, session_123_metadata, etc.
+                const match = key.match(/session_\d+_\d+/);
+                if (match) {
+                    sessionId = match[0];
+                }
+            }
+
+            // If we found a session ID and it's not valid, mark for deletion
+            if (sessionId && !validSessionIds.has(sessionId)) {
+                keysToDelete.push(key);
+                freedSize += this.calculateSize(items[key]);
+            }
+        }
+
+        // Also clean up temporary data that shouldn't persist
+        const tempKeys = ['captionsToView', 'viewerData', 'viewerSessionId', 'backupTranscript'];
+        for (const tempKey of tempKeys) {
+            if (items[tempKey]) {
+                keysToDelete.push(tempKey);
+                freedSize += this.calculateSize(items[tempKey]);
+            }
+        }
+
+        if (keysToDelete.length > 0) {
+            console.log(`[SessionManager] Deleting ${keysToDelete.length} orphaned keys, freeing ${(freedSize / 1024 / 1024).toFixed(2)}MB`);
+            console.log('[SessionManager] Orphaned keys:', keysToDelete.slice(0, 10), keysToDelete.length > 10 ? '...' : '');
+
+            // Delete in batches to avoid quota exceeded errors
+            const batchSize = 50;
+            for (let i = 0; i < keysToDelete.length; i += batchSize) {
+                const batch = keysToDelete.slice(i, i + batchSize);
+                await chrome.storage.local.remove(batch);
+            }
+        } else {
+            console.log('[SessionManager] No orphaned data found');
+        }
+
+        return freedSize;
     }
 
     // Clean up old sessions to make room
     async cleanupOldSessions(requiredSpace) {
+        console.log(`[SessionManager] Starting cleanup to free ${(requiredSpace / 1024 / 1024).toFixed(2)}MB`);
         const allSessions = await this.getAllSessions();
         let freedSpace = 0;
-        
-        // Delete oldest ended sessions first
-        const endedSessions = allSessions.filter(s => s.status === 'ended');
-        endedSessions.sort((a, b) => new Date(a.startTime) - new Date(b.startTime)); // Oldest first
-        
-        for (const session of endedSessions) {
-            if (freedSpace >= requiredSpace) break;
-            
-            const size = await this.getSessionSize(session.sessionId);
-            freedSpace += size;
-            await this.deleteSession(session.sessionId);
+        let deletedCount = 0;
+
+        // First, clean up any temporary viewer data
+        try {
+            await chrome.storage.local.remove(['captionsToView', 'viewerData', 'viewerSessionId']);
+            console.log('[SessionManager] Cleaned up temporary viewer data');
+        } catch (error) {
+            console.error('[SessionManager] Failed to clean viewer data:', error);
         }
+
+        // Delete oldest ended sessions first
+        const endedSessions = allSessions.filter(s => s.status === 'ended' || !s.status);
+        endedSessions.sort((a, b) => new Date(a.startTime || 0) - new Date(b.startTime || 0)); // Oldest first
+
+        for (const session of endedSessions) {
+            if (freedSpace >= requiredSpace && deletedCount > 0) break;
+
+            try {
+                const size = await this.getSessionSize(session.sessionId);
+                await this.deleteSession(session.sessionId);
+                freedSpace += size;
+                deletedCount++;
+                console.log(`[SessionManager] Deleted session ${session.meetingTitle || session.sessionId}, freed ${(size / 1024).toFixed(2)}KB`);
+            } catch (error) {
+                console.error(`[SessionManager] Failed to delete session ${session.sessionId}:`, error);
+            }
+        }
+
+        // If we still need more space, delete active sessions (oldest first)
+        if (freedSpace < requiredSpace) {
+            const activeSessions = allSessions.filter(s => s.status === 'active');
+            activeSessions.sort((a, b) => new Date(a.startTime || 0) - new Date(b.startTime || 0));
+
+            for (const session of activeSessions) {
+                if (freedSpace >= requiredSpace) break;
+
+                try {
+                    const size = await this.getSessionSize(session.sessionId);
+                    await this.deleteSession(session.sessionId);
+                    freedSpace += size;
+                    deletedCount++;
+                    console.log(`[SessionManager] Deleted active session ${session.meetingTitle || session.sessionId}, freed ${(size / 1024).toFixed(2)}KB`);
+                } catch (error) {
+                    console.error(`[SessionManager] Failed to delete session ${session.sessionId}:`, error);
+                }
+            }
+        }
+
+        console.log(`[SessionManager] Cleanup complete. Deleted ${deletedCount} sessions, freed ${(freedSpace / 1024 / 1024).toFixed(2)}MB`);
+        return freedSpace;
     }
 
     // Get size of a session in storage
@@ -779,21 +1142,123 @@ class SessionManager {
         }
     }
 
+    // Diagnostic function to analyze what's in storage
+    async analyzeStorage() {
+        const items = await chrome.storage.local.get(null);
+        const analysis = {
+            totalKeys: 0,
+            keysByPrefix: {},
+            largestItems: [],
+            totalSize: 0
+        };
+
+        for (const key in items) {
+            analysis.totalKeys++;
+            const itemSize = this.calculateSize(items[key]);
+            analysis.totalSize += itemSize;
+
+            // Group by prefix
+            const prefix = key.split('_')[0];
+            if (!analysis.keysByPrefix[prefix]) {
+                analysis.keysByPrefix[prefix] = { count: 0, size: 0, keys: [] };
+            }
+            analysis.keysByPrefix[prefix].count++;
+            analysis.keysByPrefix[prefix].size += itemSize;
+            if (analysis.keysByPrefix[prefix].keys.length < 5) {
+                analysis.keysByPrefix[prefix].keys.push(key);
+            }
+
+            // Track largest items
+            analysis.largestItems.push({ key, size: itemSize });
+        }
+
+        // Sort and keep top 10 largest
+        analysis.largestItems.sort((a, b) => b.size - a.size);
+        analysis.largestItems = analysis.largestItems.slice(0, 10);
+
+        // Log the analysis
+        console.log('[SessionManager] Storage Analysis:');
+        console.log(`Total keys: ${analysis.totalKeys}`);
+        console.log(`Total size: ${(analysis.totalSize / 1024 / 1024).toFixed(2)}MB`);
+        console.log('Keys by prefix:', analysis.keysByPrefix);
+        console.log('Top 10 largest items:');
+        analysis.largestItems.forEach(item => {
+            console.log(`  ${item.key}: ${(item.size / 1024).toFixed(2)}KB`);
+        });
+
+        return analysis;
+    }
+
     // Get storage statistics
     async getStorageStats() {
-        const usage = await this.getStorageUsage();
+        let usage = 0;
+        let quotaBytes = this.STORAGE_QUOTA;
+
+        // Try to use Chrome's storage API for accurate numbers if available
+        if (chrome.storage.local.getBytesInUse) {
+            try {
+                usage = await chrome.storage.local.getBytesInUse(null);
+                // Chrome's actual quota for local storage (usually 10MB)
+                // But we'll still use our conservative 8MB limit
+                quotaBytes = Math.min(this.STORAGE_QUOTA, 10 * 1024 * 1024);
+            } catch (error) {
+                // Fallback to manual calculation
+                usage = await this.getStorageUsage();
+            }
+        } else {
+            usage = await this.getStorageUsage();
+        }
+
         const allSessions = await this.getAllSessions();
-        
+
         // Sort sessions by start time to get oldest and newest
-        const sortedSessions = allSessions.sort((a, b) => 
+        const sortedSessions = allSessions.sort((a, b) =>
             new Date(a.startTime || 0) - new Date(b.startTime || 0)
         );
-        
+
+        // If usage exceeds quota, we need to clean up immediately
+        if (usage > quotaBytes) {
+            console.warn(`[SessionManager] Storage usage (${usage} bytes) exceeds quota (${quotaBytes} bytes)`);
+
+            // Run diagnostic to see what's taking up space
+            await this.analyzeStorage();
+
+            // Calculate how much we need to free (overage + 2MB buffer)
+            const bytesToFree = usage - quotaBytes + (2 * 1024 * 1024);
+            console.log(`[SessionManager] Need to free ${(bytesToFree / 1024 / 1024).toFixed(2)}MB`);
+
+            // Trigger immediate cleanup - don't wait, do it now
+            (async () => {
+                try {
+                    console.log('[SessionManager] Starting emergency storage cleanup...');
+
+                    // First, clean orphaned data
+                    const orphanedFreed = await this.cleanupOrphanedData();
+                    console.log(`[SessionManager] Freed ${(orphanedFreed / 1024 / 1024).toFixed(2)}MB from orphaned data`);
+
+                    // Check if we still need more space
+                    const currentUsage = await this.getStorageUsage();
+                    if (currentUsage > quotaBytes) {
+                        const stillNeeded = currentUsage - quotaBytes + (1024 * 1024); // Plus 1MB buffer
+                        console.log(`[SessionManager] Still need to free ${(stillNeeded / 1024 / 1024).toFixed(2)}MB`);
+                        const sessionsFreed = await this.cleanupOldSessions(stillNeeded);
+                        console.log(`[SessionManager] Freed ${(sessionsFreed / 1024 / 1024).toFixed(2)}MB from old sessions`);
+                    }
+
+                    // Final check
+                    const finalUsage = await this.getStorageUsage();
+                    console.log(`[SessionManager] Cleanup complete. Final usage: ${(finalUsage / 1024 / 1024).toFixed(2)}MB / ${(quotaBytes / 1024 / 1024).toFixed(2)}MB`);
+                } catch (error) {
+                    console.error('[SessionManager] Emergency cleanup failed:', error);
+                }
+            })();
+        }
+
         return {
             usedBytes: usage,
             usedMB: (usage / (1024 * 1024)).toFixed(2),
-            quotaMB: (this.STORAGE_QUOTA / (1024 * 1024)).toFixed(2),
-            percentUsed: ((usage / this.STORAGE_QUOTA) * 100).toFixed(1),
+            quotaMB: (quotaBytes / (1024 * 1024)).toFixed(2),
+            percentUsed: ((usage / quotaBytes) * 100).toFixed(1),
             sessionCount: allSessions.length,
             oldestSession: sortedSessions[0]?.startTime ? new Date(sortedSessions[0].startTime).toLocaleDateString() : 'N/A',
             newestSession: sortedSessions[sortedSessions.length - 1]?.startTime ? new Date(sortedSessions[sortedSessions.length - 1].startTime).toLocaleDateString() : 'N/A'
@@ -826,20 +1291,129 @@ class SessionManager {
         console.log('[SessionManager] Migration reset. Will re-migrate on next load.');
     }
     
+    // Emergency storage cleanup - more aggressive
+    async emergencyCleanup() {
+        console.log('[SessionManager] Running emergency storage cleanup...');
+
+        // First get diagnostic
+        await this.analyzeStorage();
+
+        // Clean all temporary and orphaned data
+        const orphanedFreed = await this.cleanupOrphanedData();
+
+        // Get all sessions and delete oldest 50%
+        const allSessions = await this.getAllSessions();
+        const toDelete = Math.ceil(allSessions.length / 2);
+
+        // Sort by date (oldest first)
+        allSessions.sort((a, b) => new Date(a.startTime || 0) - new Date(b.startTime || 0));
+
+        let freedTotal = orphanedFreed;
+        for (let i = 0; i < toDelete && i < allSessions.length; i++) {
+            try {
+                const size = await this.getSessionSize(allSessions[i].sessionId);
+                await this.deleteSession(allSessions[i].sessionId);
+                freedTotal += size;
+                console.log(`[SessionManager] Deleted session ${i + 1}/${toDelete}: ${allSessions[i].meetingTitle || allSessions[i].sessionId}`);
+            } catch (error) {
+                console.error(`Failed to delete session:`, error);
+            }
+        }
+
+        // Clean up any remaining temp data
+        const tempKeys = ['captionsToView', 'viewerData', 'viewerSessionId', 'backupTranscript', 'migration_completed'];
+        try {
+            await chrome.storage.local.remove(tempKeys);
+        } catch (error) {
+            // Silent fail
+        }
+
+        const finalUsage = await this.getStorageUsage();
+        console.log(`[SessionManager] Emergency cleanup complete. Freed ${(freedTotal / 1024 / 1024).toFixed(2)}MB. Final usage: ${(finalUsage / 1024 / 1024).toFixed(2)}MB`);
+
+        return freedTotal;
+    }
+
     // Clear all sessions
     async clearAllSessions() {
+        console.log('[SessionManager] Clearing all sessions...');
+
+        // First get all sessions we know about
         const allSessions = await this.getAllSessions();
-        
+
+        // Delete each known session
         for (const session of allSessions) {
             await this.deleteSession(session.sessionId);
         }
-        
-        await chrome.storage.local.set({ 
+
+        // Now scan for ANY remaining session-related keys in storage
+        const allKeys = await chrome.storage.local.get(null);
+        const remainingSessionKeys = [];
+
+        for (const key in allKeys) {
+            // Look for any key that looks like session data
+            if (key.includes('session_') ||
+                key.includes('_chunk_') ||
+                key.includes('_metadata') ||
+                key.includes('_stats') ||
+                key.includes('_attendees') ||
+                key.includes('captionsToView') ||
+                key.includes('viewerData') ||
+                key.includes('backupTranscript')) {
+                remainingSessionKeys.push(key);
+            }
+        }
+
+        if (remainingSessionKeys.length > 0) {
+            console.log(`[SessionManager] Found ${remainingSessionKeys.length} orphaned keys to clean up`);
+            await chrome.storage.local.remove(remainingSessionKeys);
+        }
+
+        // Clear all session-related storage keys
+        await chrome.storage.local.set({
             'activeSessions': [],
-            'sessionHistory': []
+            'sessionHistory': [],
+            'migration_completed': false // Reset migration flag to allow re-migration if needed
         });
+
+        // Clear in-memory sessions
         this.sessions.clear();
-        console.log('[SessionManager] Cleared all sessions');
+
+        console.log('[SessionManager] Successfully cleared all sessions');
+    }
+
+    // Fix incorrectly detected platforms (for migrated sessions)
+    async fixSessionPlatforms() {
+        console.log('[SessionManager] Fixing session platforms...');
+        const allKeys = await chrome.storage.local.get(null);
+        let fixed = 0;
+
+        for (const key in allKeys) {
+            if (key.endsWith('_metadata')) {
+                const metadata = allKeys[key];
+                if (metadata && metadata.meetingTitle) {
+                    let correctedPlatform = null;
+
+                    // Check if this is incorrectly marked as MEET
+                    if (metadata.platform === 'meet' &&
+                        metadata.meetingTitle.toLowerCase().includes('meeting with') &&
+                        !metadata.meetingTitle.toLowerCase().includes('google meet')) {
+                        // This is likely a Teams meeting incorrectly marked as Meet
+                        correctedPlatform = 'teams';
+                    }
+
+                    if (correctedPlatform) {
+                        metadata.platform = correctedPlatform;
+                        await chrome.storage.local.set({ [key]: metadata });
+                        fixed++;
+                        console.log(`[SessionManager] Fixed platform for ${metadata.meetingTitle}: meet -> ${correctedPlatform}`);
+                    }
+                }
+            }
+        }
+
+        console.log(`[SessionManager] Fixed ${fixed} session platforms`);
+        return fixed;
     }
     
     // Get formatted session index for viewer display
@@ -889,7 +1463,17 @@ class SessionManager {
     }
 }
 
-// Export for use in other scripts
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = SessionManager;
-}
+    // Make SessionManager available globally
+    self.SessionManager = SessionManager;
+
+    // Also expose to window for popup context
+    if (typeof window !== 'undefined') {
+        window.SessionManager = SessionManager;
+    }
+
+    // Export for use in other scripts
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = SessionManager;
+    }
+
+})(); // End wrapper function
