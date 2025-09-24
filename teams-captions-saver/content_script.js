@@ -912,14 +912,31 @@ function captureChatMessages(skipInitialMessages = false) {
             Type: 'chat',  // Mark as chat message
             key: `chat_${messageData.id}`
         };
-        
+
+        // Add attachments if present
+        if (messageData.attachments && messageData.attachments.length > 0) {
+            chatMessage.attachments = messageData.attachments;
+            console.log(`[Chat Capture] Message has ${messageData.attachments.length} attachments:`, messageData.attachments);
+
+            // Append attachment indicators to text for exports
+            const attachmentText = messageData.attachments.map(att =>
+                `[Image: ${att.filename || 'attachment'}]`
+            ).join(' ');
+
+            // Only append if not already in text
+            if (!chatMessage.Text.includes('[Image:')) {
+                chatMessage.Text = chatMessage.Text ?
+                    `${chatMessage.Text} ${attachmentText}` : attachmentText;
+            }
+        }
+
         // Add to transcript array in chronological position
         transcriptArray.push(chatMessage);
         chatCaptureState.capturedMessageIds.add(messageData.id);
         newCount++;
-        
+
         // console.log(`[Chat Capture] New message from ${chatMessage.Name}: "${chatMessage.Text}"`);
-        
+
         // Broadcast to viewer
         broadcastCaptionUpdate({
             type: 'new',
@@ -2040,9 +2057,10 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             
         case 'get_transcript_for_viewer':
             // Send current transcript to viewer for initial load
-            sendResponse({ 
+            sendResponse({
                 transcriptArray: getCleanTranscript(),
                 meetingTitle: currentMeetingTitle,
+                platform: platformConfig?.name || 'Unknown',  // Include platform name
                 isCapturing: capturing
             });
             break;
@@ -2063,6 +2081,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                 message: "display_captions",
                 transcriptArray: getCleanTranscript(),
                 meetingTitle: currentMeetingTitle,
+                platform: platformConfig?.name || 'Unknown',  // Pass platform name
                 sessionId: currentSessionId  // Pass session ID to viewer
             });
             break;

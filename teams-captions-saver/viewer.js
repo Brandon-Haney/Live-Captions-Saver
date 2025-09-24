@@ -1,3 +1,62 @@
+// Wait for DOM to be ready before setting up image modal
+document.addEventListener('DOMContentLoaded', () => {
+    // Image modal functions
+    const imageModal = document.getElementById('imageModal');
+    const modalImage = document.getElementById('modalImage');
+    const modalCaption = document.getElementById('modalCaption');
+    const imageModalClose = document.getElementById('imageModalClose');
+
+    function openImageModal(imageUrl, caption) {
+        modalImage.src = imageUrl;
+        modalCaption.textContent = caption || '';
+        imageModal.classList.add('active');
+
+        // Add keyboard handler for ESC key
+        document.addEventListener('keydown', handleModalEscape);
+    }
+
+    function closeImageModal() {
+        imageModal.classList.remove('active');
+        modalImage.src = ''; // Clear the image source
+
+        // Remove keyboard handler
+        document.removeEventListener('keydown', handleModalEscape);
+    }
+
+    function handleModalEscape(event) {
+        if (event.key === 'Escape') {
+            closeImageModal();
+        }
+    }
+
+    // Set up event listeners for image modal
+    if (imageModal) {
+        // Click outside to close
+        imageModal.addEventListener('click', (event) => {
+            if (event.target === imageModal) {
+                closeImageModal();
+            }
+        });
+
+        // Close button
+        if (imageModalClose) {
+            imageModalClose.addEventListener('click', closeImageModal);
+        }
+    }
+
+    // Event delegation for attachment thumbnails
+    document.addEventListener('click', (event) => {
+        const thumbnail = event.target.closest('.attachment-thumbnail');
+        if (thumbnail) {
+            const imageUrl = thumbnail.dataset.imageUrl;
+            const imageCaption = thumbnail.dataset.imageCaption;
+            if (imageUrl) {
+                openImageModal(imageUrl, imageCaption);
+            }
+        }
+    });
+});
+
 document.addEventListener('DOMContentLoaded', () => {
     // --- DOM Elements ---
     const captionsContainer = document.getElementById('captions-container');
@@ -239,20 +298,30 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // --- Live Update Functions ---
     function appendNewCaption(caption) {
+        // First check if we already have this caption by key (important for chat messages)
+        if (caption.key) {
+            const existingIndex = allCaptions.findIndex(c => c.key === caption.key);
+            if (existingIndex !== -1) {
+                console.log('[Viewer] Caption with key already exists, updating instead:', caption.key);
+                updateExistingCaption(caption);
+                return;
+            }
+        }
+
         // Check if this is actually a new caption or just a fragment
         // For Google Meet, check if we already have a recent caption from this speaker
-        const recentCaptionIndex = allCaptions.findIndex(c => 
-            c.Name === caption.Name && 
+        const recentCaptionIndex = allCaptions.findIndex(c =>
+            c.Name === caption.Name &&
             Math.abs(new Date(c.Time).getTime() - new Date(caption.Time).getTime()) < 10000 // Within 10 seconds
         );
-        
+
         if (recentCaptionIndex !== -1 && caption.Text.length < 50) {
             // This looks like a fragment, update the existing caption instead
             console.log('[Viewer] Fragment detected, updating existing caption instead of adding new');
             updateExistingCaption(caption);
             return;
         }
-        
+
         // Add to data array
         allCaptions.push(caption);
         
@@ -394,21 +463,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function updateLiveIndicator() {
-        const indicator = document.getElementById('live-indicator');
-        if (!indicator) {
-            // Create live indicator if it doesn't exist
-            const headerElement = document.querySelector('h1');
-            if (headerElement) {
-                const liveIndicator = document.createElement('span');
-                liveIndicator.id = 'live-indicator';
-                liveIndicator.className = 'live-indicator';
-                liveIndicator.innerHTML = '<span class="live-dot"></span> LIVE';
-                headerElement.appendChild(liveIndicator);
-            }
-        } else {
+        // Just update the existing live indicator, don't create a new one
+        const indicator = document.querySelector('.live-indicator');
+        if (indicator) {
             // Update indicator status
             indicator.classList.toggle('active', isLiveStreaming);
-            
+
             // Stop dot animation when not live
             const liveDot = indicator.querySelector('.live-dot');
             if (liveDot) {
@@ -419,6 +479,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         }
+        // Don't create a new indicator - it should already be in the h1 element
     }
 
     // --- Rendering Functions ---
@@ -449,7 +510,38 @@ document.addEventListener('DOMContentLoaded', () => {
         // Apply speaker alias if exists
         const displayName = speakerAliases[item.Name] || item.Name;
         const hasAlias = speakerAliases[item.Name] ? true : false;
-        
+
+        // Check for attachments and remove [Image:] text from display
+        let displayText = item.Text;
+        let attachmentsHTML = '';
+
+        if (item.attachments && item.attachments.length > 0) {
+            console.log(`[Viewer] Rendering ${item.attachments.length} attachments for message:`, item.attachments);
+            // Remove [Image:] indicators from text for cleaner display
+            displayText = displayText.replace(/\[Image:[^\]]*\]/g, '').trim();
+
+            // Create attachment thumbnails with data attributes instead of onclick
+            attachmentsHTML = `
+                <div class="attachment-container">
+                    ${item.attachments.map((att, attIndex) => `
+                        <div class="attachment-thumbnail"
+                             data-image-url="${escapeHtml(att.url)}"
+                             data-image-caption="${escapeHtml(att.filename || att.alt)}"
+                             title="${escapeHtml(att.filename || att.alt)}">
+                            <img src="${escapeHtml(att.url)}"
+                                 alt="${escapeHtml(att.alt || 'Image attachment')}"
+                                 onerror="this.parentElement.style.display='none'">
+                            <div class="attachment-filename">${escapeHtml(att.filename || 'image')}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        // Add attachment icon if there are attachments
+        const attachmentIcon = item.attachments && item.attachments.length > 0 ?
+            '<span class="attachment-icon" title="Has attachments">📎</span>' : '';
+
         return `
             <div class="caption ${typeClass}" data-speaker="${escapeHtml(item.Name)}" data-original-speaker="${escapeHtml(item.Name)}" data-index="${index}" data-type="${item.Type || 'caption'}">
                 <button class="copy-btn" title="Copy this line" aria-label="Copy this line">
@@ -460,13 +552,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="caption-content">
                     <span class="message-type" title="${typeLabel}">${typeIcon}</span>
                     <span class="caption-header">
-                        <span class="name ${hasAlias ? 'has-alias' : ''}" 
-                              data-original="${escapeHtml(item.Name)}" 
+                        <span class="name ${hasAlias ? 'has-alias' : ''}"
+                              data-original="${escapeHtml(item.Name)}"
                               title="${hasAlias ? 'Original: ' + escapeHtml(item.Name) : ''}">
                             ${escapeHtml(displayName)}
                         </span>
+                        ${attachmentIcon}
                     </span>
-                    <span class="text">${escapeHtml(item.Text)}</span>
+                    <span class="text">${escapeHtml(displayText)}</span>
+                    ${attachmentsHTML}
                 </div>
             </div>
         `;
@@ -839,6 +933,53 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // --- Session History Functions ---
+
+    // Define loadSessionFromHistory first, before it's used in loadSessionHistory
+    const loadSessionFromHistory = async function(sessionId) {
+        try {
+            console.log('[Session History] Loading session:', sessionId);
+            const sessionManager = new SessionManager();
+            const sessionData = await sessionManager.loadSessionData(sessionId);
+
+            // Close modal
+            sessionModal.style.display = 'none';
+
+            // Load the transcript
+            allCaptions = sessionData.transcript;
+            isLiveStreaming = false; // Historical data, not live
+
+            // Update title with proper format
+            const h1 = document.querySelector('h1');
+            const meetingTitle = sessionData.metadata?.meetingTitle || sessionData.metadata?.title || 'Untitled Meeting';
+            const platform = sessionData.metadata?.platform || '';
+            const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
+            const platformBadge = platform ? `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>` : '';
+            h1.innerHTML = `${platformBadge}Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
+
+            // Calculate and display analytics
+            const analytics = calculateAnalytics(allCaptions);
+            if (analytics) {
+                displayAnalytics(analytics);
+            }
+
+            // Render the transcript
+            renderCaptions(allCaptions);
+            populateSpeakerFilters(allCaptions);
+
+            // Clear any live indicators
+            const liveIndicator = document.getElementById('live-indicator');
+            if (liveIndicator) {
+                liveIndicator.classList.remove('active');
+            }
+
+            console.log('[Session History] Successfully loaded session with', allCaptions.length, 'captions');
+
+        } catch (error) {
+            console.error('[Session History] Failed to load session:', error);
+            alert('Failed to load session');
+        }
+    }
+
     async function showSessionHistory() {
         sessionModal.style.display = 'block';
         await loadSessionHistory();
@@ -883,9 +1024,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Add click handlers to session items
             sessionListModal.querySelectorAll('.session-item').forEach(item => {
-                item.addEventListener('click', () => {
+                item.addEventListener('click', async () => {
                     const sessionId = item.dataset.sessionId;
-                    loadSessionFromHistory(sessionId);
+                    await loadSessionFromHistory(sessionId);
                 });
             });
             
@@ -895,44 +1036,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    async function loadSessionFromHistory(sessionId) {
-        try {
-            const sessionManager = new SessionManager();
-            const sessionData = await sessionManager.loadSessionData(sessionId);
-
-            // Close modal
-            sessionModal.style.display = 'none';
-
-            // Load the transcript
-            allCaptions = sessionData.transcript;
-            isLiveStreaming = false; // Historical data, not live
-
-            // Update title with proper format
-            const h1 = document.querySelector('h1');
-            const meetingTitle = sessionData.metadata?.meetingTitle || sessionData.metadata?.title || 'Untitled Meeting';
-            h1.innerHTML = `Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
-            
-            // Calculate and display analytics
-            const analytics = calculateAnalytics(allCaptions);
-            if (analytics) {
-                displayAnalytics(analytics);
-            }
-            
-            // Render the transcript
-            renderCaptions(allCaptions);
-            populateSpeakerFilters(allCaptions);
-            
-            // Clear any live indicators
-            const liveIndicator = document.getElementById('live-indicator');
-            if (liveIndicator) {
-                liveIndicator.classList.remove('active');
-            }
-            
-        } catch (error) {
-            console.error('[Session History] Failed to load session:', error);
-            alert('Failed to load session');
-        }
-    }
     
     function getTimeAgo(date) {
         const seconds = Math.floor((new Date() - date) / 1000);
@@ -957,7 +1060,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function initialize() {
         try {
             // Check if we have captions passed via storage (from popup)
-            const result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId', 'meetingTitle']);
+            const result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId', 'meetingTitle', 'platform']);
             let transcript = result.captionsToView;
             let viewerData = result.viewerData;
             
@@ -973,13 +1076,16 @@ document.addEventListener('DOMContentLoaded', () => {
             if (transcript && transcript.length > 0) {
                 // Update meeting title if provided (from either direct meetingTitle or viewerData)
                 const meetingTitle = result.meetingTitle || viewerData?.meetingTitle;
+                const platform = result.platform || viewerData?.platform || '';
                 if (meetingTitle) {
                     const h1 = document.querySelector('h1');
                     const isHistorical = viewerData?.isHistorical;
+                    const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
+            const platformBadge = platform ? `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>` : '';
                     if (isHistorical) {
-                        h1.innerHTML = `Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
+                        h1.innerHTML = `${platformBadge}Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
                     } else {
-                        h1.innerHTML = `Live Transcript<span class="live-indicator"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
+                        h1.innerHTML = `${platformBadge}Live Transcript<span class="live-indicator"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
                     }
                 }
 
@@ -1013,8 +1119,18 @@ document.addEventListener('DOMContentLoaded', () => {
                     captionsContainer.innerHTML = '<p class="status-message">No transcript data available.<br><br>Please use the "View Transcript" button in the extension popup to load a transcript.</p>';
                 } else {
                     captionsContainer.innerHTML = '<p class="status-message">Waiting for live captions...</p>';
+
+                    // Update meeting title and platform if provided even when waiting for captions
+                    const meetingTitle = result.meetingTitle || viewerData?.meetingTitle;
+                    const platform = result.platform || viewerData?.platform || '';
+                    if (meetingTitle || platform) {
+                        const h1 = document.querySelector('h1');
+                        const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
+                        const platformBadge = platform ? `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>` : '';
+                        h1.innerHTML = `${platformBadge}Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span>${meetingTitle ? `<span class="meeting-title">${escapeHtml(meetingTitle)}</span>` : ''}`;
+                    }
                 }
-                
+
                 // Always setup event listeners and live streaming
                 setupEventListeners();
                 setupLiveStreaming();
@@ -1165,7 +1281,10 @@ document.addEventListener('DOMContentLoaded', () => {
                                 // Update meeting title if provided
                                 if (transcriptResponse.meetingTitle) {
                                     const h1 = document.querySelector('h1');
-                                    h1.innerHTML = `Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(transcriptResponse.meetingTitle)}</span>`;
+                                    const platform = transcriptResponse.platform || '';
+                                    const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
+            const platformBadge = platform ? `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>` : '';
+                                    h1.innerHTML = `${platformBadge}Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(transcriptResponse.meetingTitle)}</span>`;
                                 }
 
                                 renderCaptions(allCaptions);

@@ -146,14 +146,90 @@ const PLATFORM_CONFIGS = {
                 const container = msgElement.closest('.fui-unstable-ChatItem');
                 const authorEl = container?.querySelector('[data-tid="message-author-name"]');
                 const contentEl = msgElement.querySelector('[id^="content-"]');
-                
+
                 if (!contentEl || !contentEl.textContent) return null;
-                
+
+                // Extract image attachments
+                const attachments = [];
+
+                // Look for images in Teams messages using the correct selectors
+                // Teams uses fui-Image class and data-tid="lazy-image-2"
+                const images = msgElement.querySelectorAll('.fui-Image, img[data-tid*="lazy-image"], img[itemtype="http://schema.skype.com/AMSImage"]');
+                console.log(`[Teams Chat] Found ${images.length} images in message ${messageId}`);
+                images.forEach(img => {
+                    // Skip avatars, emojis, and icons
+                    if (img.src &&
+                        !img.src.includes('emoji') &&
+                        !img.src.includes('avatar') &&
+                        !img.closest('.fui-Icon-filled, .fui-Icon-regular')) {
+
+                        // Get the original source URL if available (Teams often uses blob URLs)
+                        const originalSrc = img.getAttribute('data-orig-src') || img.src;
+                        const galleryUrl = img.getAttribute('data-gallery-src');
+
+                        // Use the best quality URL available
+                        const imageUrl = galleryUrl || originalSrc;
+
+                        // Extract filename from alt text or use a default
+                        const altText = img.alt || img.title || 'Image attachment';
+                        let filename = altText;
+
+                        // If the alt text is just "image", try to generate a better filename
+                        if (filename.toLowerCase() === 'image' && imageUrl.includes('/')) {
+                            const urlParts = imageUrl.split('/');
+                            const lastPart = urlParts[urlParts.length - 1];
+                            if (lastPart && !lastPart.startsWith('img')) {
+                                filename = lastPart.split('?')[0];
+                            } else {
+                                filename = 'image.png';
+                            }
+                        }
+
+                        attachments.push({
+                            type: 'image',
+                            url: imageUrl,
+                            alt: altText,
+                            filename: filename
+                        });
+                        console.log(`[Teams Chat] Added image attachment: ${filename}`, { url: imageUrl, alt: altText });
+                    }
+                });
+
+                // Look for file attachments with preview images
+                const fileAttachments = msgElement.querySelectorAll('.fui-AttachmentCard');
+                fileAttachments.forEach(card => {
+                    const nameEl = card.querySelector('.fui-AttachmentCard__name');
+                    const imageEl = card.querySelector('img');
+                    if (imageEl && imageEl.src && !attachments.some(a => a.url === imageEl.src)) {
+                        const originalSrc = imageEl.getAttribute('data-orig-src') || imageEl.src;
+                        attachments.push({
+                            type: 'image',
+                            url: originalSrc,
+                            alt: nameEl?.textContent || 'File attachment',
+                            filename: nameEl?.textContent || 'attachment'
+                        });
+                    }
+                });
+
+                // Look for GIFs
+                const gifs = msgElement.querySelectorAll('.gif-item-container img');
+                gifs.forEach(gif => {
+                    if (gif.src && !attachments.some(a => a.url === gif.src)) {
+                        attachments.push({
+                            type: 'image',
+                            url: gif.src,
+                            alt: 'GIF',
+                            filename: 'animated.gif'
+                        });
+                    }
+                });
+
                 return {
                     id: messageId,
                     author: authorEl?.textContent || 'Unknown',
                     text: contentEl.textContent || contentEl.getAttribute('aria-label'),
-                    time: null // Will be replaced with formatted timestamp in content_script
+                    time: null, // Will be replaced with formatted timestamp in content_script
+                    attachments: attachments.length > 0 ? attachments : undefined
                 };
             }
         }
@@ -503,17 +579,17 @@ const PLATFORM_CONFIGS = {
                     messageContainer = msgElement;
                 }
                 if (!messageContainer) return null;
-                
+
                 // Get message ID
                 const messageId = messageContainer.getAttribute('data-message-id') || Date.now().toString();
-                
+
                 // Get parent container for author and time
                 const parentContainer = messageContainer.closest('.Ss4fHf');
-                
+
                 // Author name
                 const authorEl = parentContainer?.querySelector('.poVWob');
                 let authorName = authorEl?.textContent || 'Unknown';
-                
+
                 // If author is "You", get the actual name
                 if (authorName === 'You') {
                     const config = PLATFORM_CONFIGS['meet.google.com'];
@@ -524,20 +600,64 @@ const PLATFORM_CONFIGS = {
                         }
                     }
                 }
-                
+
                 // Message content - look inside the message container
                 const contentEl = messageContainer.querySelector('[jsname="dTKtvb"] > div, .ptNLrf > div');
-                
+
                 // Time
                 const timeEl = parentContainer?.querySelector('.MuzmKe');
-                
+
                 if (!contentEl || !contentEl.textContent) return null;
-                
+
+                // Extract image attachments
+                const attachments = [];
+
+                // Look for images in the message
+                const images = messageContainer.querySelectorAll('img[src]');
+                images.forEach(img => {
+                    // Skip avatars and emojis
+                    if (img.src && !img.src.includes('googleusercontent.com/a/') &&
+                        !img.classList.contains('emoji') && !img.closest('.poVWob')) {
+
+                        // Try to get filename from alt text or URL
+                        let filename = img.alt || 'image.png';
+                        if (!img.alt && img.src.includes('/')) {
+                            const urlParts = img.src.split('/');
+                            const lastPart = urlParts[urlParts.length - 1];
+                            if (lastPart && lastPart.includes('.')) {
+                                filename = lastPart.split('?')[0]; // Remove query params
+                            }
+                        }
+
+                        attachments.push({
+                            type: 'image',
+                            url: img.src,
+                            alt: img.alt || 'Image attachment',
+                            filename: filename
+                        });
+                    }
+                });
+
+                // Look for file attachment containers (Google Meet may show previews)
+                const attachmentContainers = messageContainer.querySelectorAll('.attachment-container, [role="img"]');
+                attachmentContainers.forEach(container => {
+                    const img = container.querySelector('img');
+                    if (img && img.src && !attachments.some(a => a.url === img.src)) {
+                        attachments.push({
+                            type: 'image',
+                            url: img.src,
+                            alt: container.getAttribute('aria-label') || 'File attachment',
+                            filename: container.getAttribute('aria-label') || 'attachment'
+                        });
+                    }
+                });
+
                 return {
                     id: messageId,
                     author: authorName,
                     text: contentEl.textContent.trim(),
-                    time: null // Will be replaced with formatted timestamp in content_script
+                    time: null, // Will be replaced with formatted timestamp in content_script
+                    attachments: attachments.length > 0 ? attachments : undefined
                 };
             }
         }
@@ -1150,7 +1270,7 @@ const PLATFORM_CONFIGS = {
             getChatMessageData: (msgElement) => {
                 // Get message ID
                 const messageId = msgElement.getAttribute('data-id') || Date.now().toString();
-                
+
                 // Get sender name - try multiple selectors
                 let senderEl = msgElement.querySelector('.chat-item__sender');
                 if (!senderEl) {
@@ -1159,9 +1279,9 @@ const PLATFORM_CONFIGS = {
                 if (!senderEl) {
                     senderEl = msgElement.querySelector('[class*="sender"]');
                 }
-                
+
                 let senderName = senderEl?.textContent?.trim();
-                
+
                 // If no sender found or sender is "You", try to get actual name
                 if (!senderName || senderName === 'You') {
                     // Try to find current user's name from participants list
@@ -1172,18 +1292,18 @@ const PLATFORM_CONFIGS = {
                             senderName = myNameEl.textContent.trim();
                         }
                     }
-                    
+
                     // If still no name, check if we stored it
                     if (!senderName && window.currentUserName) {
                         senderName = window.currentUserName;
                     }
-                    
+
                     // Final fallback
                     if (!senderName) {
                         senderName = 'You';
                     }
                 }
-                
+
                 // Get message content - try multiple selectors
                 let contentEl = msgElement.querySelector('.new-chat-message__text-content ._rtfEditor_1n3rs_1');
                 if (!contentEl) {
@@ -1192,17 +1312,65 @@ const PLATFORM_CONFIGS = {
                 if (!contentEl) {
                     contentEl = msgElement.querySelector('[class*="message-content"]');
                 }
-                
+
                 // Get time
                 const timeEl = msgElement.querySelector('.new-chat-item__chat-info-time-stamp');
-                
+
                 if (!contentEl || !contentEl.textContent) return null;
-                
+
+                // Extract image attachments
+                const attachments = [];
+
+                // Look for images in chat messages
+                const images = msgElement.querySelectorAll('.chat-message-image, .chat-file-image img, img[src]');
+                images.forEach(img => {
+                    // Skip avatars and emojis
+                    if (img.src && !img.classList.contains('avatar') &&
+                        !img.classList.contains('emoji') && !img.closest('.chat-item__avatar')) {
+
+                        // Try to get filename
+                        let filename = img.alt || 'image.png';
+                        const fileNameEl = msgElement.querySelector('.chat-file-name');
+                        if (fileNameEl) {
+                            filename = fileNameEl.textContent.trim();
+                        } else if (!img.alt && img.src.includes('/')) {
+                            const urlParts = img.src.split('/');
+                            const lastPart = urlParts[urlParts.length - 1];
+                            if (lastPart && lastPart.includes('.')) {
+                                filename = lastPart.split('?')[0];
+                            }
+                        }
+
+                        attachments.push({
+                            type: 'image',
+                            url: img.src,
+                            alt: img.alt || 'Image attachment',
+                            filename: filename
+                        });
+                    }
+                });
+
+                // Look for file attachment containers
+                const fileContainers = msgElement.querySelectorAll('.file-attachment-container, .chat-file-container');
+                fileContainers.forEach(container => {
+                    const img = container.querySelector('img');
+                    const nameEl = container.querySelector('.chat-file-name, .file-name');
+                    if (img && img.src && !attachments.some(a => a.url === img.src)) {
+                        attachments.push({
+                            type: 'image',
+                            url: img.src,
+                            alt: nameEl?.textContent || 'File attachment',
+                            filename: nameEl?.textContent || 'attachment'
+                        });
+                    }
+                });
+
                 return {
                     id: messageId,
                     author: senderName,
                     text: contentEl.textContent.trim(),
-                    time: null // Will be replaced with formatted timestamp in content_script
+                    time: null, // Will be replaced with formatted timestamp in content_script
+                    attachments: attachments.length > 0 ? attachments : undefined
                 };
             }
         }
