@@ -367,13 +367,14 @@
     <p class="subtitle" id="platform-info">Supporting Teams, Google Meet & Zoom</p>
     
     <!-- Session Selector for Multiple Meetings -->
-    <div id="session-manager" style="display: none; width: 100%; margin: 10px 0;">
-        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-            <select id="session-selector" style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: white; font-size: 14px;">
+    <div id="session-manager" style="display: none; width: calc(100% - 20px); margin: 10px auto;">
+        <div style="margin-bottom: 8px; color: #6c757d; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;">Active Meeting Sessions</div>
+        <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 10px;">
+            <select id="session-selector" style="flex: 1; min-width: 0; padding: 6px; border: 1px solid #ddd; border-radius: 4px; background: white; font-size: 13px;">
                 <option value="">Select a meeting session...</option>
             </select>
-            <button id="refresh-sessions" style="padding: 8px 10px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 4px; cursor: pointer;" title="Refresh sessions">🔄</button>
-            <button id="export-all-sessions" style="padding: 8px 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;" title="Export all active sessions">Export All</button>
+            <button id="refresh-sessions" style="padding: 6px 8px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; flex-shrink: 0;" title="Refresh sessions">🔄</button>
+            <button id="export-all-sessions" style="padding: 6px 10px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; flex-shrink: 0; white-space: nowrap;" title="Export all active sessions">Export All</button>
         </div>
         <div id="session-info" style="display: none; padding: 8px; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 4px; font-size: 12px;">
             <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
@@ -468,6 +469,12 @@
             </div>
             <p class="small-info-text">Capture meeting chat messages and merge with transcript (Teams, Google Meet & Zoom).</p>
             
+            <p class="settings-subheader">Session Management</p>
+            <div style="margin: 10px 0;">
+                <button id="cleanup-sessions" class="secondary-button" style="width: 100%; padding: 8px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;">🧹 Clean Up Stale Sessions</button>
+            </div>
+            <p class="small-info-text">Remove inactive sessions and clear stuck meeting data.</p>
+
             <p class="settings-subheader">Automation Settings</p>
             <div class="setting-item">
                 <label for="autoEnableCaptionsToggle" class="setting-label">Auto-open Live Captions</label>

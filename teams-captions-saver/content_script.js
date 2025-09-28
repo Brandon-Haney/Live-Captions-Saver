@@ -51,7 +51,14 @@ function extractMeetingTitle() {
 // Create a new session for a new meeting
 async function createNewMeetingSession() {
     try {
-        // Only end previous session if it has actual content
+        // Don't create a new session if we already have one
+        if (currentSessionId) {
+            console.log(`[Caption Saver] Session already exists: ${currentSessionId}, not creating duplicate`);
+            return true;
+        }
+
+        // Only end/delete previous session if it exists (which shouldn't happen since we check above)
+        // This is a safety check for edge cases
         if (currentSessionId) {
             // Check if the current session has any captions
             if (transcriptArray.length > 0) {
@@ -402,14 +409,46 @@ const isUserInMeeting = () => {
     return inMeeting;
 };
 
+// Helper function to find common prefix length between two strings
+function getCommonPrefixLength(str1, str2) {
+    let i = 0;
+    while (i < str1.length && i < str2.length && str1[i] === str2[i]) {
+        i++;
+    }
+    return i;
+}
+
+// Helper function to find common suffix length between two strings
+function getCommonSuffixLength(str1, str2) {
+    let i = 0;
+    const len1 = str1.length;
+    const len2 = str2.length;
+    while (i < len1 && i < len2 && str1[len1 - 1 - i] === str2[len2 - 1 - i]) {
+        i++;
+    }
+    return i;
+}
+
 // --- Core Logic ---
 const processCaptionUpdates = ErrorHandler.wrap(function() {
     if (!platformConfig) return;
-    
+
     const closedCaptionsContainer = getCachedElement(SELECTORS.captionsContainer);
     if (!closedCaptionsContainer) return;
 
-    const transcriptElements = closedCaptionsContainer.querySelectorAll(SELECTORS.captionBlock);
+    // For Zoom, check for the live transcription element directly
+    let transcriptElements;
+    if (platformConfig.name === 'Zoom') {
+        // Look for the live transcription subtitle box directly, not cached
+        const liveBox = document.querySelector('.live-transcription-subtitle__box');
+        if (liveBox) {
+            transcriptElements = [liveBox];
+        } else {
+            transcriptElements = [];
+        }
+    } else {
+        transcriptElements = closedCaptionsContainer.querySelectorAll(SELECTORS.captionBlock);
+    }
 
     transcriptElements.forEach(element => {
         try {
@@ -435,24 +474,109 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                         lastCaptionIndex = transcriptArray.length - 1;
                     }
                 }
-                
+
                 // Check if this is a continuation of the last caption
                 const now = new Date();
-                const isContinuation = lastCaptionIndex !== -1 && 
-                    transcriptArray[lastCaptionIndex].timestamp && 
+                const isContinuation = lastCaptionIndex !== -1 &&
+                    transcriptArray[lastCaptionIndex].timestamp &&
                     (now - new Date(transcriptArray[lastCaptionIndex].timestamp)) < 10000; // Within 10 seconds
-                
+
+                // Also check for exact duplicates from same speaker in recent history (not just last caption)
+                // Zoom sometimes re-shows the same caption after a pause
+                if (lastCaptionIndex !== -1) {
+                    // Look back through recent captions from the same speaker
+                    for (let i = Math.max(0, transcriptArray.length - 10); i < transcriptArray.length; i++) {
+                        const entry = transcriptArray[i];
+                        if (entry.Name === name && entry.Text === text && entry.Type === 'caption') {
+                            // Found exact duplicate from same speaker - skip it
+                            console.log(`[Zoom] Skipping duplicate caption: "${text.substring(0, 30)}..."`);
+                            return;
+                        }
+                    }
+                }
+
                 if (isContinuation) {
                     const lastText = transcriptArray[lastCaptionIndex].Text;
-                    
-                    // Check if this is an update (text starts with previous text)
-                    // OR if the text is completely different (new sentence)
-                    if (text.startsWith(lastText) || lastText.startsWith(text)) {
+
+                    // **SIMPLIFIED ZOOM LOGIC**: For Zoom, we need to be much more aggressive
+                    // Zoom shows overlapping text fragments as captions scroll
+                    // Examples of what we need to handle:
+                    // "Testing, testing" -> "Testing, testing…" -> "Testing, testing… Test line number 2."
+                    // "Test line number 2. Test line number 3." -> "Test line number 3. Test line number 4?"
+
+                    // Check if the texts have any substantial overlap (more than just a word or two)
+                    const wordsInCommon = [];
+                    const lastWords = lastText.split(' ');
+                    const newWords = text.split(' ');
+
+                    // Find longest common substring of words
+                    for (let i = 0; i < lastWords.length; i++) {
+                        for (let j = 0; j < newWords.length; j++) {
+                            if (lastWords[i] === newWords[j]) {
+                                // Check how many consecutive words match
+                                let matchLength = 0;
+                                while (i + matchLength < lastWords.length &&
+                                       j + matchLength < newWords.length &&
+                                       lastWords[i + matchLength] === newWords[j + matchLength]) {
+                                    matchLength++;
+                                }
+                                if (matchLength >= 3) { // At least 3 words in common
+                                    wordsInCommon.push(matchLength);
+                                }
+                            }
+                        }
+                    }
+
+                    const hasSubstantialOverlap = wordsInCommon.length > 0 && Math.max(...wordsInCommon) >= 3;
+
+                    // Check if new text contains substantial portion of old text
+                    // This catches cases like: "Testing, testing" -> "Testing, testing… Test line"
+                    const substringOverlap = lastText.length > 10 && text.includes(lastText.substring(0, lastText.length - 5));
+
+                    // Check if old text is contained within new text (direct extension)
+                    // This catches: "Test number 5." -> "Test number 5. Test number 6."
+                    const isDirectExtension = text.includes(lastText.trim());
+
+                    // For shifted windows, check if end of last appears in new
+                    // This catches: "Test 2. Test 3." -> "Test 3. Test 4."
+                    const lastSentences = lastText.split('.').filter(s => s.trim());
+                    const newSentences = text.split('.').filter(s => s.trim());
+                    let hasShiftedContent = false;
+                    if (lastSentences.length > 0 && newSentences.length > 0) {
+                        const lastEndSentence = lastSentences[lastSentences.length - 1].trim();
+                        hasShiftedContent = newSentences.some(s => s.trim().includes(lastEndSentence) || lastEndSentence.includes(s.trim()));
+                    }
+
+                    // Debug logging for Zoom caption detection (uncomment to debug)
+                    if (window.debugZoomCaptions) {
+                        console.log('[Zoom Caption Debug]', {
+                            lastText: lastText.substring(0, 50),
+                            newText: text.substring(0, 50),
+                            isDirectExtension,
+                            hasSubstantialOverlap,
+                            substringOverlap,
+                            hasShiftedContent
+                        });
+                    }
+
+                    // **KEY DECISION**: If there's ANY significant overlap, treat as update
+                    // This is critical for Zoom which shows overlapping fragments
+                    if (isDirectExtension || hasSubstantialOverlap || substringOverlap || hasShiftedContent) {
                         // This is an update/continuation of the same caption
+                        // Reuse the existing caption's key to update it in place
                         captionId = transcriptArray[lastCaptionIndex].key;
+
+                        // Log the update for debugging
+                        if (window.debugZoomCaptions) {
+                            console.log(`[Zoom] Updating caption ${captionId}: "${text.substring(0, 50)}..."`);
+                        }
                     } else {
-                        // This is a new sentence from the same speaker
+                        // This is truly a new sentence from the same speaker (no overlap)
                         captionId = `caption_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+                        if (window.debugZoomCaptions) {
+                            console.log(`[Zoom] New caption ${captionId}: "${text.substring(0, 50)}..."`);
+                        }
                     }
                 } else {
                     // This is a new caption (different speaker or too much time passed)
@@ -578,7 +702,7 @@ function updateAttendeesFromTranscript() {
     });
     
     attendeeData.lastUpdated = currentTime;
-    console.log(`Attendee update from transcript. Speakers found: ${speakers.length}`);
+    // console.log(`Attendee update from transcript. Speakers found: ${speakers.length}`);
 }
 function updateAttendeeList() {
     try {
@@ -587,7 +711,7 @@ function updateAttendeeList() {
         const attendeeTree = document.querySelector(attendeeListSelector);
         if (!attendeeTree) {
             if (platformConfig?.name === 'Zoom') {
-                console.log(`[Zoom] Attendee list not found with selector: ${attendeeListSelector}`);
+                // console.log(`[Zoom] Attendee list not found with selector: ${attendeeListSelector}`);
             }
             // Fallback: Add speakers from transcript as attendees
             updateAttendeesFromTranscript();
@@ -777,18 +901,21 @@ async function startAttendeeTracking() {
             // For Google Meet, also check attendees from transcript speakers
             updateAttendeesFromTranscript();
         } else if (platformConfig?.name === 'Zoom') {
-            // For Zoom, try to open participant panel if enabled
+            // For Zoom, always try to extract attendees from transcript
+            // Since participant panel may not be reliably available
+            console.log('[Attendee Tracking] Zoom - using transcript-based attendee tracking');
+
+            // Try to open participant panel if enabled (optional)
             if (autoOpenAttendees) {
                 const opened = await tryOpenParticipantPanel();
                 if (opened) {
+                    console.log('[Attendee Tracking] Zoom participant panel opened');
                     await delay(2000); // Give panel more time to populate
+                    updateAttendeeList(); // Try to get from panel
                 }
             }
-            
-            // Update attendee list after delay
-            updateAttendeeList();
-            
-            // Also check transcript for speakers in case panel isn't available
+
+            // ALWAYS check transcript for speakers - this is more reliable for Zoom
             updateAttendeesFromTranscript();
         } else {
             // Teams logic - check if chat capture is enabled to avoid conflicts
@@ -826,9 +953,25 @@ async function getAttendeeReport() {
     
     // For Zoom, do a final attendee update before generating report
     if (platformConfig?.name === 'Zoom') {
-        updateAttendeeList(); // Update from participant panel
-        updateAttendeesFromTranscript(); // Also check transcript
+        // Always prioritize transcript-based attendees for Zoom
+        updateAttendeesFromTranscript(); // Primary source: transcript speakers
+        updateAttendeeList(); // Secondary source: participant panel (if available)
         await delay(100); // Small delay to ensure updates complete
+
+        // If still no attendees, extract from current transcript
+        if (attendeeData.allAttendees.size === 0 && transcriptArray.length > 0) {
+            console.log('[Attendee Tracking] Zoom - No attendees found, extracting from transcript');
+            const speakers = new Set();
+            transcriptArray.forEach(item => {
+                if (item.Name && item.Name !== 'Unknown Speaker') {
+                    speakers.add(item.Name);
+                }
+            });
+            speakers.forEach(name => {
+                attendeeData.allAttendees.add(name);
+            });
+            console.log(`[Attendee Tracking] Extracted ${attendeeData.allAttendees.size} attendees from transcript`);
+        }
     }
     
     // For Google Meet, ensure we have at least the speakers from the transcript
@@ -851,7 +994,7 @@ async function getAttendeeReport() {
     };
     
     if (platformConfig?.name === 'Zoom') {
-        console.log(`[Zoom] Attendee report generated: ${report.totalUniqueAttendees} attendees`, report.attendeeList);
+        // console.log(`[Zoom] Attendee report generated: ${report.totalUniqueAttendees} attendees`, report.attendeeList);
     }
     
     return report;
@@ -1234,7 +1377,123 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         return;
     }
     
-    if (wasInMeeting && !nowInMeeting) {
+    // Check for meeting start (important for Zoom which may load directly into a meeting)
+    if (!wasInMeeting && nowInMeeting) {
+        const isMainFrame = window === window.top;
+
+        // For Zoom, only let the frame that will capture captions create the session
+        // Main frame should not create sessions since it won't have captions
+        if (platformConfig && platformConfig.name === 'Zoom' && isMainFrame) {
+            console.log("[Zoom Main Frame] Meeting started but not creating session - iframe will handle it");
+            wasInMeeting = nowInMeeting;
+            return;
+        }
+
+        // Reset auto-save state when joining a new meeting
+        console.log(`Meeting transition detected: Out -> In. ${isMainFrame ? '(Main Frame)' : '(Iframe)'}`);
+        autoSaveTriggered = false;
+        lastMeetingId = null;
+        captionRetryInProgress = false; // Reset retry flag
+
+        // Only create a new session if we don't already have one
+        if (!currentSessionId) {
+            console.log(`Creating new session for meeting ${isMainFrame ? '(Main Frame)' : '(Iframe)'}`);
+            await createNewMeetingSession();
+        } else {
+            console.log(`Session already exists: ${currentSessionId}, not creating a new one.`);
+        }
+
+        // Start attendee tracking when entering meeting
+        startAttendeeTracking();
+
+        // Auto-enable captions for all platforms if enabled
+        setTimeout(async () => {
+            const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
+            if (autoEnableCaptions) {
+                console.log('[Caption Saver] Checking if captions need to be auto-enabled...');
+                const captionsEnabled = platformConfig.areCaptionsEnabled ? platformConfig.areCaptionsEnabled() : false;
+
+                if (!captionsEnabled) {
+                    console.log('[Caption Saver] Captions not enabled, attempting to enable...');
+                    await attemptAutoEnableCaptions();
+                } else {
+                    console.log('[Caption Saver] Captions already enabled');
+                }
+            }
+
+            // Then check caption state
+            handleCaptionsStateChange();
+        }, 3000); // Give meeting UI more time to load
+
+        // For Google Meet, also setup leave button listener
+        if (platformConfig && platformConfig.name === 'Google Meet') {
+            setupLeaveButtonListener();
+        }
+    } else if (wasInMeeting && !nowInMeeting) {
+        const isMainFrame = window === window.top;
+
+        // For Zoom, coordinate between frames - only the frame with captions should save
+        if (platformConfig && platformConfig.name === 'Zoom') {
+            // If we're the main frame and have no captions, check for saved data from iframe
+            if (isMainFrame && transcriptArray.length === 0) {
+                console.log(`[Zoom Main Frame] Meeting ended but no captions in main frame - checking for iframe data`);
+
+                // Wait a moment for iframe to save data
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+                // Check for saved transcript from iframe or backup
+                const { transcriptBackup, zoomMeetingEnded } = await chrome.storage.local.get(['transcriptBackup', 'zoomMeetingEnded']);
+
+                if (zoomMeetingEnded && zoomMeetingEnded.transcript && zoomMeetingEnded.transcript.length > 0) {
+                    console.log(`[Zoom Main Frame] Found iframe saved data with ${zoomMeetingEnded.transcript.length} captions`);
+                    // Iframe saved data, trigger auto-save from main frame
+                    const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
+                    if (autoSaveOnEnd) {
+                        console.log('[Zoom Main Frame] Triggering auto-save with iframe data');
+                        await safeSendMessageAsync({ message: "zoom_meeting_ended" });
+                    }
+                } else if (transcriptBackup && transcriptBackup.transcript && transcriptBackup.transcript.length > 0) {
+                    console.log(`[Zoom Main Frame] Found backup data with ${transcriptBackup.transcript.length} captions`);
+                    // Convert backup to zoomMeetingEnded format and trigger auto-save
+                    const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
+                    if (autoSaveOnEnd) {
+                        console.log('[Zoom Main Frame] Converting backup to meeting ended format for auto-save');
+                        await chrome.storage.local.set({
+                            zoomMeetingEnded: {
+                                transcript: transcriptBackup.transcript,
+                                meetingTitle: transcriptBackup.meetingTitle || currentMeetingTitle || 'Untitled Meeting',
+                                recordingStartTime: transcriptBackup.recordingStartTime || new Date().toISOString(),
+                                attendeeReport: transcriptBackup.attendeeData || { allAttendees: [], totalUniqueAttendees: 0 },
+                                timestamp: new Date().toISOString(),
+                                shouldAutoSave: true,
+                                sessionId: transcriptBackup.sessionId || currentSessionId  // Include session ID
+                            }
+                        });
+                        console.log('[Zoom Main Frame] Triggering auto-save with backup data');
+                        await safeSendMessageAsync({ message: "zoom_meeting_ended" });
+                    }
+                } else {
+                    console.log('[Zoom Main Frame] No caption data found from iframe or backup');
+                }
+
+                wasInMeeting = nowInMeeting;
+                // Clean up session
+                if (currentSessionId) {
+                    chrome.runtime.sendMessage({
+                        action: 'deleteSession',
+                        sessionId: currentSessionId
+                    });
+                    currentSessionId = null;
+                }
+
+                // If we found and processed data, return
+                if ((zoomMeetingEnded && zoomMeetingEnded.transcript) || (transcriptBackup && transcriptBackup.transcript)) {
+                    return;
+                }
+            }
+            console.log(`[Zoom ${isMainFrame ? 'Main Frame' : 'Iframe'}] Processing meeting end with ${transcriptArray.length} captions`);
+        }
+
         // Handle session end
         if (currentSessionId) {
             if (transcriptArray.length === 0) {
@@ -1254,18 +1513,19 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
             }
             currentSessionId = null;
         }
-        const isMainFrame = window === window.top;
-        // console.log(`Meeting transition detected: In -> Out. Checking for auto-save in ${isMainFrame ? 'main frame' : 'iframe'}.`);
-        // console.log(`Platform: ${platformConfig?.name}, Transcript length: ${transcriptArray.length}, Capturing: ${capturing}`);
-        
+
         // For Zoom, save immediately as iframe might be destroyed
-        if (platformConfig && platformConfig.name === 'Zoom') {
-            console.log(`[Zoom] Meeting end detected in ${isMainFrame ? 'main frame' : 'iframe'}, transcript: ${transcriptArray.length} items`);
-            if (transcriptArray.length > 0) {
-                // Save to local storage immediately
-                (async () => {
+        if (platformConfig && platformConfig.name === 'Zoom' && transcriptArray.length > 0) {
+            const frameType = isMainFrame ? 'Main Frame' : 'Iframe';
+            console.log(`[Zoom ${frameType}] Processing meeting end save with ${transcriptArray.length} items`);
+
+            // Save to local storage immediately
+            (async () => {
                 const attendeeReport = await getAttendeeReport();
-                console.log(`[Zoom iframe] Saving meeting data - Transcript: ${transcriptArray.length} items, Attendees: ${attendeeReport?.totalUniqueAttendees || 0}`);
+                const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
+                console.log(`[Zoom ${frameType}] Saving meeting data - Transcript: ${transcriptArray.length} items, Attendees: ${attendeeReport?.totalUniqueAttendees || 0}, AutoSave: ${autoSaveOnEnd}`);
+
+                // Always save the data for Zoom
                 await chrome.storage.local.set({
                     zoomMeetingEnded: {
                         transcript: getCleanTranscript(),
@@ -1273,16 +1533,20 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                         recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
                         attendeeReport: attendeeReport,
                         timestamp: new Date().toISOString(),
-                        shouldAutoSave: true
+                        shouldAutoSave: autoSaveOnEnd !== false,  // Default to true if not explicitly false
+                        sessionId: currentSessionId  // Include session ID for alias lookup
                     }
                 });
-                
-                // Send message to service worker
-                safeSendMessage({
-                    message: "zoom_meeting_ended"
-                });
+
+                // If we're the iframe, also try to trigger auto-save immediately
+                if (!isMainFrame && autoSaveOnEnd !== false) {
+                    console.log(`[Zoom ${frameType}] Iframe triggering auto-save directly`);
+                    const response = await safeSendMessageAsync({
+                        message: "zoom_meeting_ended"
+                    });
+                    console.log(`[Zoom ${frameType}] Service worker response:`, response);
+                }
             })();
-            }
         }
         
         // Send meeting ended signal to viewer
@@ -1309,16 +1573,58 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
             const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
             console.log(`Auto-save check: enabled=${autoSaveOnEnd}, transcript=${transcriptArray.length} items`);
             
-            if (autoSaveOnEnd && transcriptArray.length > 0) {
-                console.log("Auto-save is ON and transcript has data. Triggering save.");
+            // **FIX FOR ZOOM**: Check for backup data if main frame has no captions
+            let transcriptToSave = transcriptArray;
+            let shouldTriggerSave = false;
+
+            if (autoSaveOnEnd) {
+                if (transcriptArray.length > 0) {
+                    shouldTriggerSave = true;
+                    console.log("Auto-save is ON and transcript has data. Triggering save.");
+                } else if (platformConfig && platformConfig.name === 'Zoom') {
+                    // For Zoom, check if we have backup data from the iframe
+                    const backupData = await chrome.storage.local.get('transcriptBackup');
+                    if (backupData.transcriptBackup?.transcript?.length > 0) {
+                        transcriptToSave = backupData.transcriptBackup.transcript;
+                        shouldTriggerSave = true;
+                        console.log(`[Zoom Auto-save] Found ${transcriptToSave.length} captions in backup. Triggering save.`);
+                    }
+                }
+            }
+
+            if (shouldTriggerSave) {
+                console.log(`Auto-save: Processing ${transcriptToSave.length} transcript items`);
                 
                 // Mark auto-save as triggered before sending message
                 autoSaveTriggered = true;
                 lastMeetingId = currentMeetingId;
                 
                 // Send save message without retry (let service worker handle retries if needed)
-                const attendeeReport = await getAttendeeReport();
-                const cleanTranscript = getCleanTranscript();
+                // Use attendee data from backup if available (for Zoom)
+                let attendeeReport = await getAttendeeReport();
+                if (platformConfig?.name === 'Zoom' && (!attendeeReport || attendeeReport.totalUniqueAttendees === 0)) {
+                    const backupData = await chrome.storage.local.get('transcriptBackup');
+                    if (backupData.transcriptBackup?.attendeeData) {
+                        attendeeReport = {
+                            allAttendees: Array.from(backupData.transcriptBackup.attendeeData.allAttendees || []),
+                            totalUniqueAttendees: backupData.transcriptBackup.attendeeData.allAttendees?.size || 0,
+                            attendeeHistory: backupData.transcriptBackup.attendeeData.attendeeHistory || [],
+                            meetingStartTime: backupData.transcriptBackup.attendeeData.meetingStartTime
+                        };
+                    }
+                }
+
+                // Clean the transcript (remove duplicates, sort, etc.)
+                const cleanTranscript = transcriptToSave.filter(item => item && item.Name && item.Text);
+
+                // For Zoom, also get recording start time from backup if needed
+                let recordingStartTimeToUse = recordingStartTime;
+                if (platformConfig?.name === 'Zoom' && !recordingStartTimeToUse) {
+                    const backupData = await chrome.storage.local.get('transcriptBackup');
+                    if (backupData.transcriptBackup?.recordingStartTime) {
+                        recordingStartTimeToUse = new Date(backupData.transcriptBackup.recordingStartTime);
+                    }
+                }
                 
                 // DON'T extract new title after meeting ends - use the cached one from when meeting was active
                 // extractMeetingTitle() will return "Calendar" after leaving the meeting!
@@ -1345,7 +1651,7 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                         message: "save_on_leave",
                         transcriptArray: cleanTranscript,
                         meetingTitle: titleToUse,
-                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                        recordingStartTime: recordingStartTimeToUse ? recordingStartTimeToUse.toISOString() : new Date().toISOString(),
                         attendeeReport: attendeeReport,
                         sessionId: currentSessionId
                     });
@@ -1418,42 +1724,6 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         stopCaptureSession();
         stopAttendeeTracking();
         return;
-    } else if (!wasInMeeting && nowInMeeting) {
-        // Reset auto-save state when joining a new meeting
-        console.log("Meeting transition detected: Out -> In. Creating new session.");
-        autoSaveTriggered = false;
-        lastMeetingId = null;
-        captionRetryInProgress = false; // Reset retry flag
-        
-        // Create a new session for the new meeting
-        await createNewMeetingSession();
-        
-        // Start attendee tracking when entering meeting
-        startAttendeeTracking();
-        
-        // Auto-enable captions for all platforms if enabled
-        setTimeout(async () => {
-            const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
-            if (autoEnableCaptions) {
-                console.log('[Caption Saver] Checking if captions need to be auto-enabled...');
-                const captionsEnabled = platformConfig.areCaptionsEnabled ? platformConfig.areCaptionsEnabled() : false;
-                
-                if (!captionsEnabled) {
-                    console.log('[Caption Saver] Captions not enabled, attempting to enable...');
-                    await attemptAutoEnableCaptions();
-                } else {
-                    console.log('[Caption Saver] Captions already enabled');
-                }
-            }
-            
-            // Then check caption state
-            handleCaptionsStateChange();
-        }, 3000); // Give meeting UI more time to load
-        
-        // For Google Meet, also setup leave button listener
-        if (platformConfig && platformConfig.name === 'Google Meet') {
-            setupLeaveButtonListener();
-        }
     }
     
     // Check caption state after all transitions
@@ -1480,7 +1750,16 @@ const handleCaptionsStateChange = ErrorHandler.wrap(async function() {
         hasCaptions = true; // For Teams, container presence is enough
     }
     
-    if (captionsContainer && hasCaptions) {
+    // For Zoom, also check for the live transcription element directly
+    if (platformConfig && platformConfig.name === 'Zoom') {
+        const liveTranscriptionBox = document.querySelector('.live-transcription-subtitle__box');
+        if (liveTranscriptionBox) {
+            startCaptureSession();
+        } else if (capturing) {
+            // Zoom captions disappeared
+            console.log('[Zoom] Captions container disappeared, but keeping session active');
+        }
+    } else if (captionsContainer && hasCaptions) {
         startCaptureSession();
     } else {
         // For Google Meet, if captions are off and auto-enable is on, enable them
@@ -1530,7 +1809,13 @@ const handleCaptionsStateChange = ErrorHandler.wrap(async function() {
 function ensureObserverIsActive() {
     if (!capturing || !platformConfig) return;
 
-    const captionContainer = getCachedElement(SELECTORS.captionsContainer);
+    let captionContainer;
+    if (platformConfig.name === 'Zoom') {
+        // For Zoom, observe the body since captions are added/removed frequently
+        captionContainer = document.body;
+    } else {
+        captionContainer = getCachedElement(SELECTORS.captionsContainer);
+    }
     
     // If the container doesn't exist or has changed, re-initialize the observer
     if (!captionContainer || captionContainer !== observedElement) {
@@ -1621,8 +1906,8 @@ async function startCaptureSession() {
         });
     }
     
-    safeSendMessage({ message: "update_badge_status", capturing: true });
-    
+    updateBadgeStatus(true);
+
     ensureObserverIsActive();
 }
 
@@ -1676,6 +1961,22 @@ function startPeriodicBackup() {
                             }
                         });
                     }
+
+                    // **IMPORTANT FIX**: For Zoom, ALWAYS save a backup even when we have a session
+                    // This ensures data persists when iframe is destroyed on meeting end
+                    if (platformConfig && platformConfig.name === 'Zoom') {
+                        await chrome.storage.local.set({
+                            transcriptBackup: {
+                                transcript: transcriptArray,
+                                meetingTitle: currentMeetingTitle,
+                                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
+                                lastBackup: new Date().toISOString(),
+                                attendeeData: attendeeData,
+                                sessionId: currentSessionId // Include session ID for better tracking
+                            }
+                        });
+                        // console.log(`[Zoom Backup] Saved ${transcriptArray.length} captions to backup storage`);
+                    }
                     // console.log(`[Caption Saver] Backup saved: ${transcriptArray.length} entries`);
                 }
             } catch (error) {
@@ -1692,7 +1993,7 @@ function startPeriodicBackup() {
 
 function stopCaptureSession() {
     // Always update badge to off when stopping, even if not currently capturing
-    safeSendMessage({ message: "update_badge_status", capturing: false });
+    updateBadgeStatus(false);
     
     if (!capturing) return;
 
@@ -1751,8 +2052,8 @@ function stopCaptureSession() {
     
     // Stop attendee tracking
     stopAttendeeTracking();
-    
-    safeSendMessage({ message: "update_badge_status", capturing: false });
+
+    updateBadgeStatus(false);
 }
 
 // Save current transcript to session history
@@ -1877,10 +2178,33 @@ function debouncedAutoEnableCaptions() {
     if (autoEnableDebounceTimer) {
         clearTimeout(autoEnableDebounceTimer);
     }
-    
+
     autoEnableDebounceTimer = setTimeout(() => {
         attemptAutoEnableCaptions();
     }, 2000); // 2 second debounce to prevent rapid firing
+}
+
+// Debounced badge update to prevent excessive messages
+let lastBadgeState = null;
+let badgeUpdateTimer = null;
+function updateBadgeStatus(capturing) {
+    // Only send if state actually changed
+    if (lastBadgeState === capturing) {
+        return;
+    }
+
+    // Clear any pending update
+    if (badgeUpdateTimer) {
+        clearTimeout(badgeUpdateTimer);
+    }
+
+    // Debounce rapid changes
+    badgeUpdateTimer = setTimeout(() => {
+        if (lastBadgeState !== capturing) {
+            lastBadgeState = capturing;
+            safeSendMessage({ message: "update_badge_status", capturing: capturing });
+        }
+    }, 100); // Small debounce to batch rapid changes
 }
 
 // --- Event-Driven Initialization ---
@@ -1888,9 +2212,9 @@ function initializeEventDrivenSystem() {
     if (hasInitializedListeners) return;
     
     // console.log("Initializing event-driven caption system...");
-    
+
     // Clear badge on initialization (page load/refresh)
-    safeSendMessage({ message: "update_badge_status", capturing: false });
+    updateBadgeStatus(false);
     
     // Set up observers for meeting state changes
     setupMeetingObserver();
@@ -1898,9 +2222,16 @@ function initializeEventDrivenSystem() {
     
     // Periodically check observer status (much less frequent than before)
     setInterval(ensureObserverIsActive, TIMING.OBSERVER_CHECK_INTERVAL);
-    
-    // Initial state check
-    handleMeetingStateChange();
+
+    // Periodically check meeting state for platforms like Zoom that may not trigger mutations
+    setInterval(() => {
+        handleMeetingStateChange();
+    }, TIMING.MAIN_LOOP_INTERVAL);
+
+    // Initial state check with a small delay for DOM to load
+    setTimeout(() => {
+        handleMeetingStateChange();
+    }, 1000);
     
     hasInitializedListeners = true;
 }
@@ -1951,8 +2282,33 @@ function cleanupObservers() {
 
 // Cleanup on page unload
 window.addEventListener('beforeunload', () => {
+    // For Zoom iframe, save data before unload
+    if (platformConfig && platformConfig.name === 'Zoom' && transcriptArray.length > 0) {
+        const isMainFrame = window === window.top;
+        if (!isMainFrame) {
+            console.log('[Zoom Iframe] Page unloading, saving transcript data');
+            // Synchronously save data
+            const attendeeReport = getAllAttendees(); // Use sync version
+            chrome.storage.local.set({
+                zoomMeetingEnded: {
+                    transcript: getCleanTranscript(),
+                    meetingTitle: currentMeetingTitle || 'Untitled Meeting',
+                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                    attendeeReport: {
+                        allAttendees: attendeeReport,
+                        totalUniqueAttendees: attendeeReport.length,
+                        attendeeHistory: attendeeHistory
+                    },
+                    timestamp: new Date().toISOString(),
+                    shouldAutoSave: true,
+                    sessionId: currentSessionId  // Include session ID
+                }
+            });
+        }
+    }
+
     // Clear badge when page is unloading
-    safeSendMessage({ message: "update_badge_status", capturing: false });
+    updateBadgeStatus(false);
     cleanupObservers();
 });
 
@@ -1960,7 +2316,7 @@ window.addEventListener('beforeunload', () => {
 document.addEventListener('visibilitychange', () => {
     if (document.hidden && !capturing) {
         // If the page is hidden and we're not actively capturing, clear the badge
-        safeSendMessage({ message: "update_badge_status", capturing: false });
+        updateBadgeStatus(false);
     }
 });
 
@@ -1997,13 +2353,42 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                 // For Zoom, prioritize responses from frames with actual meeting content
                 if (platformConfig && platformConfig.name === 'Zoom') {
                     const isMainFrame = window === window.top;
+                    const pathname = window.location.pathname;
                     const hasMeetingControls = !!document.querySelector('.footer-button-base__button');
                     const isInMeeting = isUserInMeeting();
-                    
-                    // If we're in main frame, not in meeting, and not capturing,
-                    // wait a bit to let iframe respond first
-                    if (isMainFrame && !isInMeeting && !capturing && !hasMeetingControls) {
-                        await new Promise(resolve => setTimeout(resolve, 100));
+
+                    console.log(`[Zoom Status] Frame: ${isMainFrame ? 'main' : 'iframe'}, Path: ${pathname}, InMeeting: ${isInMeeting}, Capturing: ${capturing}, Controls: ${hasMeetingControls}`);
+
+                    // Don't respond from whiteboard or other non-meeting iframes
+                    if (!isMainFrame && (pathname.includes('/wb/') || pathname.includes('/recent'))) {
+                        // console.log(`[Zoom Status] Ignoring response from non-meeting iframe: ${pathname}`);
+                        // Send minimal response to avoid popup error
+                        sendResponse({
+                            capturing: false,
+                            captionCount: 0,
+                            isInMeeting: false,
+                            attendeeCount: 0,
+                            frameType: 'non-meeting-iframe'
+                        });
+                        return;
+                    }
+
+                    // Main frame should delay response to let iframe respond first
+                    // UNLESS the main frame is actually capturing
+                    if (isMainFrame && !capturing && !hasMeetingControls) {
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                        // Still don't respond if we're not the right frame
+                        if (!isInMeeting && !capturing) {
+                            // console.log(`[Zoom Status] Main frame not responding - no meeting activity`);
+                            // DON'T send a response - let the iframe handle it
+                            // The popup will handle the timeout gracefully
+                            return;
+                        }
+                    }
+
+                    // Iframe with actual meeting content should respond immediately
+                    if (!isMainFrame && (capturing || isInMeeting)) {
+                        console.log(`[Zoom Status] Iframe responding with capturing=${capturing}, inMeeting=${isInMeeting}`);
                     }
                 }
                 
