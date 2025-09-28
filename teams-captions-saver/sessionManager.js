@@ -557,7 +557,8 @@ class SessionManager {
                     sessionId,
                     ...session.metadata,
                     ...session.stats,
-                    speakers: Array.from(session.stats.speakers || [])
+                    speakers: Array.from(session.stats.speakers || []),
+                    lastUpdate: session.metadata.lastActivity || session.metadata.startTime
                 });
             }
         }
@@ -900,24 +901,38 @@ class SessionManager {
         return dedupedSessions;
     }
 
-    // Clean up stale sessions (older than 24 hours and ended)
+    // Clean up stale sessions (older than 24 hours and ended, or active but older than 12 hours)
     async cleanupStaleSessions() {
         const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
         const sessionsToDelete = [];
+        const sessionsToEnd = [];
 
         for (const [sessionId, session] of this.sessions) {
-            const lastActivity = new Date(session.metadata.lastActivity);
+            const lastActivity = new Date(session.metadata.lastActivity || session.metadata.startTime);
+
+            // Delete ended sessions older than 24 hours
             if (lastActivity < oneDayAgo && session.metadata.status === 'ended') {
                 sessionsToDelete.push(sessionId);
             }
+            // End active sessions older than 12 hours (likely stale)
+            else if (lastActivity < twelveHoursAgo && session.metadata.status === 'active') {
+                sessionsToEnd.push(sessionId);
+            }
+        }
+
+        // End stale active sessions first
+        for (const sessionId of sessionsToEnd) {
+            await this.endSession(sessionId);
+            console.log(`[SessionManager] Ended stale active session: ${sessionId}`);
         }
 
         for (const sessionId of sessionsToDelete) {
             await this.deleteSession(sessionId);
         }
 
-        if (sessionsToDelete.length > 0) {
-            console.log(`[SessionManager] Cleaned up ${sessionsToDelete.length} stale sessions`);
+        if (sessionsToDelete.length > 0 || sessionsToEnd.length > 0) {
+            console.log(`[SessionManager] Cleaned up ${sessionsToDelete.length} deleted, ${sessionsToEnd.length} ended stale sessions`);
         }
     }
 

@@ -701,13 +701,13 @@ const PLATFORM_CONFIGS = {
         selectors: {
             // Caption selectors
             captionsContainer: '.live-transcription-subtitle__box, .transcript-list, .closed-caption-container, .closed-caption-box',
-            captionBlock: '#live-transcription-subtitle, .live-transcription-subtitle__box div[id="live-transcription-subtitle"], .transcript-message, .closed-caption-line, .closed-caption-box__message',
+            captionBlock: '.live-transcription-subtitle__box, #live-transcription-subtitle, .live-transcription-subtitle__box div[id="live-transcription-subtitle"], .transcript-message, .closed-caption-line, .closed-caption-box__message',
             speakerName: '.transcript-message-speaker, .closed-caption-speaker, .closed-caption-box__name',
             captionText: '.live-transcription-subtitle__item, .transcript-message-text, .closed-caption-text, .closed-caption-box__text',
             speakerAvatar: '.zmu-data-selector-item__icon',
             
             // Meeting controls
-            hangupButton: 'button[aria-label="End"], button[aria-label="Leave"], .footer-button-base__button[aria-label*="End"], .footer-button-base__button[aria-label*="Leave"]',
+            hangupButton: 'button[aria-label="End"], button[aria-label="Leave"], .footer-button-base__button[aria-label*="End"], .footer-button-base__button[aria-label*="Leave"], button:has(.footer-button-base__button-label:text("End")), button:has(.footer-button-base__button-label:text("Leave"))',
             moreButton: '.footer-button-base__button',
             turnOnCaptionsButton: 'a[aria-label="Captions"], .more-button__item-box a[aria-label="Captions"], button[aria-label*="Closed Caption"], button[aria-label*="Show captions"], button[aria-label*="Show subtitle"]',
             turnOffCaptionsButton: 'button[aria-label*="Hide subtitle"], button[aria-label*="Hide captions"]',
@@ -747,20 +747,26 @@ const PLATFORM_CONFIGS = {
         },
         getCaptionData: (element) => {
             // Check if this is the live transcription format
-            const isLiveTranscription = element.id === 'live-transcription-subtitle' || 
-                                       element.querySelector('#live-transcription-subtitle') ||
-                                       element.classList.contains('live-transcription-subtitle__box');
+            // The element might be the box itself or contain the subtitle div
+            const isLiveTranscription = element.classList.contains('live-transcription-subtitle__box') ||
+                                       element.id === 'live-transcription-subtitle' ||
+                                       element.querySelector('#live-transcription-subtitle');
             
             if (isLiveTranscription) {
+                // Find the actual subtitle container if we have the outer box
+                const subtitleContainer = element.id === 'live-transcription-subtitle' ? element :
+                                        (element.querySelector('#live-transcription-subtitle') || element);
+
                 // Find the text element - it should always have the caption text even if hidden
-                const textElement = element.querySelector('.live-transcription-subtitle__item') || 
-                                  element.querySelector('span[dir="auto"]');
+                const textElement = subtitleContainer.querySelector('.live-transcription-subtitle__item') ||
+                                  subtitleContainer.querySelector('span[dir="auto"]');
                 
                 if (!textElement || !textElement.textContent.trim()) return null;
                 
                 // Get speaker name from the avatar element (the colored circle with initials)
                 let speakerName = 'Unknown Speaker';
-                const avatarElement = element.querySelector('.zmu-data-selector-item__icon');
+                const avatarElement = subtitleContainer.querySelector('.zmu-data-selector-item__icon') ||
+                                    element.querySelector('.zmu-data-selector-item__icon');
                 
                 if (avatarElement) {
                     // The avatar element contains initials as text content (e.g., "TS" for the user)
@@ -893,39 +899,46 @@ const PLATFORM_CONFIGS = {
             if (window.location.pathname === '/wc/home' || window.location.pathname.includes('/wc/home')) {
                 return false;
             }
-            
+
             // Check if we're on a Zoom meeting page
             // Meeting URLs have patterns like /wc/{meetingId}/start or /wc/{meetingId}/join
             const pathParts = window.location.pathname.split('/');
             const isOnMeetingPage = (
-                // Check for /wc/{number}/start or /wc/{number}/join pattern
+                // Check for /wc/{number}/start or /wc/{number}/join pattern (works in iframe too)
                 (pathParts[1] === 'wc' && pathParts[2] && !isNaN(pathParts[2]) && (pathParts[3] === 'start' || pathParts[3] === 'join')) ||
                 // Check for other meeting patterns
                 window.location.pathname.includes('/j/') ||
                 window.location.pathname.includes('/meeting')
             );
-            
+
             // Check for leave/end button and ensure we're not on the post-meeting page
-            const hasLeaveButton = !!document.querySelector('button[aria-label="End"], button[aria-label="Leave"], .footer-button-base__button[aria-label*="End"], .footer-button-base__button[aria-label*="Leave"]');
-            const onPostMeetingPage = window.location.pathname.includes('/postattendee') || 
+            // Also check for button containing the End text in a span
+            const hasLeaveButton = !!document.querySelector('button[aria-label="End"], button[aria-label="Leave"], .footer-button-base__button[aria-label*="End"], .footer-button-base__button[aria-label*="Leave"]') ||
+                                 !!Array.from(document.querySelectorAll('.footer-button-base__button-label')).find(el => el.textContent === 'End' || el.textContent === 'Leave');
+            const onPostMeetingPage = window.location.pathname.includes('/postattendee') ||
                                       document.querySelector('.post-meeting-container') ||
                                       document.querySelector('.meeting-ended-container');
-            
+
             // Also check for meeting controls presence (more reliable in iframe)
             const hasMeetingControls = !!document.querySelector('.footer-button-base__button, .meeting-footer, .footer__btns-container');
-            
+
             // Additional check: Look for video container or participant video
             const hasVideoContainer = !!document.querySelector('.video-container, .speaker-active-container, .gallery-video-container__wrapper');
-            
+
             // Check for the live transcription element as an indicator of being in a meeting
             const hasTranscriptionElement = !!document.querySelector('.live-transcription-subtitle__box, #live-transcription-subtitle');
-            
+
+            // Special check for iframe contexts - if we're in an iframe with meeting path, we're in a meeting
+            const isInIframe = window !== window.top;
+            const iframeHasMeetingPath = isInIframe && isOnMeetingPage;
+
             // For Zoom, we consider it active if we have any strong indicators of being in a meeting
-            const inMeeting = ((isOnMeetingPage || hasLeaveButton || hasMeetingControls || hasVideoContainer || hasTranscriptionElement) && !onPostMeetingPage);
-            
-            // Log for debugging
+            const inMeeting = ((isOnMeetingPage || hasLeaveButton || hasMeetingControls || hasVideoContainer || hasTranscriptionElement || iframeHasMeetingPath) && !onPostMeetingPage);
+
+            // Log for debugging when enabled
             if (window.debugZoomMeeting) {
-                console.log('[Zoom Meeting Detection]', {
+                console.log('[Zoom Meeting Detection]', window.location.pathname, {
+                    pathname: window.location.pathname,
                     isOnMeetingPage,
                     hasLeaveButton,
                     hasMeetingControls,
@@ -972,20 +985,22 @@ const PLATFORM_CONFIGS = {
         },
         
         areCaptionsEnabled: () => {
-            // Check if captions are enabled (they might be visually hidden but still present)
+            // Check UI state to determine if captions are enabled
+            // Priority 1: Check for Hide button (strongest indicator that captions are on)
+            const hideButton = document.querySelector('button[aria-label*="Hide subtitle"], button[aria-label*="Hide captions"]');
+            if (hideButton) return true;
+
+            // Priority 2: Check for caption containers (even if empty - no speech yet)
             const liveTranscriptionBox = document.querySelector('.live-transcription-subtitle__box');
             const transcriptElement = document.querySelector('#live-transcription-subtitle');
             const captionsVisible = document.querySelector('.closed-caption-container, .closed-caption-box');
-            const hideButton = document.querySelector('button[aria-label*="Hide subtitle"], button[aria-label*="Hide captions"]');
-            
-            // Check if there's caption text present (even if hidden)
-            const hasCaptionText = document.querySelector('.live-transcription-subtitle__item')?.textContent?.trim();
-            
-            // Check if the caption container exists (even if empty)
             const captionContainer = document.querySelector('.live-transcription-subtitle, .live-transcription-container, [class*="transcription"]');
-            
+
+            // Priority 3: Check for the closed-captions-renderer element
+            const closedCaptionsRenderer = document.querySelector('[data-tid="closed-captions-renderer"]');
+
             // For Zoom, the presence of the live transcription box is a strong indicator
-            const result = !!(liveTranscriptionBox || transcriptElement || captionsVisible || hideButton || hasCaptionText || captionContainer);
+            const result = !!(liveTranscriptionBox || transcriptElement || captionsVisible || captionContainer || closedCaptionsRenderer);
             
             // Log for debugging if needed
             if (window.debugZoomCaptions) {
@@ -1002,10 +1017,10 @@ const PLATFORM_CONFIGS = {
             
             return result;
         },
-        async enableCaptions() {
+        async enableCaptions(retryCount = 0) {
             try {
-                console.log('[Caption Saver] Starting Zoom caption enable process');
-                
+                console.log(`[Caption Saver] Starting Zoom caption enable process (attempt ${retryCount + 1})`);
+
                 // First check if captions are already enabled
                 if (this.areCaptionsEnabled()) {
                     console.log('[Caption Saver] Captions are already enabled');
@@ -1046,54 +1061,66 @@ const PLATFORM_CONFIGS = {
                 }
                 
                 // Check if we need to click the More button or if menu is already open
-                const menuAlreadyOpen = document.querySelector('.WCL-footer-more-btn-container .dropdown-menu.show, .more-button__pop-menu.show');
+                const menuAlreadyOpen = document.querySelector('.WCL-footer-more-btn-container .dropdown-menu.show, .more-button__pop-menu.show, .more-button__pop-menu[style*="display: block"], [aria-label="More"] + div[style*="display: block"]');
                 
                 if (moreButton && !menuAlreadyOpen) {
-                    // console.log('[Caption Saver] Step 1: Clicking More button');
-                    
+                    console.log('[Caption Saver] Step 1: Attempting to click More button');
+
                     // Try multiple click methods to ensure it works
                     try {
-                        // Method 1: Direct click
+                        // Method 1: Focus then click
+                        moreButton.focus();
+                        await new Promise(resolve => setTimeout(resolve, 100));
                         moreButton.click();
-                        
-                        // Method 2: Dispatch click event if first didn't work
-                        if (!document.querySelector('.dropdown-menu.show, .more-button__pop-menu.show')) {
-                            const clickEvent = new MouseEvent('click', {
-                                view: window,
-                                bubbles: true,
-                                cancelable: true
-                            });
-                            moreButton.dispatchEvent(clickEvent);
+
+                        // Wait and check
+                        await new Promise(resolve => setTimeout(resolve, 500));
+
+                        // Method 2: Dispatch events if menu still not open
+                        if (!document.querySelector('.dropdown-menu.show, .more-button__pop-menu.show, .more-button__pop-menu, [role="menu"]:not([aria-hidden="true"])')) {
+                            console.log('[Caption Saver] First click didn\'t work, trying mouse events');
+                            const mouseDown = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+                            const mouseUp = new MouseEvent('mouseup', { bubbles: true, cancelable: true });
+                            const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+
+                            moreButton.dispatchEvent(mouseDown);
+                            moreButton.dispatchEvent(mouseUp);
+                            moreButton.dispatchEvent(click);
                         }
                     } catch (e) {
                         console.log('[Caption Saver] Error clicking More button:', e);
                     }
+
+                    await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for menu to open
                     
-                    await new Promise(resolve => setTimeout(resolve, 2000)); // Increased wait time
-                    
-                    // Verify menu opened
-                    const menuNowOpen = document.querySelector('.dropdown-menu.show, .more-button__pop-menu.show');
+                    // Verify menu opened - check multiple selectors
+                    const menuNowOpen = document.querySelector('.dropdown-menu.show, .more-button__pop-menu.show, .more-button__pop-menu, [role="menu"]:not([aria-hidden="true"]), .footer__more-button-pop-menu');
                     if (!menuNowOpen) {
-                        console.log('[Caption Saver] Menu did not open after clicking More button');
-                        return false;
+                        console.log('[Caption Saver] Menu did not open after clicking More button, will retry if attempts remain');
+                        // Don't return false here - let it fall through to retry logic
+                    } else {
+                        console.log('[Caption Saver] Menu opened successfully');
                     }
-                    console.log('[Caption Saver] Menu opened successfully');
                     
                 } else if (menuAlreadyOpen) {
                     console.log('[Caption Saver] More menu is already open, proceeding to find Captions');
                 } else if (!moreButton) {
-                    // console.log('[Caption Saver] More button not found in meeting controls');
-                    return false;
+                    console.log('[Caption Saver] More button not found in meeting controls, will retry if attempts remain');
+                    // Don't return false here - let it fall through to retry logic
                 }
                 
-                // Step 2: Find and click Captions option
-                await new Promise(resolve => setTimeout(resolve, 500)); // Wait for menu to fully render
-                
-                // Look for Captions link - the menu structure shows it's in .more-button__item-box
-                let captionsOption = null;
-                
-                // Primary method: Look for the Captions link directly
-                captionsOption = document.querySelector('.more-button__item-box a[aria-label="Captions"]');
+                // Only proceed to Step 2 if menu is actually open
+                const menuIsOpen = document.querySelector('.dropdown-menu.show, .more-button__pop-menu.show, .more-button__pop-menu, [role="menu"]:not([aria-hidden="true"]), .footer__more-button-pop-menu');
+
+                if (menuIsOpen) {
+                    // Step 2: Find and click Captions option
+                    await new Promise(resolve => setTimeout(resolve, 500)); // Wait for menu to fully render
+
+                    // Look for Captions link - the menu structure shows it's in .more-button__item-box
+                    let captionsOption = null;
+
+                    // Primary method: Look for the Captions link directly
+                    captionsOption = document.querySelector('.more-button__item-box a[aria-label="Captions"]');
                 
                 if (!captionsOption) {
                     // Try finding via the SvgCaptions icon
@@ -1180,12 +1207,31 @@ const PLATFORM_CONFIGS = {
                         return this.areCaptionsEnabled();
                     }
                 }
+                } // End of if (menuIsOpen)
             } catch (error) {
                 console.error('[Caption Saver] Error enabling captions:', error);
             }
-            
-            console.log('[Caption Saver] Could not enable captions on Zoom');
-            return false;
+
+            // Wait a moment for UI to update after our actions
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Check if captions were successfully enabled by looking at UI state
+            const captionsEnabled = this.areCaptionsEnabled();
+
+            // If captions not enabled and we haven't exceeded max retries, try again
+            if (!captionsEnabled && retryCount < 3) {
+                console.log(`[Caption Saver] Captions not enabled, retrying (attempt ${retryCount + 2}/4)...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                return this.enableCaptions(retryCount + 1);
+            }
+
+            if (!captionsEnabled) {
+                console.log('[Caption Saver] Could not enable captions on Zoom after 4 attempts');
+            } else {
+                console.log('[Caption Saver] Zoom captions successfully enabled (UI indicates captions are on)');
+            }
+
+            return captionsEnabled;
         },
         async openAttendeePanel() {
             // Check if panel is already open
@@ -1318,57 +1364,29 @@ const PLATFORM_CONFIGS = {
 
                 if (!contentEl || !contentEl.textContent) return null;
 
-                // Extract image attachments
+                // Get the text content but exclude reaction buttons
+                // Clone the content element to manipulate it without affecting the DOM
+                const contentClone = contentEl.cloneNode(true);
+
+                // Remove reaction button row if it exists
+                const reactionRow = contentClone.querySelector('.chat-vote-row');
+                if (reactionRow) {
+                    reactionRow.remove();
+                }
+
+                // Get cleaned text
+                const messageText = contentClone.textContent.trim();
+                if (!messageText) return null;
+
+                // Zoom doesn't support inline image sharing in chat
+                // Only file transfers are supported, which appear as download links
+                // Don't extract any attachments to avoid capturing UI elements
                 const attachments = [];
-
-                // Look for images in chat messages
-                const images = msgElement.querySelectorAll('.chat-message-image, .chat-file-image img, img[src]');
-                images.forEach(img => {
-                    // Skip avatars and emojis
-                    if (img.src && !img.classList.contains('avatar') &&
-                        !img.classList.contains('emoji') && !img.closest('.chat-item__avatar')) {
-
-                        // Try to get filename
-                        let filename = img.alt || 'image.png';
-                        const fileNameEl = msgElement.querySelector('.chat-file-name');
-                        if (fileNameEl) {
-                            filename = fileNameEl.textContent.trim();
-                        } else if (!img.alt && img.src.includes('/')) {
-                            const urlParts = img.src.split('/');
-                            const lastPart = urlParts[urlParts.length - 1];
-                            if (lastPart && lastPart.includes('.')) {
-                                filename = lastPart.split('?')[0];
-                            }
-                        }
-
-                        attachments.push({
-                            type: 'image',
-                            url: img.src,
-                            alt: img.alt || 'Image attachment',
-                            filename: filename
-                        });
-                    }
-                });
-
-                // Look for file attachment containers
-                const fileContainers = msgElement.querySelectorAll('.file-attachment-container, .chat-file-container');
-                fileContainers.forEach(container => {
-                    const img = container.querySelector('img');
-                    const nameEl = container.querySelector('.chat-file-name, .file-name');
-                    if (img && img.src && !attachments.some(a => a.url === img.src)) {
-                        attachments.push({
-                            type: 'image',
-                            url: img.src,
-                            alt: nameEl?.textContent || 'File attachment',
-                            filename: nameEl?.textContent || 'attachment'
-                        });
-                    }
-                });
 
                 return {
                     id: messageId,
                     author: senderName,
-                    text: contentEl.textContent.trim(),
+                    text: messageText,  // Use the cleaned text without reaction buttons
                     time: null, // Will be replaced with formatted timestamp in content_script
                     attachments: attachments.length > 0 ? attachments : undefined
                 };

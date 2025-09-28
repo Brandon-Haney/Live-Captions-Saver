@@ -38,7 +38,8 @@ const UI_ELEMENTS = {
     sessionPlatform: document.getElementById('session-platform'),
     sessionDuration: document.getElementById('session-duration'),
     sessionCaptions: document.getElementById('session-captions'),
-    sessionAttendees: document.getElementById('session-attendees')
+    sessionAttendees: document.getElementById('session-attendees'),
+    cleanupSessions: document.getElementById('cleanup-sessions')
 };
 
 // --- Multi-Session State ---
@@ -103,6 +104,8 @@ async function getActiveMeetingTab() {
                 platformInfo.textContent = 'Connected to Microsoft Teams (Personal)';
             } else if (meetingTab.url.includes('meet.google.com')) {
                 platformInfo.textContent = 'Connected to Google Meet';
+            } else if (meetingTab.url.includes('zoom.us')) {
+                platformInfo.textContent = 'Connected to Zoom';
             }
         }
     }
@@ -110,7 +113,7 @@ async function getActiveMeetingTab() {
     return meetingTab || null;
 }
 
-// Keep old function name for compatibility
+// Deprecated - use getActiveMeetingTab instead
 const getActiveTeamsTab = getActiveMeetingTab;
 
 // --- Multi-Session Management Functions ---
@@ -118,15 +121,89 @@ async function loadActiveSessions() {
     try {
         const response = await chrome.runtime.sendMessage({ action: 'getActiveSessions' });
         if (response && response.sessions) {
-            activeSessions = response.sessions;
+            // Check if tabs still exist for active sessions
+            const validSessions = [];
+            const staleSessions = [];
+
+            for (const session of response.sessions) {
+                // Check if the tab still exists and is on a meeting page
+                let tabExists = false;
+                try {
+                    const tab = await chrome.tabs.get(session.tabId);
+                    // Check if tab is still on a meeting page
+                    const meetingDomains = ['teams.microsoft.com', 'teams.live.com', 'meet.google.com', 'zoom.us', 'app.zoom.us', 'web.zoom.us'];
+                    tabExists = tab && tab.url && meetingDomains.some(domain => tab.url.includes(domain));
+                } catch (e) {
+                    // Tab doesn't exist
+                    tabExists = false;
+                }
+
+                // Also check for stale sessions (active for more than 12 hours with no recent activity)
+                const startTime = new Date(session.startTime);
+                const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
+                const lastActivity = session.lastUpdate ? new Date(session.lastUpdate) : startTime;
+                const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+
+                // Keep session if:
+                // - Tab exists and is on meeting page
+                // - OR has recent activity (within 2 minutes)
+                // - OR is a new session (started within last 5 minutes) even without content
+                // Sessions with no tab should be marked as stale unless very recent
+                const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+
+                if (tabExists) {
+                    // Tab exists - keep the session
+                    validSessions.push(session);
+                } else if (lastActivity > twoMinutesAgo && session.captionCount > 0) {
+                    // No tab, but very recent activity with content - keep temporarily
+                    validSessions.push(session);
+                } else if (startTime > fiveMinutesAgo && session.status === 'active') {
+                    // New session that just started - keep it even without content yet
+                    validSessions.push(session);
+                } else {
+                    // No tab and either old or no content - mark as stale
+                    staleSessions.push(session);
+                }
+            }
+
+            activeSessions = validSessions;
+
+            // Clean up any stale sessions we identified
+            for (const staleSession of staleSessions) {
+                console.log(`Ending stale session: ${staleSession.meetingTitle} (${staleSession.platform})`);
+                chrome.runtime.sendMessage({
+                    action: 'endSession',
+                    sessionId: staleSession.sessionId
+                });
+            }
+
             updateSessionSelector();
-            
-            // Show session manager if multiple sessions
+
+            // Only show session manager if we have multiple REAL active sessions from different tabs
+            // Don't show for old/stale sessions
             if (activeSessions.length > 1) {
-                UI_ELEMENTS.sessionManager.style.display = 'block';
+                // Check if sessions are from different tabs (real concurrent meetings)
+                const uniqueTabs = new Set(activeSessions.map(s => s.tabId));
+                if (uniqueTabs.size > 1 || activeSessions.some(s => s.captionCount > 0)) {
+                    UI_ELEMENTS.sessionManager.style.display = 'block';
+                } else {
+                    UI_ELEMENTS.sessionManager.style.display = 'none';
+                }
             } else if (activeSessions.length === 1) {
                 // Auto-select single session
                 selectedSessionId = activeSessions[0].sessionId;
+                UI_ELEMENTS.sessionManager.style.display = 'none';
+                // Enable View Transcript button for the auto-selected session
+                UI_ELEMENTS.viewButton.disabled = false;
+                // Enable other buttons if session has data
+                if (activeSessions[0].captionCount > 0) {
+                    UI_ELEMENTS.copyButton.disabled = false;
+                    UI_ELEMENTS.copyDropdownButton.disabled = false;
+                    UI_ELEMENTS.saveButton.disabled = false;
+                    UI_ELEMENTS.saveDropdownButton.disabled = false;
+                }
+            } else {
+                UI_ELEMENTS.sessionManager.style.display = 'none';
             }
         }
     } catch (error) {
@@ -141,14 +218,20 @@ function updateSessionSelector() {
     activeSessions.forEach(session => {
         const option = document.createElement('option');
         option.value = session.sessionId;
-        
-        // Format session display
+
+        // Format session display with more context
         const platform = session.platform ? session.platform.charAt(0).toUpperCase() + session.platform.slice(1) : 'Unknown';
         const title = session.meetingTitle || 'Untitled Meeting';
         const captions = session.captionCount || 0;
-        
-        option.textContent = `${platform}: ${title} (${captions} captions)`;
-        
+        const duration = formatDuration(session.duration || 0);
+
+        // Add status indicator for potentially stale sessions
+        const lastUpdate = session.lastUpdate ? new Date(session.lastUpdate) : new Date(session.startTime);
+        const minutesAgo = Math.floor((Date.now() - lastUpdate.getTime()) / 60000);
+        const statusIndicator = minutesAgo > 5 ? ' ⚠️' : '';
+
+        option.textContent = `${platform}: ${title} (${captions} captions, ${duration})${statusIndicator}`;
+
         // Set color based on platform
         if (session.platform === 'teams') {
             option.style.color = '#6264a7';
@@ -157,7 +240,10 @@ function updateSessionSelector() {
         } else if (session.platform === 'meet') {
             option.style.color = '#00897b';
         }
-        
+
+        // Add tooltip with more info
+        option.title = `Platform: ${platform}\nMeeting: ${title}\nCaptions: ${captions}\nDuration: ${duration}\nLast Activity: ${minutesAgo} min ago${statusIndicator ? '\n⚠️ May be inactive' : ''}`;
+
         selector.appendChild(option);
     });
     
@@ -196,9 +282,19 @@ function updateSessionInfo(sessionId) {
     
     // Update caption count
     UI_ELEMENTS.sessionCaptions.textContent = `${session.captionCount || 0} captions`;
-    
+
     // Update attendee count
     UI_ELEMENTS.sessionAttendees.textContent = `${session.attendeeCount || 0} attendees`;
+
+    // Add activity indicator
+    const lastUpdate = session.lastUpdate ? new Date(session.lastUpdate) : new Date(session.startTime);
+    const minutesAgo = Math.floor((Date.now() - lastUpdate.getTime()) / 60000);
+    if (minutesAgo > 5) {
+        const activityWarning = document.createElement('div');
+        activityWarning.style.cssText = 'margin-top: 4px; padding: 4px; background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 3px; font-size: 11px; color: #856404;';
+        activityWarning.textContent = `⚠️ No activity for ${minutesAgo} minutes - session may be inactive`;
+        UI_ELEMENTS.sessionInfo.appendChild(activityWarning);
+    }
 }
 
 function formatDuration(seconds) {
@@ -221,10 +317,26 @@ if (UI_ELEMENTS.sessionSelector) {
         selectedSessionId = e.target.value;
         if (selectedSessionId) {
             updateSessionInfo(selectedSessionId);
+            // Enable View Transcript button for active sessions
+            UI_ELEMENTS.viewButton.disabled = false;
+            // Enable copy and save buttons if session has data
+            const session = activeSessions.find(s => s.sessionId === selectedSessionId);
+            if (session && session.captionCount > 0) {
+                UI_ELEMENTS.copyButton.disabled = false;
+                UI_ELEMENTS.copyDropdownButton.disabled = false;
+                UI_ELEMENTS.saveButton.disabled = false;
+                UI_ELEMENTS.saveDropdownButton.disabled = false;
+            }
             // Update the status based on selected session
-            updateStatus();
+            initializePopup();
         } else {
             UI_ELEMENTS.sessionInfo.style.display = 'none';
+            // Disable buttons when no session selected
+            UI_ELEMENTS.viewButton.disabled = true;
+            UI_ELEMENTS.copyButton.disabled = true;
+            UI_ELEMENTS.copyDropdownButton.disabled = true;
+            UI_ELEMENTS.saveButton.disabled = true;
+            UI_ELEMENTS.saveDropdownButton.disabled = true;
         }
     });
 }
@@ -233,7 +345,7 @@ if (UI_ELEMENTS.sessionSelector) {
 if (UI_ELEMENTS.refreshSessions) {
     UI_ELEMENTS.refreshSessions.addEventListener('click', async () => {
         await loadActiveSessions();
-        updateStatus();
+        await initializePopup();
     });
 }
 
@@ -561,7 +673,7 @@ function setupEventListeners() {
     UI_ELEMENTS.chatCaptureToggle.addEventListener('change', (e) => {
         chrome.storage.sync.set({ chatCapture: e.target.checked });
         // Send message to content script to enable/disable chat capture
-        getActiveTeamsTab().then(tab => {
+        getActiveMeetingTab().then(tab => {
             if (tab) {
                 chrome.tabs.sendMessage(tab.id, { 
                     message: "toggle_chat_capture", 
@@ -642,16 +754,27 @@ function setupEventListeners() {
 
     // Action Button Listeners
     UI_ELEMENTS.saveButton.addEventListener('click', async () => {
-        const tab = await getActiveTeamsTab();
+        const tab = await getActiveMeetingTab();
         if (tab) {
             chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format: currentDefaultFormat });
         }
     });
 
     UI_ELEMENTS.viewButton.addEventListener('click', async () => {
-        const tab = await getActiveTeamsTab();
-        if (tab) {
-            chrome.tabs.sendMessage(tab.id, { message: "get_captions_for_viewing" });
+        // Check if we have a selected session (multi-meeting mode)
+        if (selectedSessionId) {
+            // Open viewer for the selected session
+            const session = activeSessions.find(s => s.sessionId === selectedSessionId);
+            if (session) {
+                // Send message to the session's tab to open viewer
+                chrome.tabs.sendMessage(session.tabId, { message: "get_captions_for_viewing" });
+            }
+        } else {
+            // Fallback to current tab
+            const tab = await getActiveMeetingTab();
+            if (tab) {
+                chrome.tabs.sendMessage(tab.id, { message: "get_captions_for_viewing" });
+            }
         }
     });
 
@@ -735,7 +858,7 @@ async function handleCopy(target) {
             }
         } else {
             // Fallback to current tab
-            const tab = await getActiveTeamsTab();
+            const tab = await getActiveMeetingTab();
             if (!tab) return;
             const response = await chrome.tabs.sendMessage(tab.id, { message: "get_transcript_for_copying" });
             transcriptArray = response?.transcriptArray;
@@ -784,7 +907,7 @@ async function handleSave(target) {
         }
     } else {
         // Fallback to current tab
-        const tab = await getActiveTeamsTab();
+        const tab = await getActiveMeetingTab();
         if (tab) {
             chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format });
         }
@@ -812,11 +935,67 @@ async function initializeSessionHistory() {
         UI_ELEMENTS.historyButton.addEventListener('click', async () => {
             const isVisible = UI_ELEMENTS.sessionList.style.display !== 'none';
             UI_ELEMENTS.sessionList.style.display = isVisible ? 'none' : 'block';
-            
+
             if (!isVisible) {
                 await loadSessionList();
             }
         });
+
+        // Setup cleanup button handler
+        if (UI_ELEMENTS.cleanupSessions) {
+            UI_ELEMENTS.cleanupSessions.addEventListener('click', async () => {
+                const confirmCleanup = confirm('This will end all stale sessions and clean up stuck meeting data. Continue?');
+                if (!confirmCleanup) return;
+
+                try {
+                    // End all active sessions that don't have valid tabs
+                    const response = await chrome.runtime.sendMessage({ action: 'getActiveSessions' });
+                    if (response && response.sessions) {
+                        let cleanedCount = 0;
+
+                        for (const session of response.sessions) {
+                            // Check if the tab still exists
+                            let tabExists = false;
+                            try {
+                                const tab = await chrome.tabs.get(session.tabId);
+                                const meetingDomains = ['teams.microsoft.com', 'teams.live.com', 'meet.google.com', 'zoom.us', 'app.zoom.us'];
+                                tabExists = tab && tab.url && meetingDomains.some(domain => tab.url.includes(domain));
+                            } catch (e) {
+                                tabExists = false;
+                            }
+
+                            // End session if tab doesn't exist or is very old
+                            if (!tabExists) {
+                                await chrome.runtime.sendMessage({
+                                    action: 'endSession',
+                                    sessionId: session.sessionId
+                                });
+                                cleanedCount++;
+                            }
+                        }
+
+                        // Clear any Zoom-specific storage
+                        await chrome.storage.local.remove(['zoomMeetingEnded', 'transcriptBackup']);
+
+                        // Reload sessions and update UI
+                        await loadActiveSessions();
+                        await initializePopup();
+
+                        if (cleanedCount > 0) {
+                            UI_ELEMENTS.statusMessage.textContent = `Cleaned up ${cleanedCount} stale session(s)`;
+                            UI_ELEMENTS.statusMessage.style.color = '#28a745';
+                        } else {
+                            UI_ELEMENTS.statusMessage.textContent = 'No stale sessions found';
+                            UI_ELEMENTS.statusMessage.style.color = '#17a2b8';
+                        }
+                    }
+                } catch (error) {
+                    console.error('Failed to cleanup sessions:', error);
+                    UI_ELEMENTS.statusMessage.textContent = 'Failed to cleanup sessions';
+                    UI_ELEMENTS.statusMessage.style.color = '#dc3545';
+                }
+            });
+        }
         
         // Check if we have saved sessions and update button text
         const sessionManager = new SessionManager();
@@ -1080,12 +1259,30 @@ async function initializePopup() {
     // Load active sessions for multi-meeting support
     await loadActiveSessions();
 
-    const tab = await getActiveTeamsTab();
+    const tab = await getActiveMeetingTab();
     if (!tab) {
         // Check if we have any active sessions from other tabs
         if (activeSessions.length > 0) {
-            UI_ELEMENTS.statusMessage.textContent = `${activeSessions.length} active session(s). Select one above to manage.`;
+            // Show the session manager UI
+            UI_ELEMENTS.sessionManager.style.display = 'block';
+            updateSessionSelector();
+
+            // Show simple status message without session details
+            UI_ELEMENTS.statusMessage.textContent = `${activeSessions.length} active session(s) found. Select one above to manage or view.`;
             UI_ELEMENTS.statusMessage.style.color = '#17a2b8';
+
+            // If we have a selected session, enable the view button
+            if (selectedSessionId) {
+                UI_ELEMENTS.viewButton.disabled = false;
+                // Enable other buttons if session has data
+                const session = activeSessions.find(s => s.sessionId === selectedSessionId);
+                if (session && session.captionCount > 0) {
+                    UI_ELEMENTS.copyButton.disabled = false;
+                    UI_ELEMENTS.copyDropdownButton.disabled = false;
+                    UI_ELEMENTS.saveButton.disabled = false;
+                    UI_ELEMENTS.saveDropdownButton.disabled = false;
+                }
+            }
         } else {
             UI_ELEMENTS.statusMessage.innerHTML = 'Please open a <a href="https://teams.microsoft.com" target="_blank">Teams</a>, <a href="https://teams.live.com" target="_blank">Teams Personal</a>, <a href="https://meet.google.com" target="_blank">Google Meet</a>, or <a href="https://web.zoom.us" target="_blank">Zoom</a> tab to use this extension.';
             UI_ELEMENTS.statusMessage.style.color = '#dc3545';
@@ -1096,32 +1293,103 @@ async function initializePopup() {
     try {
         // For Zoom, we might get multiple responses (main frame + iframe)
         // Use the one that shows "in meeting" or has captions
-        const status = await chrome.tabs.sendMessage(tab.id, { message: "get_status" });
-        
-        // If we get a "not in meeting" response, wait a bit to see if iframe responds
-        if (status && !status.isInMeeting && !status.capturing) {
-            // Try once more with a slight delay to get iframe response
-            await new Promise(resolve => setTimeout(resolve, 200));
+        console.log('[Popup] Requesting status from tab:', tab.url);
+        let status;
+        try {
+            status = await chrome.tabs.sendMessage(tab.id, { message: "get_status" });
+            console.log('[Popup] Received initial status:', status);
+        } catch (e) {
+            console.log('[Popup] No initial response from tab');
+            status = null;
+        }
+
+        // For Zoom, handle multiple frame responses
+        if (tab.url?.includes('zoom.us')) {
+            // Skip non-meeting frames in the first response
+            if (status && status.frameType === 'non-meeting-iframe') {
+                status = null; // Reset to try again
+            }
+
+            // Wait for potential iframe responses
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Try to get a second response (from iframe)
             try {
                 const secondStatus = await chrome.tabs.sendMessage(tab.id, { message: "get_status" });
-                if (secondStatus && (secondStatus.isInMeeting || secondStatus.capturing)) {
-                    // Use the iframe's response instead
-                    console.log('[Popup] Using iframe status (in meeting)');
-                    status.isInMeeting = secondStatus.isInMeeting;
-                    status.capturing = secondStatus.capturing;
-                    status.captionCount = Math.max(status.captionCount, secondStatus.captionCount);
-                    status.attendeeCount = Math.max(status.attendeeCount, secondStatus.attendeeCount);
+                console.log('[Popup] Received second status:', secondStatus);
+
+                // If we got a second response, use the better one
+                if (secondStatus) {
+                    // Skip non-meeting frames
+                    if (secondStatus.frameType === 'non-meeting-iframe') {
+                        // Keep original status if it's better
+                        if (!status) {
+                            status = secondStatus; // Use this if we have nothing else
+                        }
+                    } else {
+                        // Use the status that shows in meeting or has more data
+                        if (!status ||
+                            (secondStatus.isInMeeting && !status.isInMeeting) ||
+                            (secondStatus.capturing && !status.capturing) ||
+                            (secondStatus.captionCount > (status.captionCount || 0))) {
+                            status = secondStatus;
+                        }
+                    }
                 }
             } catch (e) {
-                // Ignore, use first response
+                // No second response - this is expected if main frame doesn't respond
+                // console.log('[Popup] No second response (expected for Zoom main frame)');
+            }
+
+            // Check if we have an active session for this tab that might indicate we're in a meeting
+            const activeSession = activeSessions.find(s => s.tabId === tab.id);
+            if (activeSession && activeSession.status === 'active') {
+                console.log('[Popup] Found active session for Zoom tab:', activeSession);
+                // If we have an active session but status shows not in meeting,
+                // it might be iframe detection issue - trust the session
+                if (!status || !status.isInMeeting) {
+                    status = {
+                        capturing: activeSession.captionCount > 0,
+                        captionCount: activeSession.captionCount || 0,
+                        isInMeeting: true, // Trust that we're in a meeting if session is active
+                        attendeeCount: activeSession.attendeeCount || 0
+                    };
+                }
+            } else if (!status) {
+                // No status and no active session
+                status = {
+                    capturing: false,
+                    captionCount: 0,
+                    isInMeeting: false,
+                    attendeeCount: 0
+                };
             }
         }
-        
+
+        console.log('[Popup] Final status to use:', status);
+
         if (status) {
+            console.log('[Popup] Updating UI with status:', {
+                isInMeeting: status.isInMeeting,
+                capturing: status.capturing,
+                captionCount: status.captionCount,
+                attendeeCount: status.attendeeCount
+            });
             await updateStatusUI(status);
             // Enable buttons if we have either captions or attendees
             const hasData = status.captionCount > 0 || (status.attendeeCount > 0 && status.isInMeeting === false);
             updateButtonStates(hasData, status.isInMeeting);
+
+            // For Zoom, if we're in a meeting but session might not have data yet,
+            // ensure View button is enabled based on active sessions
+            if (tab.url?.includes('zoom.us') && status.isInMeeting && activeSessions.length > 0) {
+                // Find the session for this tab
+                const currentSession = activeSessions.find(s => s.tabId === tab.id);
+                if (currentSession) {
+                    // Update button states to ensure View is enabled for active session
+                    UI_ELEMENTS.viewButton.disabled = false;
+                }
+            }
         }
     } catch (error) {
         // This error is expected when content script isn't loaded yet
@@ -1179,4 +1447,11 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-document.addEventListener('DOMContentLoaded', initializePopup);
+document.addEventListener('DOMContentLoaded', () => {
+    initializePopup();
+
+    // Periodically refresh sessions to detect stale ones
+    setInterval(async () => {
+        await loadActiveSessions();
+    }, 30000); // Check every 30 seconds
+});

@@ -34,24 +34,36 @@ function applyAliasesToAttendeeReport(attendeeReport, aliases = {}) {
     if (!attendeeReport || Object.keys(aliases).length === 0) {
         return attendeeReport;
     }
-    
+
     // Create a new report with aliased names
     const aliasedReport = {
-        ...attendeeReport,
-        attendeeList: attendeeReport.attendeeList.map(name => {
+        ...attendeeReport
+    };
+
+    // Apply aliases to attendeeList if it exists
+    if (attendeeReport.attendeeList && Array.isArray(attendeeReport.attendeeList)) {
+        aliasedReport.attendeeList = attendeeReport.attendeeList.map(name => {
             const aliasedName = aliases[name]?.trim();
             return aliasedName || name;
-        }),
-        currentAttendees: attendeeReport.currentAttendees.map(attendee => ({
+        });
+    }
+
+    // Apply aliases to currentAttendees if it exists
+    if (attendeeReport.currentAttendees && Array.isArray(attendeeReport.currentAttendees)) {
+        aliasedReport.currentAttendees = attendeeReport.currentAttendees.map(attendee => ({
             ...attendee,
             name: aliases[attendee.name]?.trim() || attendee.name
-        })),
-        attendeeHistory: attendeeReport.attendeeHistory.map(event => ({
+        }));
+    }
+
+    // Apply aliases to attendeeHistory if it exists
+    if (attendeeReport.attendeeHistory && Array.isArray(attendeeReport.attendeeHistory)) {
+        aliasedReport.attendeeHistory = attendeeReport.attendeeHistory.map(event => ({
             ...event,
             name: aliases[event.name]?.trim() || event.name
-        }))
-    };
-    
+        }));
+    }
+
     return aliasedReport;
 }
 
@@ -60,14 +72,50 @@ function formatAsTxt(transcript, attendeeReport) {
     let content = '';
     
     console.log('[formatAsTxt] Received attendeeReport:', attendeeReport);
-    
+
+    // Handle both formats of attendee reports (Teams/Meet vs Zoom)
+    let attendeeList = [];
+    let totalAttendees = 0;
+    let meetingStart = null;
+
+    if (attendeeReport) {
+        // Format 1: Standard format with attendeeList and totalUniqueAttendees
+        if (attendeeReport.attendeeList && attendeeReport.totalUniqueAttendees) {
+            attendeeList = attendeeReport.attendeeList;
+            totalAttendees = attendeeReport.totalUniqueAttendees;
+            meetingStart = attendeeReport.meetingStartTime;
+            console.log('[formatAsTxt] Using standard format - attendees:', attendeeList);
+        }
+        // Format 2: Zoom format with allAttendees object/Set
+        else if (attendeeReport.allAttendees) {
+            // Handle if allAttendees is a Set or array
+            if (attendeeReport.allAttendees instanceof Set) {
+                attendeeList = Array.from(attendeeReport.allAttendees);
+            } else if (Array.isArray(attendeeReport.allAttendees)) {
+                attendeeList = attendeeReport.allAttendees;
+            } else if (typeof attendeeReport.allAttendees === 'object') {
+                // If it's an object, try to extract values
+                attendeeList = Object.values(attendeeReport.allAttendees);
+            }
+            totalAttendees = attendeeList.length;
+            meetingStart = attendeeReport.meetingStartTime;
+            console.log('[formatAsTxt] Using Zoom format - attendees:', attendeeList);
+        } else {
+            console.log('[formatAsTxt] Attendee report has unexpected format:', Object.keys(attendeeReport));
+        }
+    } else {
+        console.log('[formatAsTxt] No attendee report provided');
+    }
+
     // Add attendee information if available
-    if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
+    if (totalAttendees > 0) {
         content += '=== MEETING ATTENDEES ===\n';
-        content += `Total Attendees: ${attendeeReport.totalUniqueAttendees}\n`;
-        content += `Meeting Start: ${new Date(attendeeReport.meetingStartTime).toLocaleString()}\n`;
+        content += `Total Attendees: ${totalAttendees}\n`;
+        if (meetingStart) {
+            content += `Meeting Start: ${new Date(meetingStart).toLocaleString()}\n`;
+        }
         content += '\nAttendee List:\n';
-        attendeeReport.attendeeList.forEach(name => {
+        attendeeList.forEach(name => {
             content += `- ${name}\n`;
         });
         content += '\n=== TRANSCRIPT ===\n';
@@ -83,14 +131,42 @@ function formatAsTxt(transcript, attendeeReport) {
 
 function formatAsMarkdown(transcript, attendeeReport) {
     let content = '';
-    
+
+    // Handle both formats of attendee reports (Teams/Meet vs Zoom)
+    let attendeeList = [];
+    let totalAttendees = 0;
+    let meetingStart = null;
+
+    if (attendeeReport) {
+        // Format 1: Standard format
+        if (attendeeReport.attendeeList && attendeeReport.totalUniqueAttendees) {
+            attendeeList = attendeeReport.attendeeList;
+            totalAttendees = attendeeReport.totalUniqueAttendees;
+            meetingStart = attendeeReport.meetingStartTime;
+        }
+        // Format 2: Zoom format
+        else if (attendeeReport.allAttendees) {
+            if (attendeeReport.allAttendees instanceof Set) {
+                attendeeList = Array.from(attendeeReport.allAttendees);
+            } else if (Array.isArray(attendeeReport.allAttendees)) {
+                attendeeList = attendeeReport.allAttendees;
+            } else if (typeof attendeeReport.allAttendees === 'object') {
+                attendeeList = Object.values(attendeeReport.allAttendees);
+            }
+            totalAttendees = attendeeList.length;
+            meetingStart = attendeeReport.meetingStartTime;
+        }
+    }
+
     // Add attendee information if available
-    if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
+    if (totalAttendees > 0) {
         content += '# Meeting Attendees\n\n';
-        content += `**Total Attendees:** ${attendeeReport.totalUniqueAttendees}\n\n`;
-        content += `**Meeting Start:** ${new Date(attendeeReport.meetingStartTime).toLocaleString()}\n\n`;
+        content += `**Total Attendees:** ${totalAttendees}\n\n`;
+        if (meetingStart) {
+            content += `**Meeting Start:** ${new Date(meetingStart).toLocaleString()}\n\n`;
+        }
         content += '## Attendee List\n\n';
-        attendeeReport.attendeeList.forEach(name => {
+        attendeeList.forEach(name => {
             content += `- ${name}\n`;
         });
         content += '\n---\n\n# Transcript\n\n';
@@ -468,15 +544,25 @@ chrome.runtime.onStartup.addListener(() => {
     updateBadge(false);
 });
 
-// Clear badge when meeting tabs are closed
+// Clear badge when meeting tabs are closed and end associated sessions
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+    // Check if this tab had an active session
+    const activeSessions = sessionManager.getActiveSessions();
+    const sessionForTab = activeSessions.find(session => session.tabId === tabId);
+
+    if (sessionForTab && sessionForTab.status === 'active') {
+        console.log(`[Service Worker] Tab ${tabId} closed, ending session ${sessionForTab.sessionId}`);
+        // End the session when tab is closed
+        sessionManager.endSession(sessionForTab.sessionId);
+    }
+
     // When a tab is closed, check if any other tabs are capturing
     chrome.tabs.query({}, (tabs) => {
         const meetingDomains = ['teams.microsoft.com', 'meet.google.com', 'zoom.us', 'app.zoom.us'];
-        const hasMeetingTab = tabs.some(tab => 
+        const hasMeetingTab = tabs.some(tab =>
             tab.url && meetingDomains.some(domain => tab.url.includes(domain))
         );
-        
+
         if (!hasMeetingTab) {
             // No meeting tabs open, clear the badge
             updateBadge(false);
@@ -484,20 +570,29 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
     });
 });
 
-// Clear badge when navigating away from meeting pages
+// Clear badge when navigating away from meeting pages and end associated sessions
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.url) {
         const meetingDomains = ['teams.microsoft.com', 'meet.google.com', 'zoom.us', 'app.zoom.us'];
-        const wasOnMeetingPage = meetingDomains.some(domain => changeInfo.url.includes(domain));
-        
-        if (!wasOnMeetingPage) {
-            // Navigated away from a meeting page, might need to clear badge
+        const isLeavingMeetingPage = !meetingDomains.some(domain => changeInfo.url.includes(domain));
+
+        if (isLeavingMeetingPage) {
+            // Check if this tab had an active session
+            const activeSessions = sessionManager.getActiveSessions();
+            const sessionForTab = activeSessions.find(session => session.tabId === tabId);
+
+            if (sessionForTab && sessionForTab.status === 'active') {
+                console.log(`[Service Worker] Tab ${tabId} navigated away from meeting, ending session ${sessionForTab.sessionId}`);
+                // End the session when navigating away from meeting page
+                sessionManager.endSession(sessionForTab.sessionId);
+            }
+
             // Check if any other tabs are still on meeting pages
             chrome.tabs.query({}, (tabs) => {
-                const hasMeetingTab = tabs.some(t => 
+                const hasMeetingTab = tabs.some(t =>
                     t.id !== tabId && t.url && meetingDomains.some(domain => t.url.includes(domain))
                 );
-                
+
                 if (!hasMeetingTab) {
                     updateBadge(false);
                 }
@@ -642,19 +737,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 
             case 'zoom_meeting_ended':
                 // Handle Zoom meeting end - retrieve data from storage
-                console.log('Zoom meeting ended signal received');
+                console.log('[Service Worker] Zoom meeting ended signal received');
                 try {
                     const { zoomMeetingEnded } = await chrome.storage.local.get('zoomMeetingEnded');
+                    console.log('[Service Worker] Retrieved zoomMeetingEnded data:', {
+                        hasData: !!zoomMeetingEnded,
+                        shouldAutoSave: zoomMeetingEnded?.shouldAutoSave,
+                        transcriptLength: zoomMeetingEnded?.transcript?.length,
+                        attendeeCount: zoomMeetingEnded?.attendeeReport?.totalUniqueAttendees
+                    });
+
                     if (zoomMeetingEnded && zoomMeetingEnded.shouldAutoSave) {
                         const { autoSaveOnEnd, defaultSaveFormat } = await chrome.storage.sync.get(['autoSaveOnEnd', 'defaultSaveFormat']);
-                        
+                        console.log('[Service Worker] Auto-save settings:', { autoSaveOnEnd, defaultSaveFormat });
+
                         if (autoSaveOnEnd && zoomMeetingEnded.transcript.length > 0) {
-                            console.log('Processing Zoom auto-save from stored data');
-                            console.log(`[Zoom] Auto-save data - Transcript: ${zoomMeetingEnded.transcript.length} items, Attendees: ${zoomMeetingEnded.attendeeReport?.totalUniqueAttendees || 0}`);
+                            console.log('[Service Worker] Processing Zoom auto-save from stored data');
+                            console.log(`[Service Worker] Auto-save data - Transcript: ${zoomMeetingEnded.transcript.length} items, Attendees: ${zoomMeetingEnded.attendeeReport?.totalUniqueAttendees || 0}`);
                             const formatToSave = defaultSaveFormat || 'txt';
                             
                             // Get session-specific aliases if they exist
-                            const sessionAliasKey = `aliases_${currentSessionId || 'default'}`;
+                            // Session ID might be in the stored data or we use 'default'
+                            const sessionId = zoomMeetingEnded.sessionId || 'default';
+                            const sessionAliasKey = `aliases_${sessionId}`;
                             const aliasData = await chrome.storage.local.get(sessionAliasKey);
                             const speakerAliases = aliasData[sessionAliasKey] || {};
                             
@@ -678,13 +783,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             );
                             
                             // Clean up storage
-                            await chrome.storage.local.remove('zoomMeetingEnded');
+                            await chrome.storage.local.remove(['zoomMeetingEnded', 'transcriptBackup']);
+                            console.log('[Service Worker] Cleaned up saved Zoom data');
+
+                            // Send success response
+                            sendResponse({ success: true, message: 'Zoom auto-save completed' });
+                        } else {
+                            sendResponse({ success: false, message: 'Auto-save not enabled or no transcript' });
                         }
+                    } else {
+                        sendResponse({ success: false, message: 'No Zoom meeting data found' });
                     }
                 } catch (error) {
                     console.error('Error processing Zoom meeting end:', error);
+                    sendResponse({ success: false, error: error.message });
                 }
-                break;
+                return true; // Will respond asynchronously
                 
             // Live updates are now handled at the top of the listener
             // case 'live_caption_update':
