@@ -141,12 +141,13 @@ function formatAsTxt(transcript, attendeeReport) {
         });
     }
 
-    // Sort all events by time (assuming Time field is already formatted string)
-    // We need to sort by the actual timestamp, not the formatted string
+    // Sort all events by time using timestamp field (ISO format)
+    // All transcript entries have a 'timestamp' field with ISO format
+    // Attendance events have 'sortKey' field with Unix timestamp
     combinedEvents.sort((a, b) => {
-        // Use sortKey if available, otherwise parse the Time field
-        const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
-        const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+        // Use sortKey (attendance), timestamp (captions/chat), or 0 as fallback
+        const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0);
+        const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0);
         return timeA - timeB;
     });
 
@@ -228,10 +229,10 @@ function formatAsMarkdown(transcript, attendeeReport) {
         });
     }
 
-    // Sort all events by time
+    // Sort all events by time using timestamp field (ISO format)
     combinedEvents.sort((a, b) => {
-        const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
-        const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+        const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0);
+        const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0);
         return timeA - timeB;
     });
 
@@ -289,10 +290,10 @@ function formatAsDoc(transcript, attendeeReport) {
         });
     }
 
-    // Sort all events by time
+    // Sort all events by time using timestamp field (ISO format)
     combinedEvents.sort((a, b) => {
-        const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
-        const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+        const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0);
+        const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0);
         return timeA - timeB;
     });
 
@@ -344,10 +345,10 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
         });
     }
 
-    // Sort all events by time
+    // Sort all events by time using timestamp field (ISO format)
     combinedEvents.sort((a, b) => {
-        const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
-        const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+        const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0);
+        const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0);
         return timeA - timeB;
     });
 

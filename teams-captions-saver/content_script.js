@@ -146,6 +146,7 @@ window.currentUserName = null;
 
 // --- Attendee Tracking State ---
 let attendeeUpdateInterval = null;
+let attendeeObserver = null;
 let backupInterval = null;
 let attendeeData = {
     allAttendees: new Set(), // All unique attendees who joined
@@ -747,14 +748,22 @@ function updateAttendeeList() {
                     console.log(`[Caption Saver] Detected current user name: ${cleanName}`);
                 }
                 
+                // Check if this is a rejoin (was in previousAttendees but left)
+                const wasPresent = previousAttendees.has(cleanName);
+                const isRejoin = attendeeData.allAttendees.has(cleanName) && !wasPresent;
+
                 // Add to current attendees
                 attendeeData.currentAttendees.set(cleanName, role);
-                
-                // Track in all attendees
-                if (!attendeeData.allAttendees.has(cleanName)) {
+
+                // Track in all attendees (for first time join)
+                const isFirstJoin = !attendeeData.allAttendees.has(cleanName);
+                if (isFirstJoin) {
                     attendeeData.allAttendees.add(cleanName);
-                    
-                    // Add to history as new join
+                }
+
+                // Broadcast join event for both first joins AND rejoins
+                if (isFirstJoin || isRejoin) {
+                    // Add to history
                     const joinEvent = {
                         name: cleanName,
                         role,
@@ -763,7 +772,8 @@ function updateAttendeeList() {
                     };
                     attendeeData.attendeeHistory.push(joinEvent);
 
-                    console.log(`New attendee detected: ${cleanName} (${role})`);
+                    const logMessage = isRejoin ? `Attendee rejoined: ${cleanName} (${role})` : `New attendee detected: ${cleanName} (${role})`;
+                    console.log(logMessage);
 
                     // Broadcast join event to viewer
                     broadcastCaptionUpdate({
@@ -938,17 +948,94 @@ async function startAttendeeTracking() {
             
             updateAttendeeList();
         }
-        
-        // Then update every minute
-        attendeeUpdateInterval = setInterval(updateAttendeeList, TIMING.ATTENDEE_UPDATE_INTERVAL);
+
+        // Setup continuous observer for real-time updates
+        // Try to setup observer, retry if not ready
+        setTimeout(() => {
+            if (!setupAttendeeObserver()) {
+                // Retry after 2 seconds if attendee list not found
+                setTimeout(() => {
+                    setupAttendeeObserver();
+                }, 2000);
+            }
+        }, 1000);
+
+        // Keep interval as backup for cases where observer might miss changes
+        // But increase interval since observer handles most updates
+        attendeeUpdateInterval = setInterval(updateAttendeeList, TIMING.ATTENDEE_UPDATE_INTERVAL * 5); // Every 5 minutes instead of 1
     }, TIMING.INITIAL_ATTENDEE_DELAY);
+}
+
+function setupAttendeeObserver() {
+    // Disconnect existing observer if any
+    if (attendeeObserver) {
+        attendeeObserver.disconnect();
+        attendeeObserver = null;
+    }
+
+    // Get the attendee list container
+    const attendeeListSelector = SELECTORS.attendeeList || SELECTORS.ATTENDEE_TREE;
+    const attendeeListContainer = document.querySelector(attendeeListSelector);
+
+    if (!attendeeListContainer) {
+        console.log('[Attendee Observer] Attendee list container not found, will retry...');
+        return false;
+    }
+
+    // Create observer to watch for changes
+    attendeeObserver = new MutationObserver((mutations) => {
+        // Debounce updates - only update if we see actual changes to attendee items
+        const hasRelevantChanges = mutations.some(mutation => {
+            // Check if added/removed nodes are attendee items
+            const attendeeItemSelector = SELECTORS.attendeeItem || SELECTORS.ATTENDEE_ITEM;
+
+            if (mutation.addedNodes.length > 0) {
+                for (let node of mutation.addedNodes) {
+                    if (node.nodeType === 1 && (node.matches?.(attendeeItemSelector) || node.querySelector?.(attendeeItemSelector))) {
+                        return true;
+                    }
+                }
+            }
+
+            if (mutation.removedNodes.length > 0) {
+                for (let node of mutation.removedNodes) {
+                    if (node.nodeType === 1 && (node.matches?.(attendeeItemSelector) || node.querySelector?.(attendeeItemSelector))) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        });
+
+        if (hasRelevantChanges) {
+            console.log('[Attendee Observer] Detected attendee list change, updating...');
+            updateAttendeeList();
+        }
+    });
+
+    // Start observing with appropriate options
+    attendeeObserver.observe(attendeeListContainer, {
+        childList: true,      // Watch for added/removed children
+        subtree: true,        // Watch all descendants
+        attributes: false     // Don't watch attribute changes (performance)
+    });
+
+    console.log('[Attendee Observer] Successfully setup observer on attendee list');
+    return true;
 }
 
 function stopAttendeeTracking() {
     if (attendeeUpdateInterval) {
         clearInterval(attendeeUpdateInterval);
         attendeeUpdateInterval = null;
-        console.log("Stopped attendee tracking");
+        console.log("Stopped attendee tracking interval");
+    }
+
+    if (attendeeObserver) {
+        attendeeObserver.disconnect();
+        attendeeObserver = null;
+        console.log("Stopped attendee observer");
     }
 }
 

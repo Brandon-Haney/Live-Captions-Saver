@@ -116,18 +116,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function scrollToBottom() {
-        const lastCaption = captionsContainer.lastElementChild;
-        if (lastCaption) {
-            lastCaption.scrollIntoView({ behavior: 'smooth', block: 'end' });
-            // Add a small extra scroll to ensure the last caption is fully visible
-            setTimeout(() => {
-                window.scrollBy(0, 50);
-            }, 300); // Wait for smooth scroll to finish
-        }
+        // Scroll to the absolute bottom of the page
+        window.scrollTo({
+            top: document.body.scrollHeight,
+            behavior: 'smooth'
+        });
+
+        // Hide the indicator
         const indicator = document.getElementById('new-caption-indicator');
         if (indicator) {
             indicator.style.display = 'none';
         }
+
+        // Mark that user is now at bottom (watching live)
+        isNearBottom = true;
     }
     
     function showNewCaptionIndicator() {
@@ -138,7 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
             indicator.className = 'new-caption-indicator';
             
             const button = document.createElement('button');
-            button.textContent = '↓ New captions available';
+            button.textContent = '↓ New captions - Scroll to bottom';
             button.addEventListener('click', scrollToBottom);
             
             indicator.appendChild(button);
