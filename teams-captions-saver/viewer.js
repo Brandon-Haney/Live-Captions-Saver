@@ -262,24 +262,30 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function updateAllSpeakerInstances(originalName) {
+        if (!originalName) return;
+
         const displayName = speakerAliases[originalName] || originalName;
         const hasAlias = !!speakerAliases[originalName];
-        
+
         // Update all caption instances - use correct selector without 'editable-speaker' class
         document.querySelectorAll(`.caption[data-original-speaker="${originalName}"] .name`).forEach(elem => {
-            elem.textContent = displayName;
-            elem.classList.toggle('has-alias', hasAlias);
-            elem.title = hasAlias ? `Original: ${originalName}` : '';
-        });
-        
-        // Update speaker filter button if it exists
-        const filterBtn = speakerFiltersContainer.querySelector(`button[data-original-speaker="${originalName}"]`);
-        if (filterBtn) {
-            const nameSpan = filterBtn.querySelector('span:not(.speaker-edit-icon)');
-            if (nameSpan) {
-                nameSpan.textContent = displayName;
+            if (elem) {
+                elem.textContent = displayName;
+                elem.classList.toggle('has-alias', hasAlias);
+                elem.title = hasAlias ? `Original: ${originalName}` : '';
             }
-            filterBtn.setAttribute('aria-label', `Filter by ${displayName}`);
+        });
+
+        // Update speaker filter button if it exists
+        if (speakerFiltersContainer) {
+            const filterBtn = speakerFiltersContainer.querySelector(`button[data-original-speaker="${originalName}"]`);
+            if (filterBtn) {
+                const nameSpan = filterBtn.querySelector('span:not(.speaker-edit-icon)');
+                if (nameSpan) {
+                    nameSpan.textContent = displayName;
+                }
+                filterBtn.setAttribute('aria-label', `Filter by ${displayName}`);
+            }
         }
     }
     

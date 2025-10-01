@@ -57,26 +57,6 @@ async function createNewMeetingSession() {
             return true;
         }
 
-        // Only end/delete previous session if it exists (which shouldn't happen since we check above)
-        // This is a safety check for edge cases
-        if (currentSessionId) {
-            // Check if the current session has any captions
-            if (transcriptArray.length > 0) {
-                console.log(`[Caption Saver] Ending previous session with ${transcriptArray.length} captions: ${currentSessionId}`);
-                chrome.runtime.sendMessage({
-                    action: 'endSession',
-                    sessionId: currentSessionId
-                });
-            } else {
-                console.log(`[Caption Saver] Deleting empty session: ${currentSessionId}`);
-                // Delete the empty session instead of ending it
-                chrome.runtime.sendMessage({
-                    action: 'deleteSession',
-                    sessionId: currentSessionId
-                });
-            }
-        }
-        
         // Clear transcript and attendee data for the new meeting
         transcriptArray.length = 0;
         attendeeData = {

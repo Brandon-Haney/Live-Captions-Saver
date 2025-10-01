@@ -113,9 +113,6 @@ async function getActiveMeetingTab() {
     return meetingTab || null;
 }
 
-// Deprecated - use getActiveMeetingTab instead
-const getActiveTeamsTab = getActiveMeetingTab;
-
 // --- Multi-Session Management Functions ---
 async function loadActiveSessions() {
     try {
@@ -535,36 +532,49 @@ async function loadCustomTemplates() {
         Object.keys(customTemplates).length > 0 ? 'block' : 'none';
 }
 
+// Sanitize input to prevent special characters in filenames and names
+function sanitizeInput(str) {
+    return str.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
+}
+
 async function saveCustomTemplate(name, instructions) {
-    if (!name.trim() || !instructions.trim()) {
+    if (!name || !name.trim() || !instructions || !instructions.trim()) {
         alert('Please enter both a template name and instructions.');
         return;
     }
-    
+
+    // Sanitize the template name
+    const sanitizedName = sanitizeInput(name.trim());
+
+    if (!sanitizedName) {
+        alert('Template name contains only invalid characters. Please use alphanumeric characters.');
+        return;
+    }
+
     const { customTemplates = {} } = await chrome.storage.sync.get('customTemplates');
-    
+
     // Generate unique ID
     const id = Date.now().toString();
-    
+
     // Add new template
     customTemplates[id] = {
-        name: name.trim(),
+        name: sanitizedName,
         instructions: instructions.trim(),
         createdAt: new Date().toISOString()
     };
-    
+
     // Save to storage
     await chrome.storage.sync.set({ customTemplates });
-    
+
     // Reload templates
     await loadCustomTemplates();
-    
+
     // Clear template name input
     UI_ELEMENTS.templateName.value = '';
-    
+
     // Select the newly created template
     UI_ELEMENTS.meetingType.value = `custom_${id}`;
-    
+
     alert('Template saved successfully!');
 }
 
@@ -840,18 +850,23 @@ function setupDropdown(mainButton, dropdownButton, optionsContainer, actionHandl
 }
 
 async function handleCopy(target) {
-    const copyType = target.dataset.copyType;
+    const copyType = target?.dataset?.copyType;
     if (!copyType) return;
+
+    if (!UI_ELEMENTS.statusMessage) {
+        console.error('Status message element not found');
+        return;
+    }
 
     UI_ELEMENTS.statusMessage.textContent = "Preparing text to copy...";
     try {
         let transcriptArray = null;
-        
+
         // Check if we have a selected session (multi-meeting mode)
         if (selectedSessionId) {
-            const response = await chrome.runtime.sendMessage({ 
-                action: 'getSessionData', 
-                sessionId: selectedSessionId 
+            const response = await chrome.runtime.sendMessage({
+                action: 'getSessionData',
+                sessionId: selectedSessionId
             });
             if (response?.sessionData?.transcript) {
                 transcriptArray = response.sessionData.transcript;
@@ -859,12 +874,15 @@ async function handleCopy(target) {
         } else {
             // Fallback to current tab
             const tab = await getActiveMeetingTab();
-            if (!tab) return;
+            if (!tab) {
+                UI_ELEMENTS.statusMessage.textContent = "No active meeting found.";
+                return;
+            }
             const response = await chrome.tabs.sendMessage(tab.id, { message: "get_transcript_for_copying" });
             transcriptArray = response?.transcriptArray;
         }
-        
-        if (transcriptArray) {
+
+        if (transcriptArray && transcriptArray.length > 0) {
             const formattedText = await formatTranscript(transcriptArray, {}, copyType);
             await navigator.clipboard.writeText(formattedText);
             UI_ELEMENTS.statusMessage.textContent = "Copied to clipboard!";

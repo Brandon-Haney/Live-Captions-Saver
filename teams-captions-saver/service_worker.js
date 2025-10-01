@@ -239,11 +239,10 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
 
 // A simple HTML escaper for the .doc format
 function escapeHtml(str) {
-    return str.replace(/&/g, "&")
-              .replace(/</g, "<")
-              .replace(/>/g, ">")
+    return str.replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;")
               .replace(/"/g, "&quot;")
-            //   .replace(/'/g, "'");
               .replace(/'/g, "&#039;");
 }
 
@@ -636,7 +635,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     sessionId: message.sessionId,
                     fromServiceWorker: true  // Mark that this is from service worker
                 };
-                
+
                 // Broadcast to all extension pages (viewer.html will receive this)
                 // This is sufficient - we don't need tabs.sendMessage too
                 chrome.runtime.sendMessage(messageToRelay).then(() => {
@@ -653,8 +652,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({received: true});
         return; // Exit early for live updates
     }
-    
+
     (async () => {
+        try {
         // Speaker aliases are now managed per-session in the viewer
         // For downloads, we'll use the session-specific aliases if available
         let speakerAliases = {};
@@ -800,11 +800,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 return true; // Will respond asynchronously
                 
-            // Live updates are now handled at the top of the listener
-            // case 'live_caption_update':
-            // case 'live_attendee_update':
-            //     Handled above for synchronous relay
-            //     break;
             case 'save_session_history':
                 // Save meeting to session history using chrome.storage directly
                 try {
@@ -895,32 +890,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
 
             case 'save_on_leave':
+                // Validate required data
+                if (!message.transcriptArray || !Array.isArray(message.transcriptArray)) {
+                    console.error('Auto-save failed: Invalid transcript data');
+                    sendResponse({ success: false, error: 'Invalid transcript data' });
+                    break;
+                }
+
                 // Generate unique ID for this save request
-                const saveId = `${message.meetingTitle}_${message.recordingStartTime}`;
-                
+                const saveId = `${message.meetingTitle || 'unknown'}_${message.recordingStartTime || Date.now()}`;
+
                 // Prevent duplicate saves
                 if (autoSaveInProgress || lastAutoSaveId === saveId) {
                     console.log('Auto-save already in progress or completed for this meeting, skipping...');
+                    sendResponse({ success: false, error: 'Duplicate save request' });
                     break;
                 }
-                
+
                 autoSaveInProgress = true;
                 lastAutoSaveId = saveId;
-                
+
                 try {
                     const settings = await chrome.storage.sync.get(['autoSaveOnEnd', 'defaultSaveFormat']);
                     if (settings.autoSaveOnEnd && message.transcriptArray.length > 0) {
                         const formatToSave = settings.defaultSaveFormat || 'txt';
                         const meetingTitleToSave = message.meetingTitle || 'Untitled Meeting';
-                        
+
                         // Get session-specific aliases if they exist
                         const autoSaveSessionKey = `aliases_${message.sessionId || 'default'}`;
                         const autoSaveAliasData = await chrome.storage.local.get(autoSaveSessionKey);
                         const autoSaveAliases = autoSaveAliasData[autoSaveSessionKey] || {};
-                        
+
                         await saveTranscript(meetingTitleToSave, message.transcriptArray, autoSaveAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport);
                         console.log(`Auto-save completed: ${meetingTitleToSave}`);
-                        
+
                         // Also save to session history
                         try {
                             await saveSessionToHistory(message.transcriptArray, message.meetingTitle, message.attendeeReport);
@@ -928,11 +931,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         } catch (sessionError) {
                             console.error('Failed to save to session history:', sessionError);
                         }
+
+                        sendResponse({ success: true });
+                    } else {
+                        sendResponse({ success: false, error: 'Auto-save disabled or no transcript data' });
                     }
                 } catch (error) {
                     console.error('Auto-save failed:', error);
                     // Reset state on error to allow retry
                     lastAutoSaveId = null;
+                    sendResponse({ success: false, error: error.message });
                 } finally {
                     autoSaveInProgress = false;
                 }
@@ -958,7 +966,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 // Could implement error reporting here
                 break;
         }
+        } catch (error) {
+            console.error('[Service Worker] Error handling message:', error);
+            sendResponse({ success: false, error: error.message });
+        }
     })();
-    
+
     return true; // Indicates that the response will be sent asynchronously
 });
