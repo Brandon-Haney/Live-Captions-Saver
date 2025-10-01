@@ -392,15 +392,7 @@ const PLATFORM_CONFIGS = {
             // Not in meeting if: meeting ended (by user or host), on landing page, or no leave button
             const inMeeting = hasLeaveButton && !leftMeetingPage && !hostEndedMeeting && !onLandingPage;
             
-            if (!inMeeting && window.lastMeetingActiveState === true) {
-                // console.log('[Caption Saver] Meeting ended detected:', {
-                //     hasLeaveButton,
-                //     leftMeetingPage,
-                //     hostEndedMeeting,
-                //     onLandingPage,
-                //     pathname: window.location.pathname
-                // });
-            }
+            // Meeting ended detection handled elsewhere
             
             window.lastMeetingActiveState = inMeeting;
             return inMeeting;
@@ -999,9 +991,12 @@ const PLATFORM_CONFIGS = {
             // Priority 3: Check for the closed-captions-renderer element
             const closedCaptionsRenderer = document.querySelector('[data-tid="closed-captions-renderer"]');
 
+            // Check if there's actual caption text present
+            const hasCaptionText = !!(liveTranscriptionBox?.textContent || transcriptElement?.textContent);
+
             // For Zoom, the presence of the live transcription box is a strong indicator
             const result = !!(liveTranscriptionBox || transcriptElement || captionsVisible || captionContainer || closedCaptionsRenderer);
-            
+
             // Log for debugging if needed
             if (window.debugZoomCaptions) {
                 console.log('[Zoom Captions Detection]', {

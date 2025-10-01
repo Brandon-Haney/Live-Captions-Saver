@@ -21,8 +21,7 @@
     "https://teams.live.com/*",
     "https://meet.google.com/*",
     "https://web.zoom.us/*",
-    "https://app.zoom.us/*",
-    "https://*.zoom.us/*"
+    "https://app.zoom.us/*"
   ],
 
   "action": {
@@ -42,14 +41,13 @@
         "https://teams.live.com/*",
         "https://meet.google.com/*",
         "https://web.zoom.us/*",
-        "https://app.zoom.us/*",
-        "https://*.zoom.us/*"
+        "https://app.zoom.us/*"
       ],
       "js": [
         "platformConfig.js",
         "content_script.js"
       ],
-      "all_frames": true
+      "all_frames": false
     }
   ],
   
