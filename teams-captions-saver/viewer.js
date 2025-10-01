@@ -58,6 +58,18 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 document.addEventListener('DOMContentLoaded', () => {
+    // --- Debug Configuration ---
+    // Set to true to enable verbose console logging for troubleshooting
+    const DEBUG = false;
+
+    // Debug logger wrapper
+    const debug = {
+        log: (...args) => DEBUG && console.log(...args),
+        warn: (...args) => DEBUG && console.warn(...args),
+        error: (...args) => console.error(...args), // Always log errors
+        info: (...args) => console.log(...args) // Always log important info
+    };
+
     // --- DOM Elements ---
     const captionsContainer = document.getElementById('captions-container');
     const searchBox = document.getElementById('search-box');
@@ -75,7 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let meetingStartTime = null;
     let meetingEndTime = null;
     const SEARCH_DEBOUNCE_DELAY = 300;
-    
+
     // Live streaming state
     let isLiveStreaming = false;
     let lastUpdateTime = Date.now();
@@ -143,7 +155,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const key = `aliases_${viewerSessionId}`;
             const result = await chrome.storage.local.get(key);
             speakerAliases = result[key] || {};
-            console.log(`[Viewer] Loaded aliases for session ${viewerSessionId}:`, speakerAliases);
+            debug.log(`[Viewer] Loaded aliases for session ${viewerSessionId}:`, speakerAliases);
         } catch (error) {
             console.error('Error loading session aliases:', error);
             speakerAliases = {};
@@ -156,7 +168,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const key = `aliases_${viewerSessionId}`;
             await chrome.storage.local.set({ [key]: speakerAliases });
-            console.log(`[Viewer] Saved aliases for session ${viewerSessionId}:`, speakerAliases);
+            debug.log(`[Viewer] Saved aliases for session ${viewerSessionId}:`, speakerAliases);
         } catch (error) {
             console.error('Error saving session aliases:', error);
         }
@@ -308,7 +320,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (caption.key) {
             const existingIndex = allCaptions.findIndex(c => c.key === caption.key);
             if (existingIndex !== -1) {
-                console.log('[Viewer] Caption with key already exists, updating instead:', caption.key);
+                debug.log('[Viewer] Caption with key already exists, updating instead:', caption.key);
                 updateExistingCaption(caption);
                 return;
             }
@@ -323,7 +335,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (recentCaptionIndex !== -1 && caption.Text.length < 50) {
             // This looks like a fragment, update the existing caption instead
-            console.log('[Viewer] Fragment detected, updating existing caption instead of adding new');
+            debug.log('[Viewer] Fragment detected, updating existing caption instead of adding new');
             updateExistingCaption(caption);
             return;
         }
@@ -386,19 +398,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function updateExistingCaption(caption) {
-        console.log('[Viewer] Updating caption with key:', caption.key);
+        debug.log('[Viewer] Updating caption with key:', caption.key);
         
         // First, try to find by key
         let index = allCaptions.findIndex(c => c.key === caption.key);
         
         // If not found by key, try to find by speaker name (for Google Meet)
         if (index === -1 && caption.Name) {
-            console.log('[Viewer] Key not found, searching by name:', caption.Name);
+            debug.log('[Viewer] Key not found, searching by name:', caption.Name);
             // Find the most recent caption from this speaker
             for (let i = allCaptions.length - 1; i >= 0; i--) {
                 if (allCaptions[i].Name === caption.Name) {
                     index = i;
-                    console.log('[Viewer] Found caption by name at index:', index);
+                    debug.log('[Viewer] Found caption by name at index:', index);
                     break;
                 }
             }
@@ -413,16 +425,16 @@ document.addEventListener('DOMContentLoaded', () => {
             if (captionElement) {
                 const textElement = captionElement.querySelector('.text');
                 if (textElement) {
-                    console.log('[Viewer] Updating text from:', textElement.textContent, 'to:', caption.Text);
+                    debug.log('[Viewer] Updating text from:', textElement.textContent, 'to:', caption.Text);
                     textElement.textContent = caption.Text;
                 } else {
-                    console.log('[Viewer] Text element not found in caption');
+                    debug.log('[Viewer] Text element not found in caption');
                 }
             } else {
-                console.log('[Viewer] Caption element not found at index:', index);
+                debug.log('[Viewer] Caption element not found at index:', index);
             }
         } else {
-            console.log('[Viewer] Caption not found for update, adding as new');
+            debug.log('[Viewer] Caption not found for update, adding as new');
             appendNewCaption(caption);
         }
     }
@@ -444,7 +456,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function queueUpdate(update) {
-        console.log('[Viewer] Queuing update:', update.type, update.caption?.Name);
+        debug.log('[Viewer] Queuing update:', update.type, update.caption?.Name);
         pendingUpdates.push(update);
         
         // Batch updates every 100ms for performance
@@ -507,12 +519,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
             </svg>`;
         
+        // Handle attendance events differently
+        if (item.Type === 'attendance') {
+            const actionClass = item.action || (item.Text.includes('joined') ? 'joined' : 'left');
+            const displayName = speakerAliases[item.Name] || item.Name;
+            return `
+                <div class="attendance-event ${actionClass}" data-type="attendance" data-action="${actionClass}">
+                    <span class="attendance-icon">●</span>
+                    <span class="name">${escapeHtml(displayName)}</span>
+                    <span class="attendance-text">${escapeHtml(item.Text)}</span>
+                    <span class="time">${escapeHtml(item.Time)}</span>
+                </div>
+            `;
+        }
+
         // Determine if this is a chat message
         const isChat = item.Type === 'chat';
         const typeClass = isChat ? 'chat-message' : 'caption-message';
         const typeIcon = isChat ? chatIconSVG : captionIconSVG;
         const typeLabel = isChat ? 'Chat' : 'Caption';
-        
+
         // Apply speaker alias if exists
         const displayName = speakerAliases[item.Name] || item.Name;
         const hasAlias = speakerAliases[item.Name] ? true : false;
@@ -570,6 +596,37 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
             </div>
         `;
+    }
+
+    // Merge attendance events with transcript chronologically
+    function mergeAttendanceEvents(transcript, attendeeHistory) {
+        if (!attendeeHistory || attendeeHistory.length === 0) {
+            return transcript;
+        }
+
+        const combinedEvents = [...transcript];
+
+        // Add attendance events
+        attendeeHistory.forEach(event => {
+            combinedEvents.push({
+                Time: event.time,
+                Name: event.name,
+                Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
+                Type: 'attendance',
+                action: event.action,
+                sortKey: new Date(event.time).getTime()
+            });
+        });
+
+        // Sort by time
+        combinedEvents.sort((a, b) => {
+            const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
+            const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+            return timeA - timeB;
+        });
+
+        debug.log(`[Viewer] Merged ${attendeeHistory.length} attendance events with ${transcript.length} captions`);
+        return combinedEvents;
     }
 
     function renderCaptions(transcriptArray) {
@@ -1072,7 +1129,7 @@ document.addEventListener('DOMContentLoaded', () => {
             
             // Store the session ID for filtering live updates
             viewerSessionId = result.viewerSessionId;
-            console.log(`[Viewer] Initialized with session ID: ${viewerSessionId}`);
+            debug.log(`[Viewer] Initialized with session ID: ${viewerSessionId}`);
             
             // Use viewerData if captionsToView is not available
             if (!transcript && viewerData && viewerData.transcriptArray) {
@@ -1103,6 +1160,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // Load session-specific aliases before rendering
                 await loadSessionAliases();
+
+                // Merge attendance events with transcript if available
+                if (viewerData?.attendeeData?.attendeeHistory) {
+                    transcript = mergeAttendanceEvents(transcript, viewerData.attendeeData.attendeeHistory);
+                }
 
                 renderCaptions(transcript);
                 populateSpeakerFilters(transcript);
@@ -1209,21 +1271,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 // For live updates, only process from service worker to avoid duplicates
                 if (!isFromServiceWorker && (request.message === 'live_caption_update' || request.message === 'live_attendee_update')) {
                     // This is a live update directly from content script - ignore it
-                    console.log('[Viewer] Ignoring direct live update from content script');
+                    debug.log('[Viewer] Ignoring direct live update from content script');
                     return;
                 }
                 
                 const source = sender.tab ? `tab ${sender.tab.id}` : 'service worker';
-                console.log('[Viewer] Received message:', request?.message || 'undefined', 'from', source, 'Full request:', request);
+                debug.log('[Viewer] Received message:', request?.message || 'undefined', 'from', source, 'Full request:', request);
                 
                 // Log test messages
                 if (request.test) {
-                    console.log('[Viewer] Received TEST broadcast with live update');
+                    debug.log('[Viewer] Received TEST broadcast with live update');
                 }
                 if (request.message === "live_caption_update") {
                     // Filter by session ID if we have one
                     if (viewerSessionId && request.sessionId && request.sessionId !== viewerSessionId) {
-                        console.log(`[Viewer] Ignoring caption from different session: ${request.sessionId} (viewing ${viewerSessionId})`);
+                        debug.log(`[Viewer] Ignoring caption from different session: ${request.sessionId} (viewing ${viewerSessionId})`);
                         return;
                     }
                     
@@ -1234,11 +1296,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Remove "Meeting Ended" message if we're receiving updates again
                     removeMeetingEndedMessage();
                     
-                    console.log("[Viewer] Processing live caption update:", request.type, request.caption?.Name, request.caption?.Text?.substring(0, 30));
+                    debug.log("[Viewer] Processing live caption update:", request.type, request.caption?.Name, request.caption?.Text?.substring(0, 30));
                 } else if (request.message === "live_attendee_update") {
                     // Filter by session ID if we have one
                     if (viewerSessionId && request.sessionId && request.sessionId !== viewerSessionId) {
-                        console.log(`[Viewer] Ignoring attendee update from different session: ${request.sessionId}`);
+                        debug.log(`[Viewer] Ignoring attendee update from different session: ${request.sessionId}`);
                         return;
                     }
                     

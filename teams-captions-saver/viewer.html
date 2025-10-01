@@ -265,11 +265,64 @@
         .caption-message {
             background-color: transparent;
         }
-        
+
         .caption-message:hover {
             background-color: #f8f9fa;
         }
-        
+
+        /* Attendance event styling */
+        .attendance-event {
+            background-color: #f8f9fa;
+            border-left: 3px solid #9ca3af;
+            padding: 8px 12px;
+            margin: 8px 0;
+            text-align: center;
+            font-style: italic;
+            color: #6b7280;
+            border-radius: 4px;
+        }
+
+        .attendance-event:hover {
+            background-color: #f0f1f3;
+        }
+
+        .attendance-event .attendance-icon {
+            display: inline-block;
+            margin-right: 6px;
+            font-style: normal;
+        }
+
+        .attendance-event.joined {
+            border-left-color: #10b981;
+            background-color: #f0fdf4;
+            color: #065f46;
+        }
+
+        .attendance-event.joined:hover {
+            background-color: #dcfce7;
+        }
+
+        .attendance-event.left {
+            border-left-color: #ef4444;
+            background-color: #fef2f2;
+            color: #991b1b;
+        }
+
+        .attendance-event.left:hover {
+            background-color: #fee2e2;
+        }
+
+        .attendance-event .name {
+            font-weight: 600;
+            font-style: normal;
+        }
+
+        .attendance-event .time {
+            font-size: 0.85em;
+            opacity: 0.8;
+            margin-left: 8px;
+        }
+
         /* Message type icon */
         .message-type {
             display: inline-flex;
@@ -277,12 +330,12 @@
             margin-right: 8px;
             vertical-align: middle;
         }
-        
+
         .message-type svg {
             width: 16px;
             height: 16px;
         }
-        
+
         .chat-message .message-type svg {
             stroke: #0078d4;
         }

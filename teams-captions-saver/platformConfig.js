@@ -224,11 +224,18 @@ const PLATFORM_CONFIGS = {
                     }
                 });
 
+                // Extract timestamp from message ID (data-mid is Unix timestamp in milliseconds)
+                let timestamp = null;
+                if (messageId && !isNaN(messageId)) {
+                    timestamp = parseInt(messageId);
+                }
+
                 return {
                     id: messageId,
                     author: authorEl?.textContent || 'Unknown',
                     text: contentEl.textContent || contentEl.getAttribute('aria-label'),
                     time: null, // Will be replaced with formatted timestamp in content_script
+                    timestamp: timestamp, // Unix timestamp in milliseconds for filtering
                     attachments: attachments.length > 0 ? attachments : undefined
                 };
             }
@@ -644,11 +651,26 @@ const PLATFORM_CONFIGS = {
                     }
                 });
 
+                // Try to extract timestamp from time element or message ID
+                let timestamp = null;
+                if (timeEl && timeEl.textContent) {
+                    // Google Meet shows relative times like "10:30 AM" - we'll use current time as fallback
+                    // Since we can't reliably parse relative times, use message creation time
+                    timestamp = Date.now();
+                } else if (messageId && !isNaN(messageId)) {
+                    // If message ID is numeric, it might be a timestamp
+                    timestamp = parseInt(messageId);
+                } else {
+                    // Fallback to current time
+                    timestamp = Date.now();
+                }
+
                 return {
                     id: messageId,
                     author: authorName,
                     text: contentEl.textContent.trim(),
                     time: null, // Will be replaced with formatted timestamp in content_script
+                    timestamp: timestamp, // Unix timestamp in milliseconds for filtering
                     attachments: attachments.length > 0 ? attachments : undefined
                 };
             }
@@ -1378,11 +1400,25 @@ const PLATFORM_CONFIGS = {
                 // Don't extract any attachments to avoid capturing UI elements
                 const attachments = [];
 
+                // Try to extract timestamp from message ID or time element
+                let timestamp = null;
+                if (messageId && !isNaN(messageId)) {
+                    // If message ID is numeric, it might be a timestamp
+                    timestamp = parseInt(messageId);
+                } else if (timeEl && timeEl.textContent) {
+                    // Zoom shows times like "10:30 AM" - use current time as fallback
+                    timestamp = Date.now();
+                } else {
+                    // Fallback to current time
+                    timestamp = Date.now();
+                }
+
                 return {
                     id: messageId,
                     author: senderName,
                     text: messageText,  // Use the cleaned text without reaction buttons
                     time: null, // Will be replaced with formatted timestamp in content_script
+                    timestamp: timestamp, // Unix timestamp in milliseconds for filtering
                     attachments: attachments.length > 0 ? attachments : undefined
                 };
             }
