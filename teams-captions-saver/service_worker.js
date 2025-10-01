@@ -77,6 +77,7 @@ function formatAsTxt(transcript, attendeeReport) {
     let attendeeList = [];
     let totalAttendees = 0;
     let meetingStart = null;
+    let attendeeHistory = [];
 
     if (attendeeReport) {
         // Format 1: Standard format with attendeeList and totalUniqueAttendees
@@ -84,6 +85,7 @@ function formatAsTxt(transcript, attendeeReport) {
             attendeeList = attendeeReport.attendeeList;
             totalAttendees = attendeeReport.totalUniqueAttendees;
             meetingStart = attendeeReport.meetingStartTime;
+            attendeeHistory = attendeeReport.attendeeHistory || [];
             console.log('[formatAsTxt] Using standard format - attendees:', attendeeList);
         }
         // Format 2: Zoom format with allAttendees object/Set
@@ -99,6 +101,7 @@ function formatAsTxt(transcript, attendeeReport) {
             }
             totalAttendees = attendeeList.length;
             meetingStart = attendeeReport.meetingStartTime;
+            attendeeHistory = attendeeReport.attendeeHistory || [];
             console.log('[formatAsTxt] Using Zoom format - attendees:', attendeeList);
         } else {
             console.log('[formatAsTxt] Attendee report has unexpected format:', Object.keys(attendeeReport));
@@ -120,12 +123,45 @@ function formatAsTxt(transcript, attendeeReport) {
         });
         content += '\n=== TRANSCRIPT ===\n';
     }
-    
-    content += transcript.map(entry => {
-        // Add indicator for chat messages vs captions
-        const prefix = entry.Type === 'chat' ? '[CHAT] ' : '';
-        return `${prefix}[${entry.Time}] ${entry.Name}: ${entry.Text}`;
+
+    // Merge transcript and attendee events chronologically
+    const combinedEvents = [...transcript];
+
+    // Add join/leave events to the combined array
+    if (attendeeHistory && attendeeHistory.length > 0) {
+        attendeeHistory.forEach(event => {
+            combinedEvents.push({
+                Time: event.time,
+                Name: event.name,
+                Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
+                Type: 'attendance',
+                action: event.action,
+                sortKey: new Date(event.time).getTime()
+            });
+        });
+    }
+
+    // Sort all events by time (assuming Time field is already formatted string)
+    // We need to sort by the actual timestamp, not the formatted string
+    combinedEvents.sort((a, b) => {
+        // Use sortKey if available, otherwise parse the Time field
+        const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
+        const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+        return timeA - timeB;
+    });
+
+    // Format all events
+    content += combinedEvents.map(entry => {
+        if (entry.Type === 'attendance') {
+            // Format: [TIME] ● Name joined/left the meeting
+            return `[${entry.Time}] ● ${entry.Name} ${entry.Text}`;
+        } else if (entry.Type === 'chat') {
+            return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+        } else {
+            return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
+        }
     }).join('\n');
+
     return content;
 }
 
@@ -136,6 +172,7 @@ function formatAsMarkdown(transcript, attendeeReport) {
     let attendeeList = [];
     let totalAttendees = 0;
     let meetingStart = null;
+    let attendeeHistory = [];
 
     if (attendeeReport) {
         // Format 1: Standard format
@@ -143,6 +180,7 @@ function formatAsMarkdown(transcript, attendeeReport) {
             attendeeList = attendeeReport.attendeeList;
             totalAttendees = attendeeReport.totalUniqueAttendees;
             meetingStart = attendeeReport.meetingStartTime;
+            attendeeHistory = attendeeReport.attendeeHistory || [];
         }
         // Format 2: Zoom format
         else if (attendeeReport.allAttendees) {
@@ -155,6 +193,7 @@ function formatAsMarkdown(transcript, attendeeReport) {
             }
             totalAttendees = attendeeList.length;
             meetingStart = attendeeReport.meetingStartTime;
+            attendeeHistory = attendeeReport.attendeeHistory || [];
         }
     }
 
@@ -171,24 +210,55 @@ function formatAsMarkdown(transcript, attendeeReport) {
         });
         content += '\n---\n\n# Transcript\n\n';
     }
-    
+
+    // Merge transcript and attendee events chronologically
+    const combinedEvents = [...transcript];
+
+    // Add join/leave events
+    if (attendeeHistory && attendeeHistory.length > 0) {
+        attendeeHistory.forEach(event => {
+            combinedEvents.push({
+                Time: event.time,
+                Name: event.name,
+                Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
+                Type: 'attendance',
+                action: event.action,
+                sortKey: new Date(event.time).getTime()
+            });
+        });
+    }
+
+    // Sort all events by time
+    combinedEvents.sort((a, b) => {
+        const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
+        const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+        return timeA - timeB;
+    });
+
     let lastSpeaker = null;
-    content += transcript.map(entry => {
-        // Add text indicator for chat messages
-        const typeIndicator = entry.Type === 'chat' ? '[CHAT] ' : '';
-        if (entry.Name !== lastSpeaker) {
-            lastSpeaker = entry.Name;
-            return `\n${typeIndicator}**${entry.Name}** (${entry.Time}):\n> ${entry.Text}`;
+    content += combinedEvents.map(entry => {
+        if (entry.Type === 'attendance') {
+            // Format: ● Name joined/left the meeting (Time)
+            lastSpeaker = null; // Reset speaker grouping
+            return `\n*● ${entry.Name} ${entry.Text}* (${entry.Time})\n`;
+        } else {
+            // Add text indicator for chat messages
+            const typeIndicator = entry.Type === 'chat' ? '[CHAT] ' : '';
+            if (entry.Name !== lastSpeaker) {
+                lastSpeaker = entry.Name;
+                return `\n${typeIndicator}**${entry.Name}** (${entry.Time}):\n> ${entry.Text}`;
+            }
+            return `> ${entry.Text}`;
         }
-        return `> ${entry.Text}`;
     }).join('\n').trim();
-    
+
     return content;
 }
 
 function formatAsDoc(transcript, attendeeReport) {
     let body = '';
-    
+    let attendeeHistory = [];
+
     // Add attendee information if available
     if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
         body += '<h2>Meeting Attendees</h2>';
@@ -199,23 +269,54 @@ function formatAsDoc(transcript, attendeeReport) {
             body += `<li>${escapeHtml(name)}</li>`;
         });
         body += '</ul><hr><h2>Transcript</h2>';
+        attendeeHistory = attendeeReport.attendeeHistory || [];
     }
-    
-    body += transcript.map(entry => {
-        // Add visual indicator for chat messages
-        const typePrefix = entry.Type === 'chat' ? '[CHAT] ' : '';
-        return `<p>${typePrefix}<b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`;
+
+    // Merge transcript and attendee events chronologically
+    const combinedEvents = [...transcript];
+
+    // Add join/leave events
+    if (attendeeHistory && attendeeHistory.length > 0) {
+        attendeeHistory.forEach(event => {
+            combinedEvents.push({
+                Time: event.time,
+                Name: event.name,
+                Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
+                Type: 'attendance',
+                action: event.action,
+                sortKey: new Date(event.time).getTime()
+            });
+        });
+    }
+
+    // Sort all events by time
+    combinedEvents.sort((a, b) => {
+        const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
+        const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+        return timeA - timeB;
+    });
+
+    body += combinedEvents.map(entry => {
+        if (entry.Type === 'attendance') {
+            // Attendance events in gray, italic, centered
+            return `<p style="text-align:center; color:#666; font-style:italic;">● ${escapeHtml(entry.Name)} ${escapeHtml(entry.Text)} - <i>${escapeHtml(entry.Time)}</i></p>`;
+        } else if (entry.Type === 'chat') {
+            return `<p>[CHAT] <b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`;
+        } else {
+            return `<p><b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`;
+        }
     }).join('');
-    
+
     return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Meeting Transcript</title></head><body>${body}</body></html>`;
 }
 
 async function formatForAi(transcript, meetingTitle, recordingStartTime, attendeeReport) {
     const { aiInstructions = '' } = await chrome.storage.sync.get('aiInstructions');
     const date = recordingStartTime ? new Date(recordingStartTime) : new Date();
-    
+
     let metadataHeader = `Meeting Title: ${meetingTitle}\nDate: ${date.toLocaleString()}`;
-    
+    let attendeeHistory = [];
+
     // Add attendee information if available
     if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
         metadataHeader += `\nTotal Attendees: ${attendeeReport.totalUniqueAttendees}`;
@@ -223,17 +324,46 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
         attendeeReport.attendeeList.forEach(name => {
             metadataHeader += `\n- ${name}`;
         });
+        attendeeHistory = attendeeReport.attendeeHistory || [];
     }
-    
-    const transcriptText = transcript.map(entry => {
-        // Add indicator for chat messages in AI format
-        const prefix = entry.Type === 'chat' ? '[CHAT] ' : '';
-        return `${prefix}[${entry.Time}] ${entry.Name}: ${entry.Text}`;
+
+    // Merge transcript and attendee events chronologically
+    const combinedEvents = [...transcript];
+
+    // Add join/leave events
+    if (attendeeHistory && attendeeHistory.length > 0) {
+        attendeeHistory.forEach(event => {
+            combinedEvents.push({
+                Time: event.time,
+                Name: event.name,
+                Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
+                Type: 'attendance',
+                action: event.action,
+                sortKey: new Date(event.time).getTime()
+            });
+        });
+    }
+
+    // Sort all events by time
+    combinedEvents.sort((a, b) => {
+        const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
+        const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+        return timeA - timeB;
+    });
+
+    const transcriptText = combinedEvents.map(entry => {
+        if (entry.Type === 'attendance') {
+            return `[${entry.Time}] ● ${entry.Name} ${entry.Text}`;
+        } else if (entry.Type === 'chat') {
+            return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+        } else {
+            return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
+        }
     }).join('\n\n');
 
     let finalContent = aiInstructions ? `${aiInstructions}\n\n---\n\n` : '';
     finalContent += `${metadataHeader}\n\n---\n\n${transcriptText}`;
-    
+
     return finalContent;
 }
 

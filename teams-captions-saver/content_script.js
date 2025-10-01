@@ -755,14 +755,28 @@ function updateAttendeeList() {
                     attendeeData.allAttendees.add(cleanName);
                     
                     // Add to history as new join
-                    attendeeData.attendeeHistory.push({
+                    const joinEvent = {
                         name: cleanName,
                         role,
                         action: 'joined',
                         time: currentTime
-                    });
-                    
+                    };
+                    attendeeData.attendeeHistory.push(joinEvent);
+
                     console.log(`New attendee detected: ${cleanName} (${role})`);
+
+                    // Broadcast join event to viewer
+                    broadcastCaptionUpdate({
+                        type: 'new',
+                        caption: {
+                            Name: cleanName,
+                            Text: `joined the meeting${role ? ' (' + role + ')' : ''}`,
+                            Time: currentTime,
+                            Type: 'attendance',
+                            action: 'joined',
+                            key: `attendance_${Date.now()}_${cleanName}`
+                        }
+                    });
                 }
             }
         });
@@ -770,12 +784,26 @@ function updateAttendeeList() {
         // Check for attendees who left
         previousAttendees.forEach(name => {
             if (!attendeeData.currentAttendees.has(name)) {
-                attendeeData.attendeeHistory.push({
+                const leaveEvent = {
                     name,
                     action: 'left',
                     time: currentTime
-                });
+                };
+                attendeeData.attendeeHistory.push(leaveEvent);
                 console.log(`Attendee left: ${name}`);
+
+                // Broadcast leave event to viewer
+                broadcastCaptionUpdate({
+                    type: 'new',
+                    caption: {
+                        Name: name,
+                        Text: 'left the meeting',
+                        Time: currentTime,
+                        Type: 'attendance',
+                        action: 'left',
+                        key: `attendance_${Date.now()}_${name}`
+                    }
+                });
             }
         });
         
@@ -1013,12 +1041,27 @@ function captureChatMessages(skipInitialMessages = false) {
     messages.forEach(msgElement => {
         const messageData = platformConfig.chatCapture.getChatMessageData(msgElement);
         if (!messageData || !messageData.id) return;
-        
+
         // Skip if already captured or marked as pre-existing
         if (chatCaptureState.capturedMessageIds.has(messageData.id)) {
             return;
         }
-        
+
+        // Filter out messages that are older than session start time
+        // This prevents capturing old messages from recurring meetings
+        if (messageData.timestamp && chatCaptureState.sessionStartTime) {
+            const sessionStartMs = chatCaptureState.sessionStartTime.getTime();
+            // Allow 30 second buffer before session start (for timing variations)
+            const bufferMs = 30000;
+            if (messageData.timestamp < (sessionStartMs - bufferMs)) {
+                // This is an old message from before we joined - skip it
+                chatCaptureState.capturedMessageIds.add(messageData.id);
+                skippedCount++;
+                console.log(`[Chat Capture] Skipping old message from ${new Date(messageData.timestamp).toLocaleString()} (before session start ${chatCaptureState.sessionStartTime.toLocaleString()})`);
+                return;
+            }
+        }
+
         // During initial scan, mark all messages as "seen" but don't add to transcript
         if (skipInitialMessages) {
             chatCaptureState.capturedMessageIds.add(messageData.id);
