@@ -21,6 +21,7 @@ const UI_ELEMENTS = {
     meetingType: document.getElementById('meetingType'),
     templateName: document.getElementById('templateName'),
     saveTemplateBtn: document.getElementById('saveTemplateBtn'),
+    editTemplateBtn: document.getElementById('editTemplateBtn'),
     deleteTemplateBtn: document.getElementById('deleteTemplateBtn'),
     customTemplatesGroup: document.getElementById('customTemplatesGroup'),
     aiInstructions: document.getElementById('aiInstructions'),
@@ -660,28 +661,55 @@ async function saveCustomTemplate(name, instructions) {
     alert('Template saved successfully!');
 }
 
+async function editCustomTemplate(templateId) {
+    const { customTemplates = {} } = await chrome.storage.sync.get('customTemplates');
+
+    // Remove the custom_ prefix to get the actual ID
+    const id = templateId.replace('custom_', '');
+
+    if (!customTemplates[id]) {
+        alert('Template not found');
+        return;
+    }
+
+    // Load template data into the form
+    UI_ELEMENTS.templateName.value = id;
+    UI_ELEMENTS.aiInstructions.value = customTemplates[id];
+
+    // Focus on the instructions field for editing
+    UI_ELEMENTS.aiInstructions.focus();
+
+    // Update save button text to indicate editing mode
+    UI_ELEMENTS.saveTemplateBtn.textContent = 'Update Template';
+    UI_ELEMENTS.saveTemplateBtn.style.background = '#0078d4';
+}
+
 async function deleteCustomTemplate(templateId) {
     if (!confirm('Are you sure you want to delete this custom template?')) {
         return;
     }
-    
+
     const { customTemplates = {} } = await chrome.storage.sync.get('customTemplates');
-    
+
     // Remove the custom_ prefix to get the actual ID
     const id = templateId.replace('custom_', '');
-    
+
     delete customTemplates[id];
-    
+
     // Save to storage
     await chrome.storage.sync.set({ customTemplates });
-    
+
     // Reload templates
     await loadCustomTemplates();
-    
-    // Reset selection
+
+    // Reset selection and form
     UI_ELEMENTS.meetingType.value = '';
+    UI_ELEMENTS.editTemplateBtn.style.display = 'none';
     UI_ELEMENTS.deleteTemplateBtn.style.display = 'none';
-    
+    UI_ELEMENTS.templateName.value = '';
+    UI_ELEMENTS.saveTemplateBtn.textContent = 'Save Template';
+    UI_ELEMENTS.saveTemplateBtn.style.background = '#28a745';
+
     alert('Template deleted successfully!');
 }
 
@@ -807,13 +835,18 @@ function setupEventListeners() {
 
     UI_ELEMENTS.meetingType.addEventListener('change', async (e) => {
         const value = e.target.value;
-        
-        // Show/hide delete button for custom templates
-        UI_ELEMENTS.deleteTemplateBtn.style.display = 
-            value.startsWith('custom_') ? 'inline-block' : 'none';
-        
+
+        // Show/hide edit and delete buttons for custom templates
+        const isCustomTemplate = value.startsWith('custom_');
+        UI_ELEMENTS.editTemplateBtn.style.display = isCustomTemplate ? 'inline-block' : 'none';
+        UI_ELEMENTS.deleteTemplateBtn.style.display = isCustomTemplate ? 'inline-block' : 'none';
+
+        // Reset save button to default state when changing templates
+        UI_ELEMENTS.saveTemplateBtn.textContent = 'Save Template';
+        UI_ELEMENTS.saveTemplateBtn.style.background = '#28a745';
+
         if (value) {
-            if (value.startsWith('custom_')) {
+            if (isCustomTemplate) {
                 // Load custom template
                 const { customTemplates = {} } = await chrome.storage.sync.get('customTemplates');
                 const id = value.replace('custom_', '');
@@ -843,6 +876,13 @@ function setupEventListeners() {
         }
     });
     
+    UI_ELEMENTS.editTemplateBtn.addEventListener('click', () => {
+        const selectedValue = UI_ELEMENTS.meetingType.value;
+        if (selectedValue.startsWith('custom_')) {
+            editCustomTemplate(selectedValue);
+        }
+    });
+
     UI_ELEMENTS.deleteTemplateBtn.addEventListener('click', () => {
         const selectedValue = UI_ELEMENTS.meetingType.value;
         if (selectedValue.startsWith('custom_')) {
@@ -1608,6 +1648,17 @@ document.addEventListener('keydown', (e) => {
             UI_ELEMENTS.viewButton.click();
         }
     }
+});
+
+// Listen for download failure notifications from service worker
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.message === 'download_failed') {
+        // Show error notification to user
+        const errorText = message.error || 'Unknown error';
+        alert(`Download failed: ${errorText}\n\nPlease try again or check your connection.`);
+        console.error('[Popup] Download failed:', message.downloadId, errorText);
+    }
+    return false; // No async response
 });
 
 document.addEventListener('DOMContentLoaded', () => {
