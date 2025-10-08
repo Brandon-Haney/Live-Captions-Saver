@@ -4,6 +4,60 @@ let SELECTORS = {};
 let sessionManager = null;
 let currentSessionId = null;
 
+// Storage quota check - prevents write failures
+async function checkStorageQuota() {
+    try {
+        const usage = await chrome.storage.local.getBytesInUse();
+        const limit = chrome.storage.local.QUOTA_BYTES;
+        const percentUsed = usage / limit;
+
+        if (percentUsed > 0.9) { // 90% threshold
+            console.warn(`[Storage] Quota near limit: ${(percentUsed * 100).toFixed(1)}%`);
+            return false;
+        }
+        return true;
+    } catch (error) {
+        console.error('[Storage] Failed to check quota:', error);
+        return true; // Assume OK on error to not block operations
+    }
+}
+
+// Helper function to acquire save lock (prevents race conditions in Zoom multi-frame scenarios)
+async function acquireSaveLock(sessionId) {
+    const lockKey = `save_lock_${sessionId}`;
+    const lockTimeout = 5000; // 5 seconds
+
+    try {
+        const result = await chrome.storage.local.get(lockKey);
+        const existingLock = result[lockKey];
+
+        // Check if lock exists and is still valid
+        if (existingLock && (Date.now() - existingLock) < lockTimeout) {
+            console.log(`[Save Lock] Lock already held for session ${sessionId}`);
+            return false;
+        }
+
+        // Acquire lock
+        await chrome.storage.local.set({ [lockKey]: Date.now() });
+        console.log(`[Save Lock] Lock acquired for session ${sessionId}`);
+        return true;
+    } catch (error) {
+        console.error('[Save Lock] Error acquiring lock:', error);
+        return false;
+    }
+}
+
+// Helper function to release save lock
+async function releaseSaveLock(sessionId) {
+    const lockKey = `save_lock_${sessionId}`;
+    try {
+        await chrome.storage.local.remove(lockKey);
+        console.log(`[Save Lock] Lock released for session ${sessionId}`);
+    } catch (error) {
+        console.error('[Save Lock] Error releasing lock:', error);
+    }
+}
+
 // Initialize platform configuration
 function initializePlatform() {
     platformConfig = getCurrentPlatformConfig();
@@ -11,10 +65,16 @@ function initializePlatform() {
         console.error('[Caption Saver] Unsupported platform');
         return false;
     }
-    
+
+    // Defensive null check for selectors
+    if (!platformConfig.selectors) {
+        console.error('[Caption Saver] Platform config missing selectors');
+        return false;
+    }
+
     SELECTORS = platformConfig.selectors;
     // console.log(`[Caption Saver] Initialized for ${platformConfig.name}`);
-    
+
     // Don't create session on page load - wait until actually in a meeting
     // Session will be created when entering a meeting
     return true;
@@ -48,14 +108,27 @@ function extractMeetingTitle() {
     return title || 'Untitled Meeting';
 }
 
+// Session creation lock to prevent race conditions
+let sessionCreationInProgress = false;
+
 // Create a new session for a new meeting
 async function createNewMeetingSession() {
     try {
+        // Prevent race condition: check if session creation is already in progress
+        if (sessionCreationInProgress) {
+            console.log('[Caption Saver] Session creation already in progress, waiting...');
+            // Wait a bit and return success (the other call will handle it)
+            return true;
+        }
+
         // Don't create a new session if we already have one
         if (currentSessionId) {
             console.log(`[Caption Saver] Session already exists: ${currentSessionId}, not creating duplicate`);
             return true;
         }
+
+        // Acquire lock
+        sessionCreationInProgress = true;
 
         // Clear transcript and attendee data for the new meeting
         transcriptArray.length = 0;
@@ -70,12 +143,10 @@ async function createNewMeetingSession() {
         chatCaptureState.initialScanComplete = false;
         chatCaptureState.initialMessagesSkipped = 0;
         
-        // Reset meeting metadata only if not already set
-        // This preserves the title if we're creating a new session after ending one
-        if (!currentMeetingTitle || currentMeetingTitle === '') {
-            currentMeetingTitle = '';
-            recordingStartTime = null;
-        }
+        // Preserve meeting metadata across session creation
+        // Don't reset title or start time - they should persist until meeting actually ends
+        // The title will be extracted/updated when entering the meeting
+        // Only reset when definitively leaving the meeting (in handleMeetingStateChange)
         
         // Create a new session
         const tabId = window.location.href;
@@ -106,6 +177,9 @@ async function createNewMeetingSession() {
     } catch (error) {
         console.error('[Caption Saver] Failed to create new meeting session:', error);
         return false;
+    } finally {
+        // Always release lock
+        sessionCreationInProgress = false;
     }
 }
 
@@ -144,10 +218,49 @@ let captionRetryInProgress = false;
 // Store current user's name for Google Meet
 window.currentUserName = null;
 
+// --- Duplicate Caption Detection (Time-Windowed) ---
+// Map to track recent captions: key = hash(speaker+text), value = timestamp
+const recentCaptionCache = new Map();
+const CAPTION_CACHE_WINDOW = 30000; // 30 seconds
+
+// Clean old entries from caption cache
+function cleanCaptionCache() {
+    const now = Date.now();
+    for (const [key, timestamp] of recentCaptionCache.entries()) {
+        if (now - timestamp > CAPTION_CACHE_WINDOW) {
+            recentCaptionCache.delete(key);
+        }
+    }
+}
+
+// Check if caption is duplicate using time-windowed cache
+function isDuplicateCaption(speakerName, captionText) {
+    const hash = `${speakerName}:${captionText}`;
+    const now = Date.now();
+
+    // Clean old entries periodically
+    if (recentCaptionCache.size > 100) { // Clean when cache gets large
+        cleanCaptionCache();
+    }
+
+    if (recentCaptionCache.has(hash)) {
+        const lastSeen = recentCaptionCache.get(hash);
+        if (now - lastSeen < CAPTION_CACHE_WINDOW) {
+            return true; // Duplicate within time window
+        }
+    }
+
+    // Not a duplicate - add to cache
+    recentCaptionCache.set(hash, now);
+    return false;
+}
+
 // --- Attendee Tracking State ---
 let attendeeUpdateInterval = null;
 let attendeeObserver = null;
 let backupInterval = null;
+let observerCheckInterval = null;
+let meetingStateCheckInterval = null;
 let attendeeData = {
     allAttendees: new Set(), // All unique attendees who joined
     currentAttendees: new Map(), // Currently in meeting (name -> role)
@@ -170,18 +283,64 @@ let chatCaptureState = {
 };
 
 // --- Safe Message Sending Helpers ---
+let contextInvalidationNotified = false;
+
+function showContextInvalidationNotification() {
+    if (contextInvalidationNotified) return; // Show only once
+    contextInvalidationNotified = true;
+
+    const notification = document.createElement('div');
+    notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: #ff9800;
+        color: white;
+        padding: 16px;
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        z-index: 999999;
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+        max-width: 350px;
+    `;
+    notification.innerHTML = `
+        <strong>Live Captions Saver</strong><br>
+        Extension was updated. Please refresh this page to continue capturing captions.
+        <button style="
+            margin-top: 8px;
+            background: white;
+            color: #ff9800;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        " onclick="location.reload()">Refresh Page</button>
+    `;
+    document.body.appendChild(notification);
+
+    // Auto-remove after 30 seconds
+    setTimeout(() => {
+        notification.remove();
+    }, 30000);
+}
+
 function safeSendMessage(message, callback) {
     try {
         // Check if chrome.runtime is available
         if (!chrome?.runtime?.sendMessage) {
             return;
         }
-        
+
         // Send message with error handling
         chrome.runtime.sendMessage(message, (response) => {
             // Check for errors
             if (chrome.runtime.lastError) {
-                // Extension context invalidated or other errors - ignore silently
+                // Check for context invalidation
+                if (chrome.runtime.lastError.message?.includes('Extension context invalidated')) {
+                    showContextInvalidationNotification();
+                }
                 return;
             }
             if (callback) {
@@ -190,7 +349,9 @@ function safeSendMessage(message, callback) {
         });
     } catch (error) {
         // Extension context invalidated or runtime not available
-        // This can happen during page unload or extension updates
+        if (error.message?.includes('Extension context invalidated')) {
+            showContextInvalidationNotification();
+        }
     }
 }
 
@@ -202,15 +363,22 @@ async function safeSendMessageAsync(message) {
                 resolve(null);
                 return;
             }
-            
+
             chrome.runtime.sendMessage(message, (response) => {
                 if (chrome.runtime.lastError) {
+                    // Check for context invalidation
+                    if (chrome.runtime.lastError.message?.includes('Extension context invalidated')) {
+                        showContextInvalidationNotification();
+                    }
                     resolve(null);
                 } else {
                     resolve(response);
                 }
             });
         } catch (error) {
+            if (error.message?.includes('Extension context invalidated')) {
+                showContextInvalidationNotification();
+            }
             resolve(null);
         }
     });
@@ -329,14 +497,14 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
 
 function getFormattedTimestamp() {
     const now = new Date();
-    
+
     switch(timestampFormat) {
         case '24hr':
-            return now.toLocaleTimeString('en-US', { 
-                hour12: false, 
-                hour: '2-digit', 
-                minute: '2-digit', 
-                second: '2-digit' 
+            return now.toLocaleTimeString('en-US', {
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
             });
         case 'relative':
             if (recordingStartTime) {
@@ -349,11 +517,41 @@ function getFormattedTimestamp() {
             // Fall back to 12hr if no recording start time
         case '12hr':
         default:
-            return now.toLocaleTimeString('en-US', { 
-                hour12: true, 
-                hour: 'numeric', 
-                minute: '2-digit', 
-                second: '2-digit' 
+            return now.toLocaleTimeString('en-US', {
+                hour12: true,
+                hour: 'numeric',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+    }
+}
+
+// Format a specific timestamp (for chat messages with actual timestamp)
+function formatTimestamp(date) {
+    switch(timestampFormat) {
+        case '24hr':
+            return date.toLocaleTimeString('en-US', {
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        case 'relative':
+            if (recordingStartTime) {
+                const elapsed = Math.floor((date - recordingStartTime) / 1000);
+                const hours = Math.floor(elapsed / 3600);
+                const minutes = Math.floor((elapsed % 3600) / 60);
+                const seconds = elapsed % 60;
+                return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            }
+            // Fall back to 12hr if no recording start time
+        case '12hr':
+        default:
+            return date.toLocaleTimeString('en-US', {
+                hour12: true,
+                hour: 'numeric',
+                minute: '2-digit',
+                second: '2-digit'
             });
     }
 }
@@ -379,15 +577,21 @@ function clearElementCache() {
 }
 
 const isUserInMeeting = () => {
-    if (!platformConfig) return false;
-    const inMeeting = platformConfig.isMeetingActive();
-    
-    // Debug logging for Zoom
-    if (platformConfig.name === 'Zoom' && wasInMeeting !== inMeeting) {
-        // console.log(`[Caption Saver] Zoom meeting state changed: ${wasInMeeting} -> ${inMeeting}`);
+    if (!platformConfig || !platformConfig.isMeetingActive) return false;
+
+    try {
+        const inMeeting = platformConfig.isMeetingActive();
+
+        // Debug logging for Zoom
+        if (platformConfig.name === 'Zoom' && wasInMeeting !== inMeeting) {
+            // console.log(`[Caption Saver] Zoom meeting state changed: ${wasInMeeting} -> ${inMeeting}`);
+        }
+
+        return inMeeting;
+    } catch (error) {
+        console.error('[Caption Saver] Error checking meeting state:', error);
+        return false;
     }
-    
-    return inMeeting;
 };
 
 // Helper function to find common prefix length between two strings
@@ -433,6 +637,12 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
 
     transcriptElements.forEach(element => {
         try {
+            // Defensive null check for platformConfig and its methods
+            if (!platformConfig || !platformConfig.getCaptionData) {
+                console.error('[Caption Processing] Platform config or getCaptionData method missing');
+                return;
+            }
+
             const captionData = platformConfig.getCaptionData(element);
             if (!captionData) return;
 
@@ -462,18 +672,11 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                     transcriptArray[lastCaptionIndex].timestamp &&
                     (now - new Date(transcriptArray[lastCaptionIndex].timestamp)) < 10000; // Within 10 seconds
 
-                // Also check for exact duplicates from same speaker in recent history (not just last caption)
-                // Zoom sometimes re-shows the same caption after a pause
-                if (lastCaptionIndex !== -1) {
-                    // Look back through recent captions from the same speaker
-                    for (let i = Math.max(0, transcriptArray.length - 10); i < transcriptArray.length; i++) {
-                        const entry = transcriptArray[i];
-                        if (entry.Name === name && entry.Text === text && entry.Type === 'caption') {
-                            // Found exact duplicate from same speaker - skip it
-                            console.log(`[Zoom] Skipping duplicate caption: "${text.substring(0, 30)}..."`);
-                            return;
-                        }
-                    }
+                // Check for exact duplicates using time-windowed cache
+                // This handles rapid speakers better than checking last 10 captions
+                if (isDuplicateCaption(name, text)) {
+                    console.log(`[Zoom] Skipping duplicate caption: "${text.substring(0, 30)}..."`);
+                    return;
                 }
 
                 if (isContinuation) {
@@ -763,30 +966,44 @@ function updateAttendeeList() {
 
                 // Broadcast join event for both first joins AND rejoins
                 if (isFirstJoin || isRejoin) {
-                    // Add to history
-                    const joinEvent = {
-                        name: cleanName,
-                        role,
-                        action: 'joined',
-                        time: currentTime
-                    };
-                    attendeeData.attendeeHistory.push(joinEvent);
+                    // Check for duplicate join event in recent history (within last 5 seconds)
+                    const recentJoin = attendeeData.attendeeHistory
+                        .slice(-10) // Check last 10 events
+                        .find(event =>
+                            event.name === cleanName &&
+                            event.action === 'joined' &&
+                            (new Date(currentTime) - new Date(event.time)) < 5000 // Within 5 seconds
+                        );
 
-                    const logMessage = isRejoin ? `Attendee rejoined: ${cleanName} (${role})` : `New attendee detected: ${cleanName} (${role})`;
-                    console.log(logMessage);
-
-                    // Broadcast join event to viewer
-                    broadcastCaptionUpdate({
-                        type: 'new',
-                        caption: {
-                            Name: cleanName,
-                            Text: `joined the meeting${role ? ' (' + role + ')' : ''}`,
-                            Time: currentTime,
-                            Type: 'attendance',
+                    if (recentJoin) {
+                        // Skip duplicate join event
+                        console.log(`Skipping duplicate join event for ${cleanName}`);
+                    } else {
+                        // Add to history
+                        const joinEvent = {
+                            name: cleanName,
+                            role,
                             action: 'joined',
-                            key: `attendance_${Date.now()}_${cleanName}`
-                        }
-                    });
+                            time: currentTime
+                        };
+                        attendeeData.attendeeHistory.push(joinEvent);
+
+                        const logMessage = isRejoin ? `Attendee rejoined: ${cleanName} (${role})` : `New attendee detected: ${cleanName} (${role})`;
+                        console.log(logMessage);
+
+                        // Broadcast join event to viewer
+                        broadcastCaptionUpdate({
+                            type: 'new',
+                            caption: {
+                                Name: cleanName,
+                                Text: `joined the meeting${role ? ' (' + role + ')' : ''}`,
+                                Time: currentTime,
+                                Type: 'attendance',
+                                action: 'joined',
+                                key: `attendance_${Date.now()}_${cleanName}`
+                            }
+                        });
+                    }
                 }
             }
         });
@@ -794,26 +1011,40 @@ function updateAttendeeList() {
         // Check for attendees who left
         previousAttendees.forEach(name => {
             if (!attendeeData.currentAttendees.has(name)) {
-                const leaveEvent = {
-                    name,
-                    action: 'left',
-                    time: currentTime
-                };
-                attendeeData.attendeeHistory.push(leaveEvent);
-                console.log(`Attendee left: ${name}`);
+                // Check for duplicate leave event in recent history (within last 5 seconds)
+                const recentLeave = attendeeData.attendeeHistory
+                    .slice(-10) // Check last 10 events
+                    .find(event =>
+                        event.name === name &&
+                        event.action === 'left' &&
+                        (new Date(currentTime) - new Date(event.time)) < 5000 // Within 5 seconds
+                    );
 
-                // Broadcast leave event to viewer
-                broadcastCaptionUpdate({
-                    type: 'new',
-                    caption: {
-                        Name: name,
-                        Text: 'left the meeting',
-                        Time: currentTime,
-                        Type: 'attendance',
+                if (recentLeave) {
+                    // Skip duplicate leave event
+                    console.log(`Skipping duplicate leave event for ${name}`);
+                } else {
+                    const leaveEvent = {
+                        name,
                         action: 'left',
-                        key: `attendance_${Date.now()}_${name}`
-                    }
-                });
+                        time: currentTime
+                    };
+                    attendeeData.attendeeHistory.push(leaveEvent);
+                    console.log(`Attendee left: ${name}`);
+
+                    // Broadcast leave event to viewer
+                    broadcastCaptionUpdate({
+                        type: 'new',
+                        caption: {
+                            Name: name,
+                            Text: 'left the meeting',
+                            Time: currentTime,
+                            Type: 'attendance',
+                            action: 'left',
+                            key: `attendance_${Date.now()}_${name}`
+                        }
+                    });
+                }
             }
         });
         
@@ -1120,11 +1351,17 @@ function captureChatMessages(skipInitialMessages = false) {
         // console.log('[Chat Capture] Not supported on this platform');
         return 0;
     }
-    
+
+    // Defensive null check for chat capture methods
+    if (!platformConfig.chatCapture.getChatMessages || !platformConfig.chatCapture.getChatMessageData) {
+        console.error('[Chat Capture] Required chat capture methods missing');
+        return 0;
+    }
+
     const messages = platformConfig.chatCapture.getChatMessages();
     let newCount = 0;
     let skippedCount = 0;
-    
+
     messages.forEach(msgElement => {
         const messageData = platformConfig.chatCapture.getChatMessageData(msgElement);
         if (!messageData || !messageData.id) return;
@@ -1157,11 +1394,13 @@ function captureChatMessages(skipInitialMessages = false) {
         }
         
         // Create chat message with consistent format
-        // Use our formatted timestamp instead of the one from the element
+        // Use the actual message timestamp from messageData for chronological sorting
+        const messageTime = messageData.timestamp ? new Date(messageData.timestamp) : new Date();
         const chatMessage = {
             Name: messageData.author,
             Text: messageData.text,
-            Time: getFormattedTimestamp(), // Use our consistent timestamp format
+            Time: formatTimestamp(messageTime), // Format the message's actual timestamp
+            timestamp: messageTime.toISOString(), // ISO format for sorting in service worker
             Type: 'chat',  // Mark as chat message
             key: `chat_${messageData.id}`
         };
@@ -1521,7 +1760,7 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
             const { autoEnableCaptions } = await chrome.storage.sync.get('autoEnableCaptions');
             if (autoEnableCaptions) {
                 console.log('[Caption Saver] Checking if captions need to be auto-enabled...');
-                const captionsEnabled = platformConfig.areCaptionsEnabled ? platformConfig.areCaptionsEnabled() : false;
+                const captionsEnabled = (platformConfig && platformConfig.areCaptionsEnabled) ? platformConfig.areCaptionsEnabled() : false;
 
                 if (!captionsEnabled) {
                     console.log('[Caption Saver] Captions not enabled, attempting to enable...');
@@ -1568,19 +1807,24 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                     const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
                     if (autoSaveOnEnd) {
                         console.log('[Zoom Main Frame] Converting backup to meeting ended format for auto-save');
-                        await chrome.storage.local.set({
-                            zoomMeetingEnded: {
-                                transcript: transcriptBackup.transcript,
-                                meetingTitle: transcriptBackup.meetingTitle || currentMeetingTitle || 'Untitled Meeting',
-                                recordingStartTime: transcriptBackup.recordingStartTime || new Date().toISOString(),
-                                attendeeReport: transcriptBackup.attendeeData || { allAttendees: [], totalUniqueAttendees: 0 },
-                                timestamp: new Date().toISOString(),
-                                shouldAutoSave: true,
-                                sessionId: transcriptBackup.sessionId || currentSessionId  // Include session ID
-                            }
-                        });
-                        console.log('[Zoom Main Frame] Triggering auto-save with backup data');
-                        await safeSendMessageAsync({ message: "zoom_meeting_ended" });
+                        const hasSpace = await checkStorageQuota();
+                        if (hasSpace) {
+                            await chrome.storage.local.set({
+                                zoomMeetingEnded: {
+                                    transcript: transcriptBackup.transcript,
+                                    meetingTitle: transcriptBackup.meetingTitle || currentMeetingTitle || 'Untitled Meeting',
+                                    recordingStartTime: transcriptBackup.recordingStartTime || new Date().toISOString(),
+                                    attendeeReport: transcriptBackup.attendeeData || { allAttendees: [], totalUniqueAttendees: 0 },
+                                    timestamp: new Date().toISOString(),
+                                    shouldAutoSave: true,
+                                    sessionId: transcriptBackup.sessionId || currentSessionId  // Include session ID
+                                }
+                            });
+                            console.log('[Zoom Main Frame] Triggering auto-save with backup data');
+                            await safeSendMessageAsync({ message: "zoom_meeting_ended" });
+                        } else {
+                            console.warn('[Zoom] Skipping backup conversion - storage quota exceeded');
+                        }
                     }
                 } else {
                     console.log('[Zoom Main Frame] No caption data found from iframe or backup');
@@ -1629,32 +1873,53 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
             const frameType = isMainFrame ? 'Main Frame' : 'Iframe';
             console.log(`[Zoom ${frameType}] Processing meeting end save with ${transcriptArray.length} items`);
 
-            // Save to local storage immediately
+            // Save to local storage immediately with lock coordination
             (async () => {
-                const attendeeReport = await getAttendeeReport();
-                const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
-                console.log(`[Zoom ${frameType}] Saving meeting data - Transcript: ${transcriptArray.length} items, Attendees: ${attendeeReport?.totalUniqueAttendees || 0}, AutoSave: ${autoSaveOnEnd}`);
+                // Try to acquire save lock to prevent race condition between frames
+                const lockSessionId = currentSessionId || 'zoom_meeting';
+                const lockAcquired = await acquireSaveLock(lockSessionId);
 
-                // Always save the data for Zoom
-                await chrome.storage.local.set({
-                    zoomMeetingEnded: {
-                        transcript: getCleanTranscript(),
-                        meetingTitle: currentMeetingTitle || 'Untitled Meeting',
-                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
-                        attendeeReport: attendeeReport,
-                        timestamp: new Date().toISOString(),
-                        shouldAutoSave: autoSaveOnEnd !== false,  // Default to true if not explicitly false
-                        sessionId: currentSessionId  // Include session ID for alias lookup
+                if (!lockAcquired) {
+                    console.log(`[Zoom ${frameType}] Another frame is handling save, skipping...`);
+                    return;
+                }
+
+                try {
+                    const attendeeReport = await getAttendeeReport();
+                    const { autoSaveOnEnd } = await chrome.storage.sync.get('autoSaveOnEnd');
+                    console.log(`[Zoom ${frameType}] Saving meeting data - Transcript: ${transcriptArray.length} items, Attendees: ${attendeeReport?.totalUniqueAttendees || 0}, AutoSave: ${autoSaveOnEnd}`);
+
+                    // Always save the data for Zoom - check quota first
+                    const hasSpace = await checkStorageQuota();
+                    if (hasSpace) {
+                        await chrome.storage.local.set({
+                            zoomMeetingEnded: {
+                                transcript: getCleanTranscript(),
+                                meetingTitle: currentMeetingTitle || 'Untitled Meeting',
+                                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                                attendeeReport: attendeeReport,
+                                timestamp: new Date().toISOString(),
+                                shouldAutoSave: autoSaveOnEnd !== false,  // Default to true if not explicitly false
+                                sessionId: currentSessionId  // Include session ID for alias lookup
+                            }
+                        });
+                    } else {
+                        console.warn('[Zoom] Skipping meeting end save - storage quota exceeded');
                     }
-                });
 
-                // If we're the iframe, also try to trigger auto-save immediately
-                if (!isMainFrame && autoSaveOnEnd !== false) {
-                    console.log(`[Zoom ${frameType}] Iframe triggering auto-save directly`);
-                    const response = await safeSendMessageAsync({
-                        message: "zoom_meeting_ended"
-                    });
-                    console.log(`[Zoom ${frameType}] Service worker response:`, response);
+                    // If we're the iframe, also try to trigger auto-save immediately
+                    if (!isMainFrame && autoSaveOnEnd !== false) {
+                        console.log(`[Zoom ${frameType}] Iframe triggering auto-save directly`);
+                        const response = await safeSendMessageAsync({
+                            message: "zoom_meeting_ended"
+                        });
+                        console.log(`[Zoom ${frameType}] Service worker response:`, response);
+                    }
+                } catch (error) {
+                    console.error(`[Zoom ${frameType}] Error saving meeting data:`, error);
+                } finally {
+                    // Always release lock
+                    await releaseSaveLock(lockSessionId);
                 }
             })();
         }
@@ -1833,6 +2098,13 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     if (!nowInMeeting) {
         stopCaptureSession();
         stopAttendeeTracking();
+
+        // Reset meeting metadata now that meeting has definitely ended
+        // This ensures next meeting starts fresh
+        console.log('[Caption Saver] Meeting ended - clearing metadata');
+        currentMeetingTitle = '';
+        recordingStartTime = null;
+
         return;
     }
     
@@ -1920,7 +2192,7 @@ function ensureObserverIsActive() {
     if (!capturing || !platformConfig) return;
 
     let captionContainer;
-    if (platformConfig.name === 'Zoom') {
+    if (platformConfig && platformConfig.name === 'Zoom') {
         // For Zoom, observe the body since captions are added/removed frequently
         captionContainer = document.body;
     } else {
@@ -2060,32 +2332,42 @@ function startPeriodicBackup() {
                             }
                         });
                     } else {
-                        // Fallback to old storage method
-                        await chrome.storage.local.set({
-                            transcriptBackup: {
-                                transcript: transcriptArray,
-                                meetingTitle: currentMeetingTitle,
-                                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
-                                lastBackup: new Date().toISOString(),
-                                attendeeData: attendeeData
-                            }
-                        });
+                        // Fallback to old storage method - check quota first
+                        const hasSpace = await checkStorageQuota();
+                        if (hasSpace) {
+                            await chrome.storage.local.set({
+                                transcriptBackup: {
+                                    transcript: transcriptArray,
+                                    meetingTitle: currentMeetingTitle,
+                                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
+                                    lastBackup: new Date().toISOString(),
+                                    attendeeData: attendeeData
+                                }
+                            });
+                        } else {
+                            console.warn('[Backup] Skipping backup - storage quota exceeded');
+                        }
                     }
 
                     // **IMPORTANT FIX**: For Zoom, ALWAYS save a backup even when we have a session
                     // This ensures data persists when iframe is destroyed on meeting end
                     if (platformConfig && platformConfig.name === 'Zoom') {
-                        await chrome.storage.local.set({
-                            transcriptBackup: {
-                                transcript: transcriptArray,
-                                meetingTitle: currentMeetingTitle,
-                                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
-                                lastBackup: new Date().toISOString(),
-                                attendeeData: attendeeData,
-                                sessionId: currentSessionId // Include session ID for better tracking
-                            }
-                        });
-                        // console.log(`[Zoom Backup] Saved ${transcriptArray.length} captions to backup storage`);
+                        const hasSpace = await checkStorageQuota();
+                        if (hasSpace) {
+                            await chrome.storage.local.set({
+                                transcriptBackup: {
+                                    transcript: transcriptArray,
+                                    meetingTitle: currentMeetingTitle,
+                                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
+                                    lastBackup: new Date().toISOString(),
+                                    attendeeData: attendeeData,
+                                    sessionId: currentSessionId // Include session ID for better tracking
+                                }
+                            });
+                            // console.log(`[Zoom Backup] Saved ${transcriptArray.length} captions to backup storage`);
+                        } else {
+                            console.warn('[Zoom Backup] Skipping backup - storage quota exceeded');
+                        }
                     }
                     // console.log(`[Caption Saver] Backup saved: ${transcriptArray.length} entries`);
                 }
@@ -2101,10 +2383,10 @@ function startPeriodicBackup() {
     }, 30000); // 30 seconds
 }
 
-function stopCaptureSession() {
+async function stopCaptureSession() {
     // Always update badge to off when stopping, even if not currently capturing
     updateBadgeStatus(false);
-    
+
     if (!capturing) return;
 
     console.log("Captions turned off or meeting ended. Capture stopped. Data preserved.");
@@ -2114,18 +2396,18 @@ function stopCaptureSession() {
         observer = null;
     }
     observedElement = null;
-    
+
     // Stop chat capture if it's running
     if (chatCaptureState.enabled) {
         stopChatCapture();
     }
-    
+
     // Stop periodic backup
     if (backupInterval) {
         clearInterval(backupInterval);
         backupInterval = null;
     }
-    
+
     // Final backup before stopping
     if (transcriptArray.length > 0) {
         if (currentSessionId) {
@@ -2145,16 +2427,21 @@ function stopCaptureSession() {
                 }
             });
         } else {
-            // Fallback to old storage method
-            chrome.storage.local.set({
-                transcriptBackup: {
-                    transcript: transcriptArray,
-                    meetingTitle: currentMeetingTitle || 'Untitled Meeting',
-                    recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
-                    lastBackup: new Date().toISOString(),
-                    attendeeData: attendeeData
-                }
-            });
+            // Fallback to old storage method - check quota first
+            const hasSpace = await checkStorageQuota();
+            if (hasSpace) {
+                chrome.storage.local.set({
+                    transcriptBackup: {
+                        transcript: transcriptArray,
+                        meetingTitle: currentMeetingTitle || 'Untitled Meeting',
+                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
+                        lastBackup: new Date().toISOString(),
+                        attendeeData: attendeeData
+                    }
+                });
+            } else {
+                console.warn('[Backup] Skipping backup - storage quota exceeded');
+            }
         }
         
         // Don't save to session history here - let auto-save handle it to prevent duplicates
@@ -2331,10 +2618,16 @@ function initializeEventDrivenSystem() {
     setupCaptionsObserver();
     
     // Periodically check observer status (much less frequent than before)
-    setInterval(ensureObserverIsActive, TIMING.OBSERVER_CHECK_INTERVAL);
+    if (observerCheckInterval) {
+        clearInterval(observerCheckInterval);
+    }
+    observerCheckInterval = setInterval(ensureObserverIsActive, TIMING.OBSERVER_CHECK_INTERVAL);
 
     // Periodically check meeting state for platforms like Zoom that may not trigger mutations
-    setInterval(() => {
+    if (meetingStateCheckInterval) {
+        clearInterval(meetingStateCheckInterval);
+    }
+    meetingStateCheckInterval = setInterval(() => {
         handleMeetingStateChange();
     }, TIMING.MAIN_LOOP_INTERVAL);
 
@@ -2366,7 +2659,29 @@ function cleanupObservers() {
         document.removeEventListener('click', leaveButtonListener, true);
         leaveButtonListener = null;
     }
-    
+
+    // Clear all intervals (memory leak prevention)
+    if (observerCheckInterval) {
+        clearInterval(observerCheckInterval);
+        observerCheckInterval = null;
+    }
+    if (meetingStateCheckInterval) {
+        clearInterval(meetingStateCheckInterval);
+        meetingStateCheckInterval = null;
+    }
+    if (backupInterval) {
+        clearInterval(backupInterval);
+        backupInterval = null;
+    }
+    if (attendeeUpdateInterval) {
+        clearInterval(attendeeUpdateInterval);
+        attendeeUpdateInterval = null;
+    }
+    if (chatCaptureState.chatCheckInterval) {
+        clearInterval(chatCaptureState.chatCheckInterval);
+        chatCaptureState.chatCheckInterval = null;
+    }
+
     // Clear all debounce timers
     if (meetingStateDebounceTimer) {
         clearTimeout(meetingStateDebounceTimer);
@@ -2380,13 +2695,17 @@ function cleanupObservers() {
         clearTimeout(autoEnableDebounceTimer);
         autoEnableDebounceTimer = null;
     }
-    
+    if (badgeUpdateTimer) {
+        clearTimeout(badgeUpdateTimer);
+        badgeUpdateTimer = null;
+    }
+
     // Reset auto-enable state
     autoEnableInProgress = false;
-    
+
     // Stop attendee tracking
     stopAttendeeTracking();
-    
+
     clearElementCache();
 }
 
@@ -2397,16 +2716,20 @@ window.addEventListener('beforeunload', () => {
         const isMainFrame = window === window.top;
         if (!isMainFrame) {
             console.log('[Zoom Iframe] Page unloading, saving transcript data');
-            // Synchronously save data
-            const attendeeReport = getAllAttendees(); // Use sync version
+            // Synchronously save data - extract attendees directly
+            const attendeeReport = {
+                allAttendees: Array.from(attendeeData.allAttendees),
+                totalUniqueAttendees: attendeeData.allAttendees.size,
+                attendeeHistory: attendeeData.attendeeHistory
+            };
             chrome.storage.local.set({
                 zoomMeetingEnded: {
                     transcript: getCleanTranscript(),
                     meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                     recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
                     attendeeReport: {
-                        allAttendees: attendeeReport,
-                        totalUniqueAttendees: attendeeReport.length,
+                        allAttendees: attendeeReport.allAttendees,
+                        totalUniqueAttendees: attendeeReport.totalUniqueAttendees,
                         attendeeHistory: attendeeHistory
                     },
                     timestamp: new Date().toISOString(),

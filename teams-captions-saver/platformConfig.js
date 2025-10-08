@@ -289,7 +289,36 @@ const PLATFORM_CONFIGS = {
                     }
                 }
             }
-            
+
+            // Method 3: Check profile button in header (fallback for different layouts)
+            const profileButtons = document.querySelectorAll('[data-tooltip*="Account"], [aria-label*="Account"], [aria-label*="Google Account"]');
+            for (const profileButton of profileButtons) {
+                const ariaLabel = profileButton.getAttribute('aria-label');
+                if (ariaLabel) {
+                    // Extract name from "Google Account: Name (email@domain.com)" pattern
+                    const nameMatch = ariaLabel.match(/Google Account:\s*([^(]+)/i) || ariaLabel.match(/^([^(,]+)/);
+                    if (nameMatch && nameMatch[1]) {
+                        const name = nameMatch[1].trim();
+                        if (name && name !== 'You' && !name.includes('@')) {
+                            window.currentUserName = name;
+                            console.log('[Caption Saver] Detected user name from profile button:', name);
+                            return name;
+                        }
+                    }
+                }
+            }
+
+            // Method 4: Try to find name in top bar user info
+            const userButtons = document.querySelectorAll('[data-ved] img[alt], .gb_d img[alt]');
+            for (const img of userButtons) {
+                const alt = img.getAttribute('alt');
+                if (alt && alt !== 'You' && !alt.includes('@') && alt.length > 0 && alt.length < 50) {
+                    window.currentUserName = alt;
+                    console.log('[Caption Saver] Detected user name from user button:', alt);
+                    return alt;
+                }
+            }
+
             return window.currentUserName || 'You';
         },
         
@@ -1235,15 +1264,33 @@ const PLATFORM_CONFIGS = {
             // Check if captions were successfully enabled by looking at UI state
             const captionsEnabled = this.areCaptionsEnabled();
 
+            const MAX_RETRIES = 5;
+
             // If captions not enabled and we haven't exceeded max retries, try again
-            if (!captionsEnabled && retryCount < 3) {
-                console.log(`[Caption Saver] Captions not enabled, retrying (attempt ${retryCount + 2}/4)...`);
+            if (!captionsEnabled && retryCount < MAX_RETRIES) {
+                console.log(`[Caption Saver] Captions not enabled, retrying (attempt ${retryCount + 2}/${MAX_RETRIES + 1})...`);
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 return this.enableCaptions(retryCount + 1);
             }
 
             if (!captionsEnabled) {
-                console.log('[Caption Saver] Could not enable captions on Zoom after 4 attempts');
+                console.error(`[Caption Saver] Failed to enable captions on Zoom after ${MAX_RETRIES + 1} attempts`);
+                console.error('[Caption Saver] Please enable captions manually using the More button -> Captions');
+
+                // Try to show user notification if chrome.runtime is available
+                try {
+                    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+                        chrome.runtime.sendMessage({
+                            action: 'showNotification',
+                            title: 'Live Captions Saver',
+                            message: 'Unable to auto-enable captions. Please enable manually via More → Captions.'
+                        }).catch(() => {
+                            // Silent fail - notification not critical
+                        });
+                    }
+                } catch (e) {
+                    // Silent fail - notification not critical
+                }
             } else {
                 console.log('[Caption Saver] Zoom captions successfully enabled (UI indicates captions are on)');
             }

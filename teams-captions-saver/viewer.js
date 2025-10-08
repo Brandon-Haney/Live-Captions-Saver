@@ -1,3 +1,18 @@
+// Global interval references for cleanup
+let connectionCheckInterval = null;
+
+// Cleanup function to prevent memory leaks
+function cleanupViewerIntervals() {
+    if (connectionCheckInterval) {
+        clearInterval(connectionCheckInterval);
+        connectionCheckInterval = null;
+    }
+}
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', cleanupViewerIntervals);
+window.addEventListener('unload', cleanupViewerIntervals);
+
 // Wait for DOM to be ready before setting up image modal
 document.addEventListener('DOMContentLoaded', () => {
     // Image modal functions
@@ -69,6 +84,24 @@ document.addEventListener('DOMContentLoaded', () => {
         error: (...args) => console.error(...args), // Always log errors
         info: (...args) => console.log(...args) // Always log important info
     };
+
+    // --- Security: URL Sanitization ---
+    function sanitizeUrl(url) {
+        if (!url) return '';
+
+        try {
+            const parsed = new URL(url);
+            // Only allow http(s) and data protocols for images
+            if (!['http:', 'https:', 'data:'].includes(parsed.protocol)) {
+                console.warn('[sanitizeUrl] Blocked unsafe URL protocol:', parsed.protocol);
+                return '';
+            }
+            return url;
+        } catch (error) {
+            console.error('[sanitizeUrl] Invalid URL:', url, error);
+            return '';
+        }
+    }
 
     // --- DOM Elements ---
     const captionsContainer = document.getElementById('captions-container');
@@ -151,28 +184,36 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // --- Speaker Alias Functions ---
     async function loadSessionAliases() {
-        if (!viewerSessionId) return;
-        
+        if (!viewerSessionId) {
+            debug.log('[Viewer] No session ID, skipping alias load');
+            return;
+        }
+
         try {
             const key = `aliases_${viewerSessionId}`;
             const result = await chrome.storage.local.get(key);
             speakerAliases = result[key] || {};
             debug.log(`[Viewer] Loaded aliases for session ${viewerSessionId}:`, speakerAliases);
         } catch (error) {
-            console.error('Error loading session aliases:', error);
+            console.error('[Viewer] Failed to load session aliases:', error);
             speakerAliases = {};
         }
     }
-    
+
     async function saveSessionAliases() {
-        if (!viewerSessionId) return;
-        
+        if (!viewerSessionId) {
+            console.error('[Viewer] Cannot save aliases: No session ID');
+            return;
+        }
+
         try {
             const key = `aliases_${viewerSessionId}`;
             await chrome.storage.local.set({ [key]: speakerAliases });
             debug.log(`[Viewer] Saved aliases for session ${viewerSessionId}:`, speakerAliases);
         } catch (error) {
-            console.error('Error saving session aliases:', error);
+            console.error('[Viewer] Failed to save session aliases:', error);
+            // Show user notification for save failures
+            showNotification('Failed to save speaker alias', 'error');
         }
     }
     
@@ -306,14 +347,44 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Helper Functions ---
     function highlightSearchTerm(element, searchTerm) {
         if (!searchTerm) return;
-        
+
         const textElement = element.querySelector('.text');
         if (!textElement) return;
-        
+
+        // Security: Use textContent for safe DOM manipulation instead of innerHTML
+        // This prevents XSS from malicious search terms
         const text = textElement.textContent;
-        const regex = new RegExp(`(${searchTerm})`, 'gi');
-        const highlightedText = text.replace(regex, '<mark>$1</mark>');
-        textElement.innerHTML = highlightedText;
+
+        // Escape special regex characters in search term
+        const escapedSearch = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(`(${escapedSearch})`, 'gi');
+
+        // Clear existing content safely
+        textElement.textContent = '';
+
+        // Split text and add marks safely using DOM methods
+        let lastIndex = 0;
+        let match;
+        const regexGlobal = new RegExp(`(${escapedSearch})`, 'gi');
+
+        while ((match = regexGlobal.exec(text)) !== null) {
+            // Add text before match
+            if (match.index > lastIndex) {
+                textElement.appendChild(document.createTextNode(text.substring(lastIndex, match.index)));
+            }
+
+            // Add highlighted match
+            const mark = document.createElement('mark');
+            mark.textContent = match[0];
+            textElement.appendChild(mark);
+
+            lastIndex = match.index + match[0].length;
+        }
+
+        // Add remaining text
+        if (lastIndex < text.length) {
+            textElement.appendChild(document.createTextNode(text.substring(lastIndex)));
+        }
     }
     
     // --- Live Update Functions ---
@@ -557,17 +628,23 @@ document.addEventListener('DOMContentLoaded', () => {
             // Create attachment thumbnails with data attributes instead of onclick
             attachmentsHTML = `
                 <div class="attachment-container">
-                    ${item.attachments.map((att, attIndex) => `
+                    ${item.attachments.map((att, attIndex) => {
+                        const safeUrl = sanitizeUrl(att.url);
+                        if (!safeUrl) {
+                            console.warn('[Viewer] Blocked unsafe attachment URL:', att.url);
+                            return '';
+                        }
+                        return `
                         <div class="attachment-thumbnail"
-                             data-image-url="${escapeHtml(att.url)}"
+                             data-image-url="${escapeHtml(safeUrl)}"
                              data-image-caption="${escapeHtml(att.filename || att.alt)}"
                              title="${escapeHtml(att.filename || att.alt)}">
-                            <img src="${escapeHtml(att.url)}"
+                            <img src="${escapeHtml(safeUrl)}"
                                  alt="${escapeHtml(att.alt || 'Image attachment')}"
                                  onerror="this.parentElement.style.display='none'">
                             <div class="attachment-filename">${escapeHtml(att.filename || 'image')}</div>
-                        </div>
-                    `).join('')}
+                        </div>`;
+                    }).join('')}
                 </div>
             `;
         }
@@ -777,27 +854,26 @@ document.addEventListener('DOMContentLoaded', () => {
         const index = parseInt(captionDiv.dataset.index, 10);
         const captionData = allCaptions[index];
 
-        if (!captionData) return;
+        if (!captionData) {
+            console.error('[Viewer] No caption data found at index:', index);
+            return;
+        }
 
         const textToCopy = `[${captionData.Time}] ${captionData.Name}: ${captionData.Text}`;
         try {
             await navigator.clipboard.writeText(textToCopy);
             copyButton.classList.add('copied');
             copyButton.querySelector('.tooltip-text').textContent = 'Copied!';
-            
+
             setTimeout(() => {
                 copyButton.classList.remove('copied');
                 copyButton.querySelector('.tooltip-text').textContent = 'Copy';
-            }, 1500); // TODO: Extract to TIMING constant
+            }, 1500);
         } catch (err) {
-            console.error('Failed to copy text: ', err);
+            console.error('[Viewer] Failed to copy text:', err);
             copyButton.querySelector('.tooltip-text').textContent = 'Copy failed';
-            // Show user-friendly error
-            const errorMsg = document.createElement('div');
-            errorMsg.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #dc3545; color: white; padding: 10px; border-radius: 4px; z-index: 1000;';
-            errorMsg.textContent = 'Failed to copy text to clipboard';
-            document.body.appendChild(errorMsg);
-            setTimeout(() => document.body.removeChild(errorMsg), 3000);
+            // Show user-friendly error using existing notification system
+            showNotification(`Failed to copy: ${err.message}`, 'error');
         }
     }
     
@@ -832,60 +908,65 @@ document.addEventListener('DOMContentLoaded', () => {
     
     async function handleCopyAllClick() {
         const visibleCaptions = getVisibleCaptions();
-        
+
         if (visibleCaptions.length === 0) {
             showNotification('No visible captions to copy', 'warning');
             return;
         }
-        
+
         const textToCopy = formatTranscriptForExport(visibleCaptions);
-        
+
         try {
             await navigator.clipboard.writeText(textToCopy);
             showButtonSuccess(copyAllBtn, 'Copied!', 'Copy All');
             showNotification(`Copied ${visibleCaptions.length} caption(s) to clipboard`, 'success');
         } catch (err) {
-            console.error('Failed to copy transcript: ', err);
-            showNotification('Failed to copy to clipboard', 'error');
+            console.error('[Viewer] Failed to copy all captions:', err);
+            showNotification(`Failed to copy to clipboard: ${err.message}`, 'error');
         }
     }
     
     async function handleSaveAllClick() {
         const visibleCaptions = getVisibleCaptions();
-        
+
         if (visibleCaptions.length === 0) {
             showNotification('No visible captions to save', 'warning');
             return;
         }
-        
+
         // Create download
         const content = formatTranscriptForExport(visibleCaptions);
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
         const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
         const filename = `filtered-transcript-${dateStr}-${timeStr}.txt`;
-        
+
         try {
             const blob = new Blob([content], { type: 'text/plain' });
             const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            
-            showButtonSuccess(saveAllBtn, 'Saved!', 'Save');
-            showNotification(`Saved ${visibleCaptions.length} caption(s) to ${filename}`, 'success');
-            
-            // Update meeting ended message to show it's been saved
-            if (document.getElementById('meeting-ended-message')) {
-                await addMeetingEndedMessage(true);
+
+            try {
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+
+                showButtonSuccess(saveAllBtn, 'Saved!', 'Save');
+                showNotification(`Saved ${visibleCaptions.length} caption(s) to ${filename}`, 'success');
+
+                // Update meeting ended message to show it's been saved
+                if (document.getElementById('meeting-ended-message')) {
+                    await addMeetingEndedMessage(true);
+                }
+            } finally {
+                // Always revoke the blob URL to prevent memory leak
+                URL.revokeObjectURL(url);
             }
         } catch (err) {
-            console.error('Failed to save transcript: ', err);
-            showNotification('Failed to save file', 'error');
+            console.error('[Viewer] Failed to save transcript:', err);
+            showNotification(`Failed to save file: ${err.message}`, 'error');
         }
     }
     
@@ -1057,13 +1138,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 const script = document.createElement('script');
                 script.src = chrome.runtime.getURL('sessionManager.js');
                 document.head.appendChild(script);
-                
-                await new Promise(resolve => {
+
+                await new Promise((resolve, reject) => {
                     script.onload = resolve;
+                    script.onerror = () => reject(new Error('Failed to load sessionManager.js'));
                     setTimeout(resolve, 200);
                 });
             }
-            
+
             const sessionManager = new SessionManager();
             const sessions = await sessionManager.getSessionIndex();
             
@@ -1126,13 +1208,18 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             // Check if we have captions passed via storage (from popup)
             const result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId', 'meetingTitle', 'platform']);
+
+            if (!result) {
+                throw new Error('Failed to load data from storage');
+            }
+
             let transcript = result.captionsToView;
             let viewerData = result.viewerData;
-            
+
             // Store the session ID for filtering live updates
             viewerSessionId = result.viewerSessionId;
             debug.log(`[Viewer] Initialized with session ID: ${viewerSessionId}`);
-            
+
             // Use viewerData if captionsToView is not available
             if (!transcript && viewerData && viewerData.transcriptArray) {
                 transcript = viewerData.transcriptArray;
@@ -1206,13 +1293,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 setupLiveStreaming();
             }
         } catch (error) {
-            console.error("Error loading captions:", error);
-            captionsContainer.innerHTML = '<p class="status-message">Unable to load captions. Please try opening the extension popup again.</p>';
+            console.error("[Viewer] Failed to initialize:", error);
+            captionsContainer.innerHTML = `<p class="status-message">Unable to load captions: ${error.message}<br><br>Please try opening the extension popup again.</p>`;
         } finally {
             // Clean up storage to prevent re-displaying on next open
             // But keep viewerSessionId for filtering live updates
-            chrome.storage.local.remove(['captionsToView', 'viewerData']);
-            // Note: viewerSessionId is kept for the duration of this viewer session
+            try {
+                await chrome.storage.local.remove(['captionsToView', 'viewerData']);
+                // Note: viewerSessionId is kept for the duration of this viewer session
+            } catch (cleanupError) {
+                console.error('[Viewer] Failed to cleanup storage:', cleanupError);
+                // Non-critical error, continue
+            }
         }
     }
     
@@ -1383,7 +1475,10 @@ document.addEventListener('DOMContentLoaded', () => {
         setupAutoScrollToggle();
         
         // Heartbeat to check connection
-        setInterval(checkConnectionStatus, 5000);
+        if (connectionCheckInterval) {
+            clearInterval(connectionCheckInterval);
+        }
+        connectionCheckInterval = setInterval(checkConnectionStatus, 5000);
     }
     
     function setupAutoScrollToggle() {
@@ -1454,40 +1549,44 @@ document.addEventListener('DOMContentLoaded', () => {
     
     async function checkConnectionStatus() {
         if (!isLiveStreaming) return;
-        
-        // Check if we're still receiving updates
-        const timeSinceLastUpdate = Date.now() - lastUpdateTime;
-        if (timeSinceLastUpdate > 60000) { // 60 seconds without updates (increased from 30)
-            isLiveStreaming = false;
-            updateLiveIndicator();
-            console.log("Lost connection to live stream");
-            
-            // Add "Meeting Ended" message
-            await addMeetingEndedMessage();
-            
-            // Try to reconnect
-            // Check for Teams (both work and personal), Google Meet, and Zoom tabs
-            const teamsWorkTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
-            const teamsPersonalTabs = await chrome.tabs.query({ url: "https://teams.live.com/*" });
-            const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
-            const zoomTabs = await chrome.tabs.query({ url: "https://*.zoom.us/*" });
-            const tabs = [...teamsWorkTabs, ...teamsPersonalTabs, ...meetTabs, ...zoomTabs];
-            if (tabs.length > 0) {
-                try {
-                    const response = await chrome.tabs.sendMessage(tabs[0].id, { message: "viewer_ready" });
-                    if (response && response.streaming) {
-                        isLiveStreaming = true;
-                        lastUpdateTime = Date.now(); // Reset timeout
-                        updateLiveIndicator();
-                        console.log("Reconnected to live stream");
-                        
-                        // Remove "Meeting Ended" message if reconnected
-                        removeMeetingEndedMessage();
+
+        try {
+            // Check if we're still receiving updates
+            const timeSinceLastUpdate = Date.now() - lastUpdateTime;
+            if (timeSinceLastUpdate > 60000) { // 60 seconds without updates
+                isLiveStreaming = false;
+                updateLiveIndicator();
+                console.log("[Viewer] Lost connection to live stream");
+
+                // Add "Meeting Ended" message
+                await addMeetingEndedMessage();
+
+                // Try to reconnect
+                const teamsWorkTabs = await chrome.tabs.query({ url: "https://teams.microsoft.com/*" });
+                const teamsPersonalTabs = await chrome.tabs.query({ url: "https://teams.live.com/*" });
+                const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+                const zoomTabs = await chrome.tabs.query({ url: "https://*.zoom.us/*" });
+                const tabs = [...teamsWorkTabs, ...teamsPersonalTabs, ...meetTabs, ...zoomTabs];
+
+                if (tabs.length > 0) {
+                    try {
+                        const response = await chrome.tabs.sendMessage(tabs[0].id, { message: "viewer_ready" });
+                        if (response && response.streaming) {
+                            isLiveStreaming = true;
+                            lastUpdateTime = Date.now();
+                            updateLiveIndicator();
+                            console.log("[Viewer] Reconnected to live stream");
+                            removeMeetingEndedMessage();
+                        }
+                    } catch (reconnectError) {
+                        console.error('[Viewer] Reconnection failed:', reconnectError);
+                        // Continue with disconnected state
                     }
-                } catch (error) {
-                    // Silent fail
                 }
             }
+        } catch (error) {
+            console.error('[Viewer] Error checking connection status:', error);
+            // Don't change streaming state on error
         }
     }
 
