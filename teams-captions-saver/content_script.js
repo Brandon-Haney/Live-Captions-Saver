@@ -1691,7 +1691,7 @@ function setupLeaveButtonListener() {
 
 function setupCaptionsObserver() {
     if (captionsObserver) return;
-    
+
     captionsObserver = new MutationObserver(() => {
         // Debounce captions state changes to prevent excessive calls
         if (captionsStateDebounceTimer) {
@@ -1701,13 +1701,24 @@ function setupCaptionsObserver() {
             handleCaptionsStateChange();
         }, 1500);
     });
-    
+
     // Watch for different attributes based on platform
-    const attributeFilter = platformConfig && platformConfig.name === 'Google Meet' 
+    const attributeFilter = platformConfig && platformConfig.name === 'Google Meet'
         ? ['aria-label', 'class']
         : ['data-tid'];
-    
-    captionsObserver.observe(document.body, {
+
+    // Performance: Watch a more specific container instead of entire document.body
+    // Try to find the calling controls container first, fall back to body
+    let targetElement = document.body;
+    if (platformConfig && platformConfig.name === 'Microsoft Teams') {
+        targetElement = document.querySelector('[data-tid="calling-toolbar"], [data-tid="calling-controls-container"]') || document.body;
+    } else if (platformConfig && platformConfig.name === 'Google Meet') {
+        targetElement = document.querySelector('[data-meeting-controls], .Vw0THd') || document.body;
+    } else if (platformConfig && platformConfig.name === 'Zoom') {
+        targetElement = document.querySelector('.meeting-client-inner, .meeting-app') || document.body;
+    }
+
+    captionsObserver.observe(targetElement, {
         childList: true,
         subtree: true,
         attributeFilter: attributeFilter
@@ -2769,8 +2780,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                 streaming: capturing,
                 captionCount: transcriptArray.length
             });
-            return true;
-            
+            break;
+
         case 'toggle_chat_capture':
             // Toggle chat capture on/off
             if (request.enabled) {
@@ -2779,66 +2790,84 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                 stopChatCapture();
             }
             sendResponse({ success: true });
-            return true;
+            break;
             
         case 'get_status':
             (async () => {
-                // For Zoom, prioritize responses from frames with actual meeting content
-                if (platformConfig && platformConfig.name === 'Zoom') {
-                    const isMainFrame = window === window.top;
-                    const pathname = window.location.pathname;
-                    const hasMeetingControls = !!document.querySelector('.footer-button-base__button');
-                    const isInMeeting = isUserInMeeting();
+                try {
+                    // For Zoom, prioritize responses from frames with actual meeting content
+                    if (platformConfig && platformConfig.name === 'Zoom') {
+                        const isMainFrame = window === window.top;
+                        const pathname = window.location.pathname;
+                        const hasMeetingControls = !!document.querySelector('.footer-button-base__button');
+                        const isInMeeting = isUserInMeeting();
 
-                    console.log(`[Zoom Status] Frame: ${isMainFrame ? 'main' : 'iframe'}, Path: ${pathname}, InMeeting: ${isInMeeting}, Capturing: ${capturing}, Controls: ${hasMeetingControls}`);
+                        console.log(`[Zoom Status] Frame: ${isMainFrame ? 'main' : 'iframe'}, Path: ${pathname}, InMeeting: ${isInMeeting}, Capturing: ${capturing}, Controls: ${hasMeetingControls}`);
 
-                    // Don't respond from whiteboard or other non-meeting iframes
-                    if (!isMainFrame && (pathname.includes('/wb/') || pathname.includes('/recent'))) {
-                        // console.log(`[Zoom Status] Ignoring response from non-meeting iframe: ${pathname}`);
-                        // Send minimal response to avoid popup error
-                        sendResponse({
-                            capturing: false,
-                            captionCount: 0,
-                            isInMeeting: false,
-                            attendeeCount: 0,
-                            frameType: 'non-meeting-iframe'
-                        });
-                        return;
-                    }
-
-                    // Main frame should delay response to let iframe respond first
-                    // UNLESS the main frame is actually capturing
-                    if (isMainFrame && !capturing && !hasMeetingControls) {
-                        await new Promise(resolve => setTimeout(resolve, 200));
-                        // Still don't respond if we're not the right frame
-                        if (!isInMeeting && !capturing) {
-                            // console.log(`[Zoom Status] Main frame not responding - no meeting activity`);
-                            // DON'T send a response - let the iframe handle it
-                            // The popup will handle the timeout gracefully
+                        // Don't respond from whiteboard or other non-meeting iframes
+                        if (!isMainFrame && (pathname.includes('/wb/') || pathname.includes('/recent'))) {
+                            // console.log(`[Zoom Status] Ignoring response from non-meeting iframe: ${pathname}`);
+                            // Send minimal response to avoid popup error
+                            sendResponse({
+                                capturing: false,
+                                captionCount: 0,
+                                isInMeeting: false,
+                                attendeeCount: 0,
+                                frameType: 'non-meeting-iframe'
+                            });
                             return;
+                        }
+
+                        // Main frame should delay response to let iframe respond first
+                        // UNLESS the main frame is actually capturing
+                        if (isMainFrame && !capturing && !hasMeetingControls) {
+                            await new Promise(resolve => setTimeout(resolve, 200));
+                            // Still don't respond if we're not the right frame
+                            if (!isInMeeting && !capturing) {
+                                // console.log(`[Zoom Status] Main frame not responding - no meeting activity`);
+                                // Send minimal response to prevent message channel error
+                                sendResponse({
+                                    capturing: false,
+                                    captionCount: 0,
+                                    isInMeeting: false,
+                                    attendeeCount: 0,
+                                    frameType: 'non-active-main-frame'
+                                });
+                                return;
+                            }
+                        }
+
+                        // Iframe with actual meeting content should respond immediately
+                        if (!isMainFrame && (capturing || isInMeeting)) {
+                            console.log(`[Zoom Status] Iframe responding with capturing=${capturing}, inMeeting=${isInMeeting}`);
                         }
                     }
 
-                    // Iframe with actual meeting content should respond immediately
-                    if (!isMainFrame && (capturing || isInMeeting)) {
-                        console.log(`[Zoom Status] Iframe responding with capturing=${capturing}, inMeeting=${isInMeeting}`);
-                    }
+                    const { trackCaptions } = await chrome.storage.sync.get('trackCaptions');
+                    const attendeeReport = await getAttendeeReport();
+                    const inMeeting = isUserInMeeting();
+
+                    // Add context info for debugging
+                    const isMainFrame = window === window.top;
+                    // console.log(`[Caption Saver] Sending status from ${isMainFrame ? 'main frame' : 'iframe'}: inMeeting=${inMeeting}, capturing=${capturing}`);
+
+                    sendResponse({
+                        capturing: trackCaptions !== false ? capturing : false,
+                        captionCount: transcriptArray.length,
+                        isInMeeting: inMeeting,
+                        attendeeCount: attendeeReport ? attendeeReport.totalUniqueAttendees : 0
+                    });
+                } catch (error) {
+                    console.error('[Caption Saver] Error in get_status handler:', error);
+                    // Always send response even on error to prevent channel closure error
+                    sendResponse({
+                        capturing: false,
+                        captionCount: 0,
+                        isInMeeting: false,
+                        attendeeCount: 0,
+                        error: error.message
+                    });
                 }
-                
-                const { trackCaptions } = await chrome.storage.sync.get('trackCaptions');
-                const attendeeReport = await getAttendeeReport();
-                const inMeeting = isUserInMeeting();
-                
-                // Add context info for debugging
-                const isMainFrame = window === window.top;
-                // console.log(`[Caption Saver] Sending status from ${isMainFrame ? 'main frame' : 'iframe'}: inMeeting=${inMeeting}, capturing=${capturing}`);
-                
-                sendResponse({
-                    capturing: trackCaptions !== false ? capturing : false,
-                    captionCount: transcriptArray.length,
-                    isInMeeting: inMeeting,
-                    attendeeCount: attendeeReport ? attendeeReport.totalUniqueAttendees : 0
-                });
             })();
             return true; // Will respond asynchronously
 
@@ -2924,7 +2953,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             break;
     }
 
-    return true; // Indicates an asynchronous response may be sent.
+    // Don't return true here - only specific cases that use async sendResponse should return true
 });
 
 // Live Caption Saver content script is running

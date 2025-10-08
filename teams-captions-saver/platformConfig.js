@@ -814,31 +814,43 @@ const PLATFORM_CONFIGS = {
                 if (avatarElement) {
                     // The avatar element contains initials as text content (e.g., "TS" for the user)
                     const initials = avatarElement.textContent.trim().toUpperCase();
-                    
+
                     if (initials) {
                         // First check our cache
                         const config = PLATFORM_CONFIGS['zoom.us'];
                         if (config.speakerNameCache.has(initials)) {
                             speakerName = config.speakerNameCache.get(initials);
                         } else {
-                            // Try to find the active speaker's video tile to get their full name
-                            const activeVideoFooter = document.querySelector('.video-avatar__avatar-footer span[role="none"]');
-                            if (activeVideoFooter) {
-                                const fullName = activeVideoFooter.textContent.trim();
-                                // Check if this name's initials match
-                                const nameInitials = fullName.split(' ')
-                                    .filter(word => word.length > 0)
-                                    .map(word => word.charAt(0).toUpperCase())
-                                    .join('');
-                                if (nameInitials === initials) {
-                                    speakerName = fullName;
-                                    // Cache this mapping for future use
-                                    config.speakerNameCache.set(initials, fullName);
-                                    console.log(`[Caption Saver] Mapped initials '${initials}' to '${fullName}'`);
+                            // Performance: If cache is empty, rebuild it once
+                            if (config.speakerNameCache.size === 0) {
+                                config.buildSpeakerNameMapping();
+                                // Try cache again after rebuild
+                                if (config.speakerNameCache.has(initials)) {
+                                    speakerName = config.speakerNameCache.get(initials);
                                 }
                             }
-                            
-                            // If still no match, try participants panel
+
+                            // If still no match after cache check/rebuild, try active speaker video tile
+                            if (speakerName === 'Unknown Speaker') {
+                                const activeVideoFooter = document.querySelector('.video-avatar__avatar-footer span[role="none"]');
+                                if (activeVideoFooter) {
+                                    const fullName = activeVideoFooter.textContent.trim();
+                                    // Check if this name's initials match
+                                    const nameInitials = fullName.split(' ')
+                                        .filter(word => word.length > 0)
+                                        .map(word => word.charAt(0).toUpperCase())
+                                        .join('');
+                                    if (nameInitials === initials) {
+                                        speakerName = fullName;
+                                        // Cache this mapping for future use
+                                        config.speakerNameCache.set(initials, fullName);
+                                        console.log(`[Caption Saver] Mapped initials '${initials}' to '${fullName}'`);
+                                    }
+                                }
+                            }
+
+                            // Performance: Only scan participants panel as last resort fallback
+                            // This is expensive, but needed for new participants who join mid-meeting
                             if (speakerName === 'Unknown Speaker') {
                                 const participants = document.querySelectorAll('.participants-item-position .participants-li');
                                 for (const participant of participants) {
@@ -860,7 +872,7 @@ const PLATFORM_CONFIGS = {
                                     }
                                 }
                             }
-                            
+
                             // If still no match, use initials as fallback
                             if (speakerName === 'Unknown Speaker') {
                                 speakerName = `Speaker (${initials})`;
