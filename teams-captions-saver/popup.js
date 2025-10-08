@@ -117,6 +117,17 @@ async function getActiveMeetingTab() {
 async function loadActiveSessions() {
     try {
         const response = await chrome.runtime.sendMessage({ action: 'getActiveSessions' });
+
+        // Check for extension context invalidated error
+        if (chrome.runtime.lastError) {
+            console.error('[loadActiveSessions] Extension context error:', chrome.runtime.lastError);
+            // Show user notification for critical errors
+            if (UI_ELEMENTS.statusMessage) {
+                UI_ELEMENTS.statusMessage.textContent = 'Extension reloaded. Please refresh the page.';
+                UI_ELEMENTS.statusMessage.style.color = '#dc3545';
+            }
+            return;
+        }
         if (response && response.sessions) {
             // Check if tabs still exist for active sessions
             const validSessions = [];
@@ -418,14 +429,23 @@ if (UI_ELEMENTS.exportAllSessions) {
             const url = URL.createObjectURL(blob);
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
             const filename = `MultiSession_Export_${timestamp}.txt`;
-            
-            chrome.downloads.download({
-                url: url,
-                filename: filename,
-                saveAs: true
-            });
-            
-            UI_ELEMENTS.statusMessage.textContent = `Exported ${allSessionData.length} sessions!`;
+
+            try {
+                await chrome.downloads.download({
+                    url: url,
+                    filename: filename,
+                    saveAs: true
+                });
+
+                UI_ELEMENTS.statusMessage.textContent = `Exported ${allSessionData.length} sessions!`;
+            } catch (error) {
+                console.error('[exportAllSessions] Download failed:', error);
+                UI_ELEMENTS.statusMessage.textContent = 'Export failed. Please try again.';
+                UI_ELEMENTS.statusMessage.style.color = 'red';
+            } finally {
+                // Always revoke the blob URL to prevent memory leak
+                URL.revokeObjectURL(url);
+            }
             UI_ELEMENTS.statusMessage.style.color = '#28a745';
             
         } catch (error) {
@@ -537,17 +557,64 @@ function sanitizeInput(str) {
     return str.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
 }
 
+// Validate template name - only alphanumeric, spaces, hyphens, underscores
+function validateTemplateName(name) {
+    const trimmedName = name.trim();
+
+    if (!trimmedName) {
+        throw new Error('Template name cannot be empty');
+    }
+
+    if (trimmedName.length > 50) {
+        throw new Error('Template name must be 50 characters or less');
+    }
+
+    const validPattern = /^[a-zA-Z0-9_\-\s]+$/;
+    if (!validPattern.test(trimmedName)) {
+        throw new Error('Template name can only contain letters, numbers, spaces, hyphens, and underscores');
+    }
+
+    return trimmedName;
+}
+
+// Validate filename pattern - only safe characters and pattern variables
+function validateFilenamePattern(pattern) {
+    const trimmedPattern = pattern.trim();
+
+    if (!trimmedPattern) {
+        throw new Error('Filename pattern cannot be empty');
+    }
+
+    if (trimmedPattern.length > 100) {
+        throw new Error('Filename pattern must be 100 characters or less');
+    }
+
+    // Allow alphanumeric, spaces, hyphens, underscores, dots, and pattern variables {date}, {time}, {title}, {format}, {attendees}
+    const validPattern = /^[a-zA-Z0-9_\-\{\}\s\.]+$/;
+    if (!validPattern.test(trimmedPattern)) {
+        throw new Error('Filename pattern contains invalid characters. Use only letters, numbers, spaces, dots, hyphens, underscores, and pattern variables like {date}');
+    }
+
+    return trimmedPattern;
+}
+
 async function saveCustomTemplate(name, instructions) {
     if (!name || !name.trim() || !instructions || !instructions.trim()) {
         alert('Please enter both a template name and instructions.');
         return;
     }
 
-    // Sanitize the template name
-    const sanitizedName = sanitizeInput(name.trim());
+    try {
+        // Validate and sanitize the template name
+        const validatedName = validateTemplateName(name);
+        const sanitizedName = sanitizeInput(validatedName);
 
-    if (!sanitizedName) {
-        alert('Template name contains only invalid characters. Please use alphanumeric characters.');
+        if (!sanitizedName) {
+            alert('Template name contains only invalid characters. Please use alphanumeric characters.');
+            return;
+        }
+    } catch (error) {
+        alert(error.message);
         return;
     }
 
@@ -563,8 +630,23 @@ async function saveCustomTemplate(name, instructions) {
         createdAt: new Date().toISOString()
     };
 
-    // Save to storage
-    await chrome.storage.sync.set({ customTemplates });
+    // Save to storage with quota error handling
+    try {
+        await chrome.storage.sync.set({ customTemplates });
+    } catch (error) {
+        // Check for quota exceeded error
+        if (error.message && (error.message.includes('quota') || error.message.includes('QUOTA_BYTES'))) {
+            alert('Template too large. Chrome storage quota exceeded. Please:\n\n' +
+                  '1. Reduce template size, or\n' +
+                  '2. Delete unused templates, or\n' +
+                  '3. Use shorter instructions\n\n' +
+                  'Max storage per item: 8KB');
+            console.error('[Template Save] Storage quota exceeded:', error);
+            return;
+        }
+        // Re-throw other errors
+        throw error;
+    }
 
     // Reload templates
     await loadCustomTemplates();
@@ -709,7 +791,18 @@ function setupEventListeners() {
     });
 
     UI_ELEMENTS.filenamePattern.addEventListener('input', (e) => {
-        chrome.storage.sync.set({ filenamePattern: e.target.value });
+        try {
+            const validatedPattern = validateFilenamePattern(e.target.value);
+            chrome.storage.sync.set({ filenamePattern: validatedPattern });
+            // Clear any previous error styling
+            e.target.style.borderColor = '';
+        } catch (error) {
+            // Show error styling
+            e.target.style.borderColor = 'red';
+            console.error('[Filename Pattern] Validation error:', error.message);
+            // Still save the value but log the error for user awareness
+            chrome.storage.sync.set({ filenamePattern: e.target.value });
+        }
     });
 
     UI_ELEMENTS.meetingType.addEventListener('change', async (e) => {
@@ -757,8 +850,17 @@ function setupEventListeners() {
         }
     });
 
-    UI_ELEMENTS.aiInstructions.addEventListener('change', (e) => {
-        chrome.storage.sync.set({ aiInstructions: e.target.value });
+    UI_ELEMENTS.aiInstructions.addEventListener('change', async (e) => {
+        try {
+            await chrome.storage.sync.set({ aiInstructions: e.target.value });
+        } catch (error) {
+            if (error.message && (error.message.includes('quota') || error.message.includes('QUOTA_BYTES'))) {
+                alert('AI instructions too large. Please reduce the length of your instructions.\n\nMax storage per item: 8KB');
+                console.error('[AI Instructions] Storage quota exceeded:', error);
+            } else {
+                console.error('[AI Instructions] Save error:', error);
+            }
+        }
     });
 
 
@@ -854,7 +956,7 @@ async function handleCopy(target) {
     if (!copyType) return;
 
     if (!UI_ELEMENTS.statusMessage) {
-        console.error('Status message element not found');
+        console.error('[handleCopy] Status message element not found');
         return;
     }
 
@@ -876,6 +978,7 @@ async function handleCopy(target) {
             const tab = await getActiveMeetingTab();
             if (!tab) {
                 UI_ELEMENTS.statusMessage.textContent = "No active meeting found.";
+                UI_ELEMENTS.statusMessage.style.color = '#dc3545';
                 return;
             }
             const response = await chrome.tabs.sendMessage(tab.id, { message: "get_transcript_for_copying" });
@@ -887,9 +990,13 @@ async function handleCopy(target) {
             await navigator.clipboard.writeText(formattedText);
             UI_ELEMENTS.statusMessage.textContent = "Copied to clipboard!";
             UI_ELEMENTS.statusMessage.style.color = '#28a745';
+        } else {
+            UI_ELEMENTS.statusMessage.textContent = "No transcript data to copy.";
+            UI_ELEMENTS.statusMessage.style.color = '#ffc107';
         }
     } catch (error) {
-        UI_ELEMENTS.statusMessage.textContent = "Copy failed.";
+        console.error('[handleCopy] Copy operation failed:', error);
+        UI_ELEMENTS.statusMessage.textContent = `Copy failed: ${error.message}`;
         UI_ELEMENTS.statusMessage.style.color = '#dc3545';
     }
 }
@@ -897,38 +1004,57 @@ async function handleCopy(target) {
 async function handleSave(target) {
     const format = target.dataset.format;
     if (!format) return;
-    
+
     UI_ELEMENTS.statusMessage.textContent = `Saving as ${format === 'ai' ? 'AI' : format.toUpperCase()}...`;
-    
-    // Check if we have a selected session (multi-meeting mode)
-    if (selectedSessionId) {
-        // Get session data and send to service worker for download
-        const response = await chrome.runtime.sendMessage({ 
-            action: 'getSessionData', 
-            sessionId: selectedSessionId 
-        });
-        
-        if (response?.sessionData) {
-            const { transcript, attendeeReport, metadata } = response.sessionData;
-            const meetingTitle = metadata?.meetingTitle || 'Meeting';
-            const recordingStartTime = metadata?.startTime || new Date().toISOString();
-            
-            // Send to service worker to handle download
-            chrome.runtime.sendMessage({
-                message: "save_from_session",
-                transcriptArray: transcript,
-                meetingTitle: meetingTitle,
-                format: format,
-                recordingStartTime: recordingStartTime,
-                attendeeReport: attendeeReport
+
+    try {
+        // Check if we have a selected session (multi-meeting mode)
+        if (selectedSessionId) {
+            // Get session data and send to service worker for download
+            const response = await chrome.runtime.sendMessage({
+                action: 'getSessionData',
+                sessionId: selectedSessionId
             });
+
+            if (response?.sessionData) {
+                const { transcript, attendeeReport, metadata } = response.sessionData;
+                const meetingTitle = metadata?.meetingTitle || 'Meeting';
+                const recordingStartTime = metadata?.startTime || new Date().toISOString();
+
+                // Send to service worker to handle download
+                const saveResponse = await chrome.runtime.sendMessage({
+                    message: "save_from_session",
+                    transcriptArray: transcript,
+                    meetingTitle: meetingTitle,
+                    format: format,
+                    recordingStartTime: recordingStartTime,
+                    attendeeReport: attendeeReport
+                });
+
+                if (saveResponse?.success) {
+                    UI_ELEMENTS.statusMessage.textContent = 'Transcript saved!';
+                    UI_ELEMENTS.statusMessage.style.color = '#28a745';
+                } else {
+                    throw new Error(saveResponse?.error || 'Save failed');
+                }
+            } else {
+                throw new Error('No session data available');
+            }
+        } else {
+            // Fallback to current tab
+            const tab = await getActiveMeetingTab();
+            if (tab) {
+                await chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format });
+                UI_ELEMENTS.statusMessage.textContent = 'Save initiated...';
+                UI_ELEMENTS.statusMessage.style.color = '#17a2b8';
+            } else {
+                throw new Error('No active meeting tab found');
+            }
         }
-    } else {
-        // Fallback to current tab
-        const tab = await getActiveMeetingTab();
-        if (tab) {
-            chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format });
-        }
+    } catch (error) {
+        console.error('[handleSave] Save operation failed:', error);
+        UI_ELEMENTS.statusMessage.textContent = `Save failed: ${error.message}`;
+        UI_ELEMENTS.statusMessage.style.color = '#dc3545';
     }
 }
 
@@ -939,10 +1065,11 @@ async function initializeSessionHistory() {
         const script = document.createElement('script');
         script.src = 'sessionManager.js';
         document.head.appendChild(script);
-        
-        // Wait for script to load
-        await new Promise(resolve => {
+
+        // Wait for script to load with error handling
+        await new Promise((resolve, reject) => {
             script.onload = resolve;
+            script.onerror = () => reject(new Error('Failed to load sessionManager.js'));
             setTimeout(resolve, 100); // Fallback timeout
         });
         
@@ -1123,7 +1250,11 @@ async function viewSession(sessionId) {
     try {
         const sessionManager = new SessionManager();
         const sessionData = await sessionManager.loadSessionData(sessionId);
-        
+
+        if (!sessionData || !sessionData.transcript) {
+            throw new Error('Session data is empty or corrupted');
+        }
+
         // Store in chrome.storage.local for viewer to access - using the correct key
         await chrome.storage.local.set({
             captionsToView: sessionData.transcript,
@@ -1135,13 +1266,13 @@ async function viewSession(sessionId) {
                 isHistorical: true
             }
         });
-        
+
         // Open viewer
         window.open(chrome.runtime.getURL('viewer.html'), '_blank');
-        
+
     } catch (error) {
         console.error('[Session History] Failed to view session:', error);
-        alert('Failed to load session. It may have been corrupted.');
+        alert(`Failed to load session: ${error.message}`);
     }
 }
 
@@ -1149,18 +1280,26 @@ async function exportSession(sessionId) {
     try {
         const sessionManager = new SessionManager();
         const sessionData = await sessionManager.loadSessionData(sessionId);
-        
+
+        if (!sessionData || !sessionData.transcript || sessionData.transcript.length === 0) {
+            throw new Error('No transcript data available to export');
+        }
+
         // Use existing export logic - correct message type
         const format = currentDefaultFormat;
-        await chrome.runtime.sendMessage({
-            message: "download_captions",  // Fixed: was "save_transcript"
+        const exportResponse = await chrome.runtime.sendMessage({
+            message: "download_captions",
             transcriptArray: sessionData.transcript,
             format: format,
             meetingTitle: sessionData.metadata?.meetingTitle || sessionData.metadata?.title || 'Meeting',
             attendeeReport: sessionData.attendeeReport,
             recordingStartTime: sessionData.metadata?.startTime || sessionData.metadata?.timestamp || new Date().toISOString()
         });
-        
+
+        if (exportResponse && !exportResponse.success) {
+            throw new Error(exportResponse.error || 'Export failed');
+        }
+
         // Visual feedback
         const btn = document.querySelector(`.export-btn[data-id="${sessionId}"]`);
         if (btn) {
@@ -1174,22 +1313,28 @@ async function exportSession(sessionId) {
                 btn.style.color = '';
             }, 2000);
         }
-        
+
     } catch (error) {
         console.error('[Session History] Failed to export session:', error);
-        alert('Failed to export session.');
+        alert(`Failed to export session: ${error.message}`);
     }
 }
 
 async function deleteSession(sessionId) {
     if (!confirm('Delete this session? This cannot be undone.')) return;
-    
+
     try {
         const sessionManager = new SessionManager();
-        await sessionManager.deleteSession(sessionId);
+        const result = await sessionManager.deleteSession(sessionId);
+
+        if (!result || !result.success) {
+            throw new Error(result?.error || 'Delete operation failed');
+        }
+
         await loadSessionList(); // Refresh the list
     } catch (error) {
         console.error('[Session History] Failed to delete session:', error);
+        alert(`Failed to delete session: ${error.message}`);
     }
 }
 

@@ -6,6 +6,111 @@ const sessionManager = new SessionManager();
 const pendingDownloads = new Map();
 
 // --- Utility Functions ---
+// Safe timestamp parsing to prevent NaN in sorting
+function parseSafeTimestamp(timestampValue) {
+    if (!timestampValue) return 0;
+
+    try {
+        const parsed = new Date(timestampValue).getTime();
+        return isNaN(parsed) ? 0 : parsed;
+    } catch (error) {
+        console.error('[parseSafeTimestamp] Invalid timestamp:', timestampValue, error);
+        return 0;
+    }
+}
+
+// Storage quota management
+const QUOTA_THRESHOLD = 0.9; // 90% of quota limit
+
+async function checkStorageQuota() {
+    try {
+        const usage = await chrome.storage.local.getBytesInUse();
+        const limit = chrome.storage.local.QUOTA_BYTES;
+        const percentUsed = usage / limit;
+
+        console.log(`[Storage] Usage: ${usage} bytes / ${limit} bytes (${(percentUsed * 100).toFixed(1)}%)`);
+
+        if (percentUsed > QUOTA_THRESHOLD) {
+            console.warn(`[Storage] Quota threshold exceeded: ${(percentUsed * 100).toFixed(1)}%`);
+            return { exceeded: true, usage, limit, percentUsed };
+        }
+
+        return { exceeded: false, usage, limit, percentUsed };
+    } catch (error) {
+        console.error('[checkStorageQuota] Failed to check quota:', error);
+        return { exceeded: false, error: error.message };
+    }
+}
+
+async function cleanupOldSessions(minSessionsToKeep = 3) {
+    try {
+        const { session_index = [] } = await chrome.storage.local.get('session_index');
+
+        if (session_index.length <= minSessionsToKeep) {
+            console.log(`[Storage] Only ${session_index.length} sessions, no cleanup needed`);
+            return { cleaned: 0 };
+        }
+
+        // Sort by timestamp (oldest first) and remove oldest sessions
+        session_index.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+        const sessionsToDelete = session_index.slice(0, session_index.length - minSessionsToKeep);
+        console.log(`[Storage] Cleaning up ${sessionsToDelete.length} old sessions`);
+
+        for (const session of sessionsToDelete) {
+            const keysToDelete = [];
+            for (let i = 0; i < session.chunkCount; i++) {
+                keysToDelete.push(`${session.id}_chunk_${i}`);
+            }
+            keysToDelete.push(`${session.id}_attendees`);
+            await chrome.storage.local.remove(keysToDelete);
+        }
+
+        // Update index with remaining sessions
+        const remainingSessions = session_index.slice(session_index.length - minSessionsToKeep);
+        // Re-sort newest first for display
+        remainingSessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        await chrome.storage.local.set({ session_index: remainingSessions });
+
+        console.log(`[Storage] Cleanup complete. Removed ${sessionsToDelete.length} sessions`);
+        return { cleaned: sessionsToDelete.length };
+    } catch (error) {
+        console.error('[cleanupOldSessions] Failed to cleanup:', error);
+        return { cleaned: 0, error: error.message };
+    }
+}
+
+async function ensureStorageSpace() {
+    const quota = await checkStorageQuota();
+
+    if (quota.exceeded) {
+        console.log('[Storage] Quota exceeded, attempting cleanup...');
+        const cleanup = await cleanupOldSessions(3);
+
+        // Check quota again after cleanup
+        const newQuota = await checkStorageQuota();
+
+        if (newQuota.exceeded) {
+            // Still exceeded after cleanup, notify user
+            try {
+                chrome.runtime.sendMessage({
+                    action: 'showNotification',
+                    title: 'Live Captions Saver - Storage Full',
+                    message: 'Storage quota exceeded. Please delete old sessions from the popup to free up space.'
+                }).catch(() => {});
+            } catch (e) {
+                console.error('[ensureStorageSpace] Failed to notify user:', e);
+            }
+            return { success: false, reason: 'quota_exceeded' };
+        }
+
+        console.log(`[Storage] Cleanup successful. Freed space for new data.`);
+        return { success: true, cleaned: cleanup.cleaned };
+    }
+
+    return { success: true };
+}
+
 function getSanitizedMeetingName(fullTitle) {
     if (!fullTitle) return "Meeting";
     const parts = fullTitle.split('|');
@@ -146,8 +251,8 @@ function formatAsTxt(transcript, attendeeReport) {
     // Attendance events have 'sortKey' field with Unix timestamp
     combinedEvents.sort((a, b) => {
         // Use sortKey (attendance), timestamp (captions/chat), or 0 as fallback
-        const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0);
-        const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0);
+        const timeA = a.sortKey || parseSafeTimestamp(a.timestamp);
+        const timeB = b.sortKey || parseSafeTimestamp(b.timestamp);
         return timeA - timeB;
     });
 
@@ -231,8 +336,8 @@ function formatAsMarkdown(transcript, attendeeReport) {
 
     // Sort all events by time using timestamp field (ISO format)
     combinedEvents.sort((a, b) => {
-        const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0);
-        const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0);
+        const timeA = a.sortKey || parseSafeTimestamp(a.timestamp);
+        const timeB = b.sortKey || parseSafeTimestamp(b.timestamp);
         return timeA - timeB;
     });
 
@@ -292,8 +397,8 @@ function formatAsDoc(transcript, attendeeReport) {
 
     // Sort all events by time using timestamp field (ISO format)
     combinedEvents.sort((a, b) => {
-        const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0);
-        const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0);
+        const timeA = a.sortKey || parseSafeTimestamp(a.timestamp);
+        const timeB = b.sortKey || parseSafeTimestamp(b.timestamp);
         return timeA - timeB;
     });
 
@@ -312,7 +417,14 @@ function formatAsDoc(transcript, attendeeReport) {
 }
 
 async function formatForAi(transcript, meetingTitle, recordingStartTime, attendeeReport) {
-    const { aiInstructions = '' } = await chrome.storage.sync.get('aiInstructions');
+    let aiInstructions = '';
+    try {
+        const result = await chrome.storage.sync.get('aiInstructions');
+        aiInstructions = result.aiInstructions || '';
+    } catch (error) {
+        console.error('[formatForAi] Failed to get AI instructions from storage:', error);
+        // Continue with empty instructions
+    }
     const date = recordingStartTime ? new Date(recordingStartTime) : new Date();
 
     let metadataHeader = `Meeting Title: ${meetingTitle}\nDate: ${date.toLocaleString()}`;
@@ -347,8 +459,8 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
 
     // Sort all events by time using timestamp field (ISO format)
     combinedEvents.sort((a, b) => {
-        const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0);
-        const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0);
+        const timeA = a.sortKey || parseSafeTimestamp(a.timestamp);
+        const timeB = b.sortKey || parseSafeTimestamp(b.timestamp);
         return timeA - timeB;
     });
 
@@ -384,29 +496,29 @@ async function downloadFile(filename, content, mimeType, saveAs) {
         console.error('[downloadFile] ERROR: Filename is empty! Using fallback.');
         filename = `transcript_${new Date().toISOString().split('T')[0]}.txt`;
     }
-    
+
     try {
         const url = `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`;
-        
+
         // Ensure filename is relative to Downloads directory (no leading slashes)
         let finalFilename = filename.replace(/^[\/\\]+/, '');
-        
+
         const downloadOptions = {
             url: url,
             filename: finalFilename,
             saveAs: saveAs,
             conflictAction: 'uniquify'  // Automatically rename if file exists
         };
-        
+
         // Store the desired filename for auto-downloads
         // Chrome ignores the filename parameter when saveAs is false,
         // so we need to use onDeterminingFilename to set it
         if (!saveAs && finalFilename) {
             pendingDownloads.set('next', finalFilename);
         }
-        
+
         const downloadId = await chrome.downloads.download(downloadOptions);
-        
+
         // Associate download ID with filename for onDeterminingFilename handler
         if (!saveAs && finalFilename) {
             pendingDownloads.set(downloadId, finalFilename);
@@ -416,13 +528,15 @@ async function downloadFile(filename, content, mimeType, saveAs) {
                 pendingDownloads.delete('next');
             }, 5000);
         }
-        
+
         console.log(`[downloadFile] Download initiated: ${finalFilename}`);
-        
+
     } catch (error) {
-        console.error('[downloadFile] Download failed:', error.message);
+        console.error('[downloadFile] Download failed:', error);
+        // Return error state for caller to handle
+        return { success: false, error: error.message };
     }
-    
+
     // Notify viewer that transcript was saved
     try {
         const tabs = await chrome.tabs.query({});
@@ -432,46 +546,55 @@ async function downloadFile(filename, content, mimeType, saveAs) {
             }
         }
     } catch (error) {
-        // Silent fail if viewer is not open
+        console.error('[downloadFile] Failed to notify viewer:', error);
+        // Non-critical error, continue
     }
+
+    return { success: true };
 }
 
 async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
-    const now = new Date();
-    const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
-    const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-MM-SS
-    const attendeeCount = attendeeReport ? attendeeReport.totalUniqueAttendees : 0;
+    try {
+        const now = new Date();
+        const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
+        const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-MM-SS
+        const attendeeCount = attendeeReport ? attendeeReport.totalUniqueAttendees : 0;
 
-    const sanitizedTitle = getSanitizedMeetingName(meetingTitle);
+        const sanitizedTitle = getSanitizedMeetingName(meetingTitle);
 
-    console.log('[generateFilename] Input:', { pattern, meetingTitle, sanitizedTitle, format });
+        console.log('[generateFilename] Input:', { pattern, meetingTitle, sanitizedTitle, format });
 
-    const replacements = {
-        '{date}': dateStr,
-        '{time}': timeStr,
-        '{title}': sanitizedTitle,
-        '{format}': format,
-        '{attendees}': attendeeCount > 0 ? `${attendeeCount}_attendees` : ''
-    };
+        const replacements = {
+            '{date}': dateStr,
+            '{time}': timeStr,
+            '{title}': sanitizedTitle,
+            '{format}': format,
+            '{attendees}': attendeeCount > 0 ? `${attendeeCount}_attendees` : ''
+        };
 
-    // Use the provided pattern or default - FIX: don't include {format} in default pattern
-    let filename = pattern || '{date}_{title}';
+        // Use the provided pattern or default - FIX: don't include {format} in default pattern
+        let filename = pattern || '{date}_{title}';
 
-    for (const [key, value] of Object.entries(replacements)) {
-        filename = filename.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), value);
+        for (const [key, value] of Object.entries(replacements)) {
+            filename = filename.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), value);
+        }
+
+        // Clean up any double underscores or trailing underscores
+        filename = filename.replace(/__+/g, '_').replace(/_+$/, '');
+
+        // If filename is empty or just underscores, use a fallback
+        if (!filename || filename === '_' || filename === '') {
+            console.warn('[generateFilename] Filename was empty, using fallback');
+            filename = `Meeting_${dateStr}`;
+        }
+
+        console.log('[generateFilename] Final filename:', filename);
+        return filename;
+    } catch (error) {
+        console.error('[generateFilename] Failed to generate filename:', error);
+        // Return safe fallback filename
+        return `Meeting_${new Date().toISOString().split('T')[0]}`;
     }
-
-    // Clean up any double underscores or trailing underscores
-    filename = filename.replace(/__+/g, '_').replace(/_+$/, '');
-
-    // If filename is empty or just underscores, use a fallback
-    if (!filename || filename === '_' || filename === '') {
-        console.warn('[generateFilename] Filename was empty, using fallback');
-        filename = `Meeting_${dateStr}`;
-    }
-
-    console.log('[generateFilename] Final filename:', filename);
-    return filename;
 }
 
 async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt, attendeeReport = null) {
@@ -492,7 +615,14 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
     const processedAttendeeReport = applyAliasesToAttendeeReport(attendeeReport, aliases);
 
     // Get filename pattern from settings
-    const { filenamePattern } = await chrome.storage.sync.get('filenamePattern');
+    let filenamePattern = null;
+    try {
+        const result = await chrome.storage.sync.get('filenamePattern');
+        filenamePattern = result.filenamePattern;
+    } catch (error) {
+        console.error('[saveTranscript] Failed to get filename pattern from storage:', error);
+        // Will use default pattern in generateFilename
+    }
     console.log('[saveTranscript] Using filename pattern:', filenamePattern || '{date}_{title}');
 
     const filename = await generateFilename(filenamePattern, meetingTitle, format, processedAttendeeReport);
@@ -610,60 +740,91 @@ function calculateDuration(transcriptArray) {
 
 // Helper function to save session to history
 async function saveSessionToHistory(transcriptArray, meetingTitle, attendeeReport) {
-    const sessionId = `session_${Date.now()}`;
-    
-    // Create session metadata
-    const metadata = {
-        id: sessionId,
-        title: meetingTitle || 'Untitled Meeting',
-        timestamp: new Date().toISOString(),
-        date: new Date().toLocaleDateString(),
-        time: new Date().toLocaleTimeString(),
-        captionCount: transcriptArray.length,
-        duration: calculateDuration(transcriptArray),
-        speakers: [...new Set(transcriptArray.map(c => c.Name))].slice(0, 10),
-        attendees: attendeeReport?.attendeeList?.slice(0, 20),
-        attendeeCount: attendeeReport?.totalUniqueAttendees || 0,
-        preview: transcriptArray.slice(0, 3).map(c => `${c.Name}: ${c.Text.substring(0, 50)}`).join(' | ')
-    };
-    
-    // Save transcript in chunks to avoid size limits
-    const chunks = chunkArray(transcriptArray, 100);
-    for (let i = 0; i < chunks.length; i++) {
-        await chrome.storage.local.set({
-            [`${sessionId}_chunk_${i}`]: chunks[i]
-        });
-    }
-    metadata.chunkCount = chunks.length;
-    
-    // Save attendee report if exists
-    if (attendeeReport) {
-        await chrome.storage.local.set({
-            [`${sessionId}_attendees`]: attendeeReport
-        });
-    }
-    
-    // Update session index
-    const { session_index = [] } = await chrome.storage.local.get('session_index');
-    session_index.push(metadata);
-    
-    // Keep only last 10 sessions
-    if (session_index.length > 10) {
-        const toDelete = session_index.shift();
-        // Clean up old session data
-        const keysToDelete = [];
-        for (let i = 0; i < toDelete.chunkCount; i++) {
-            keysToDelete.push(`${toDelete.id}_chunk_${i}`);
+    try {
+        // Check storage quota before saving
+        const spaceCheck = await ensureStorageSpace();
+        if (!spaceCheck.success) {
+            console.error('[Service Worker] Insufficient storage space, cannot save session');
+            return { success: false, error: 'Storage quota exceeded' };
         }
-        keysToDelete.push(`${toDelete.id}_attendees`);
-        await chrome.storage.local.remove(keysToDelete);
+
+        const sessionId = `session_${Date.now()}`;
+
+        // Create session metadata
+        const metadata = {
+            id: sessionId,
+            title: meetingTitle || 'Untitled Meeting',
+            timestamp: new Date().toISOString(),
+            date: new Date().toLocaleDateString(),
+            time: new Date().toLocaleTimeString(),
+            captionCount: transcriptArray.length,
+            duration: calculateDuration(transcriptArray),
+            speakers: [...new Set(transcriptArray.map(c => c.Name))].slice(0, 10),
+            attendees: attendeeReport?.attendeeList?.slice(0, 20),
+            attendeeCount: attendeeReport?.totalUniqueAttendees || 0,
+            preview: transcriptArray.slice(0, 3).map(c => `${c.Name}: ${c.Text.substring(0, 50)}`).join(' | ')
+        };
+
+        // Save transcript in chunks to avoid size limits
+        const chunks = chunkArray(transcriptArray, 100);
+        for (let i = 0; i < chunks.length; i++) {
+            await chrome.storage.local.set({
+                [`${sessionId}_chunk_${i}`]: chunks[i]
+            });
+        }
+        metadata.chunkCount = chunks.length;
+
+        // Save attendee report if exists
+        if (attendeeReport) {
+            await chrome.storage.local.set({
+                [`${sessionId}_attendees`]: attendeeReport
+            });
+        }
+
+        // Update session index with retry logic for concurrent writes
+        const MAX_RETRIES = 3;
+        let retryCount = 0;
+        let saved = false;
+
+        while (!saved && retryCount < MAX_RETRIES) {
+            try {
+                const { session_index = [] } = await chrome.storage.local.get('session_index');
+                session_index.push(metadata);
+
+                // Keep only last 10 sessions
+                if (session_index.length > 10) {
+                    const toDelete = session_index.shift();
+                    // Clean up old session data
+                    const keysToDelete = [];
+                    for (let i = 0; i < toDelete.chunkCount; i++) {
+                        keysToDelete.push(`${toDelete.id}_chunk_${i}`);
+                    }
+                    keysToDelete.push(`${toDelete.id}_attendees`);
+                    await chrome.storage.local.remove(keysToDelete);
+                }
+
+                // Sort by timestamp (newest first)
+                session_index.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+                await chrome.storage.local.set({ 'session_index': session_index });
+                saved = true;
+                console.log('[Service Worker] Session saved to history:', sessionId);
+            } catch (error) {
+                retryCount++;
+                if (retryCount >= MAX_RETRIES) {
+                    throw error;
+                }
+                // Wait before retry (exponential backoff)
+                await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
+                console.log(`[Service Worker] Retrying session save (attempt ${retryCount + 1}/${MAX_RETRIES})`);
+            }
+        }
+
+        return { success: true, sessionId };
+    } catch (error) {
+        console.error('[Service Worker] Failed to save session to history:', error);
+        return { success: false, error: error.message };
     }
-    
-    // Sort by timestamp (newest first)
-    session_index.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    
-    await chrome.storage.local.set({ 'session_index': session_index });
-    console.log('[Service Worker] Session saved to history:', sessionId);
 }
 
 chrome.runtime.onInstalled.addListener(() => {
