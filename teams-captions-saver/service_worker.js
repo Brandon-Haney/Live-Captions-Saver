@@ -898,7 +898,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.downloads.onDeterminingFilename?.addListener((downloadItem, suggest) => {
     // Check if we have a pending filename for this download
     const pendingFilename = pendingDownloads.get(downloadItem.id) || pendingDownloads.get('next');
-    
+
     if (pendingFilename) {
         suggest({
             filename: pendingFilename,
@@ -909,8 +909,40 @@ chrome.downloads.onDeterminingFilename?.addListener((downloadItem, suggest) => {
         pendingDownloads.delete('next');
         return true;
     }
-    
+
     return false;
+});
+
+// Monitor download progress and handle errors
+chrome.downloads.onChanged?.addListener((delta) => {
+    // Handle download state changes
+    if (delta.state?.current === 'interrupted') {
+        // Download was interrupted (network failure, disk full, etc.)
+        console.error('[Service Worker] Download interrupted:', delta.id, 'Error:', delta.error);
+
+        // Clean up from pending downloads
+        pendingDownloads.delete(delta.id);
+
+        // Try to show notification to user (may not work if no active page)
+        chrome.runtime.sendMessage({
+            message: 'download_failed',
+            downloadId: delta.id,
+            error: delta.error?.current || 'Unknown error'
+        }).catch(() => {
+            // No listeners - popup/content script might not be open
+            console.log('[Service Worker] Could not notify user of download failure');
+        });
+    } else if (delta.state?.current === 'complete') {
+        // Download completed successfully
+        console.log('[Service Worker] Download completed:', delta.id);
+        pendingDownloads.delete(delta.id);
+    }
+
+    // Handle download errors without state change
+    if (delta.error?.current) {
+        console.error('[Service Worker] Download error:', delta.id, delta.error.current);
+        pendingDownloads.delete(delta.id);
+    }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

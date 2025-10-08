@@ -346,8 +346,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // --- Helper Functions ---
+    function removeHighlights(element) {
+        const textElement = element.querySelector('.text');
+        if (!textElement) return;
+
+        // Get the original text content (removes all <mark> tags)
+        const text = textElement.textContent;
+        // Reset to plain text
+        textElement.textContent = text;
+    }
+
     function highlightSearchTerm(element, searchTerm) {
-        if (!searchTerm) return;
+        if (!searchTerm) {
+            removeHighlights(element);
+            return;
+        }
 
         const textElement = element.querySelector('.text');
         if (!textElement) return;
@@ -802,7 +815,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const matchesSearch = !searchTerm || text.includes(searchTerm) || speaker.toLowerCase().includes(searchTerm);
             const matchesSpeaker = !speakerToFilter || speaker === speakerToFilter;
 
+            // Show/hide based on filters
             captionDiv.style.display = (matchesSearch && matchesSpeaker) ? 'block' : 'none';
+
+            // Apply or remove highlighting
+            if (searchTerm && matchesSearch) {
+                highlightSearchTerm(captionDiv, searchTerm);
+            } else {
+                // Clear highlights when search is empty or caption doesn't match
+                removeHighlights(captionDiv);
+            }
         });
 
         // Update export button states
@@ -835,23 +857,50 @@ document.addEventListener('DOMContentLoaded', () => {
     function handleSpeakerFilterClick(e) {
         // Handle clicks on the button or its children (except edit icon)
         if (e.target.classList.contains('speaker-edit-icon')) return;
-        
-        // Find the actual button element (could be the target or its parent)
-        let filterBtn = e.target;
-        if (!filterBtn.classList.contains('speaker-filter-btn') && filterBtn.id !== 'show-all-btn') {
-            filterBtn = e.target.closest('.speaker-filter-btn');
-            if (!filterBtn && e.target.parentElement?.id !== 'show-all-btn') {
-                filterBtn = e.target.closest('#show-all-btn');
+
+        // Find the actual button element
+        // First check if the target itself is a button
+        let filterBtn = null;
+        if (e.target.classList.contains('speaker-filter-btn') || e.target.id === 'show-all-btn') {
+            filterBtn = e.target;
+        } else if (e.target.tagName === 'BUTTON') {
+            // It's a button but doesn't have the expected classes/id
+            // Check if it's inside the speaker filters container
+            if (speakerFiltersContainer.contains(e.target)) {
+                filterBtn = e.target;
+                console.log('[Viewer] Found button without expected class/id:', e.target, 'classes:', Array.from(e.target.classList));
             }
         }
-        
-        if (!filterBtn) return;
-        
-        // Remove active from all buttons
-        speakerFiltersContainer.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-        speakerFiltersContainer.querySelectorAll('.speaker-filter-btn').forEach(b => b.classList.remove('active'));
-        
+
+        // If still not found, search up the tree for a parent button
+        if (!filterBtn) {
+            filterBtn = e.target.closest('.speaker-filter-btn, #show-all-btn');
+        }
+
+        if (!filterBtn) {
+            console.warn('[Viewer] Could not find filter button for click event');
+            console.warn('  Target:', e.target.tagName, e.target);
+            console.warn('  Classes:', Array.from(e.target.classList));
+            console.warn('  ID:', e.target.id);
+            console.warn('  Parent:', e.target.parentElement);
+            return;
+        }
+
+        // Remove active from all filter buttons
+        speakerFiltersContainer.querySelectorAll('button').forEach(b => {
+            b.classList.remove('active');
+        });
+
+        // Add active to clicked button
         filterBtn.classList.add('active');
+
+        // Verify active class was applied
+        if (!filterBtn.classList.contains('active')) {
+            console.error('[Viewer] Failed to apply active class to filter button');
+            // Force add it again
+            filterBtn.classList.add('active');
+        }
+
         applyFilters();
     }
 
