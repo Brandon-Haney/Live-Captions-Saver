@@ -131,6 +131,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let viewerSessionId = null;  // Session ID to filter live updates
     let speakerAliases = {};  // Session-specific speaker aliases
     let isNearBottom = true;  // Track if user is near bottom of scroll
+    let captionElementsCache = [];  // Performance: Cache caption elements to avoid repeated DOM queries
 
     // --- Utility ---
     function escapeHtml(str) {
@@ -430,7 +431,10 @@ document.addEventListener('DOMContentLoaded', () => {
         tempDiv.innerHTML = newCaptionHTML;
         const newCaptionElement = tempDiv.firstElementChild;
         captionsContainer.appendChild(newCaptionElement);
-        
+
+        // Performance: Add element to cache
+        captionElementsCache.push(newCaptionElement);
+
         // Apply search filter if active
         if (activeSearch) {
             const matchesSearch = caption.Text.toLowerCase().includes(activeSearch.toLowerCase()) ||
@@ -531,10 +535,10 @@ document.addEventListener('DOMContentLoaded', () => {
     function queueUpdate(update) {
         debug.log('[Viewer] Queuing update:', update.type, update.caption?.Name);
         pendingUpdates.push(update);
-        
-        // Batch updates every 100ms for performance
+
+        // Performance: Batch updates every 250ms to reduce DOM updates
         if (!updateTimer) {
-            updateTimer = setTimeout(batchProcessUpdates, 100);
+            updateTimer = setTimeout(batchProcessUpdates, 250);
         }
     }
     
@@ -712,6 +716,10 @@ document.addEventListener('DOMContentLoaded', () => {
         allCaptions = transcriptArray;
         const htmlContent = transcriptArray.map(createCaptionHTML).join('');
         captionsContainer.innerHTML = htmlContent || '<p class="status-message">No captions to display.</p>';
+
+        // Performance: Rebuild cache after rendering
+        captionElementsCache = Array.from(captionsContainer.querySelectorAll('.caption'));
+
         updateExportButtonStates();
     }
 
@@ -786,7 +794,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const activeSpeakerFilter = speakerFiltersContainer.querySelector('button.active');
         const speakerToFilter = activeSpeakerFilter?.id === 'show-all-btn' ? null : activeSpeakerFilter?.dataset.speaker;
 
-        document.querySelectorAll('.caption').forEach(captionDiv => {
+        // Performance: Use cached elements instead of querying DOM
+        captionElementsCache.forEach(captionDiv => {
             const text = captionDiv.querySelector('.text').textContent.toLowerCase();
             const speaker = captionDiv.dataset.speaker;
 
@@ -795,7 +804,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             captionDiv.style.display = (matchesSearch && matchesSpeaker) ? 'block' : 'none';
         });
-        
+
         // Update export button states
         updateExportButtonStates();
     }
@@ -1274,8 +1283,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 const isDirectNavigation = !result.captionsToView && !result.viewerData;
                 if (isDirectNavigation) {
                     captionsContainer.innerHTML = '<p class="status-message">No transcript data available.<br><br>Please use the "View Transcript" button in the extension popup to load a transcript.</p>';
+                    captionElementsCache = []; // Clear cache when showing status message
                 } else {
                     captionsContainer.innerHTML = '<p class="status-message">Waiting for live captions...</p>';
+                    captionElementsCache = []; // Clear cache when showing status message
 
                     // Update meeting title and platform if provided even when waiting for captions
                     const meetingTitle = result.meetingTitle || viewerData?.meetingTitle;
@@ -1295,6 +1306,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             console.error("[Viewer] Failed to initialize:", error);
             captionsContainer.innerHTML = `<p class="status-message">Unable to load captions: ${error.message}<br><br>Please try opening the extension popup again.</p>`;
+            captionElementsCache = []; // Clear cache on error
         } finally {
             // Clean up storage to prevent re-displaying on next open
             // But keep viewerSessionId for filtering live updates
@@ -1358,20 +1370,23 @@ document.addEventListener('DOMContentLoaded', () => {
         // This ensures we don't miss any broadcasts from the content script
         if (!messageListenerSetup) {
             messageListenerSetup = true;
-            chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
+            chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+                // Don't use async here to avoid automatic Promise return behavior
+                // Handle async operations with IIFE when needed
+
                 // Accept live updates from service worker (no sender.tab) or marked as fromServiceWorker
                 const isFromServiceWorker = !sender.tab || request.fromServiceWorker;
-                
+
                 // For live updates, only process from service worker to avoid duplicates
                 if (!isFromServiceWorker && (request.message === 'live_caption_update' || request.message === 'live_attendee_update')) {
                     // This is a live update directly from content script - ignore it
                     debug.log('[Viewer] Ignoring direct live update from content script');
-                    return;
+                    return false; // Explicitly return false for early exit
                 }
-                
+
                 const source = sender.tab ? `tab ${sender.tab.id}` : 'service worker';
                 debug.log('[Viewer] Received message:', request?.message || 'undefined', 'from', source, 'Full request:', request);
-                
+
                 // Log test messages
                 if (request.test) {
                     debug.log('[Viewer] Received TEST broadcast with live update');
@@ -1380,33 +1395,37 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Filter by session ID if we have one
                     if (viewerSessionId && request.sessionId && request.sessionId !== viewerSessionId) {
                         debug.log(`[Viewer] Ignoring caption from different session: ${request.sessionId} (viewing ${viewerSessionId})`);
-                        return;
+                        return false; // Explicitly return false for early exit
                     }
-                    
+
                     isLiveStreaming = true;
                     lastUpdateTime = Date.now(); // Update timestamp when receiving messages
                     queueUpdate(request);
-                    
+
                     // Remove "Meeting Ended" message if we're receiving updates again
                     removeMeetingEndedMessage();
-                    
+
                     debug.log("[Viewer] Processing live caption update:", request.type, request.caption?.Name, request.caption?.Text?.substring(0, 30));
                 } else if (request.message === "live_attendee_update") {
                     // Filter by session ID if we have one
                     if (viewerSessionId && request.sessionId && request.sessionId !== viewerSessionId) {
                         debug.log(`[Viewer] Ignoring attendee update from different session: ${request.sessionId}`);
-                        return;
+                        return false; // Explicitly return false for early exit
                     }
-                    
+
                     // Handle attendee updates if needed
                     console.log("Attendee update:", request);
                     lastUpdateTime = Date.now(); // Update timestamp for attendee updates too
                 } else if (request.message === "meeting_ended") {
-                    // Handle explicit meeting end signal
-                    isLiveStreaming = false;
-                    updateLiveIndicator();
-                    await addMeetingEndedMessage();
+                    // Handle explicit meeting end signal - use async IIFE for await
+                    (async () => {
+                        isLiveStreaming = false;
+                        updateLiveIndicator();
+                        await addMeetingEndedMessage();
+                    })();
                 }
+
+                return false; // No async response needed for these messages
             });
         }
         
