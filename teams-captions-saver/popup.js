@@ -605,10 +605,11 @@ async function saveCustomTemplate(name, instructions) {
         return;
     }
 
+    let sanitizedName;
     try {
         // Validate and sanitize the template name
         const validatedName = validateTemplateName(name);
-        const sanitizedName = sanitizeInput(validatedName);
+        sanitizedName = sanitizeInput(validatedName);
 
         if (!sanitizedName) {
             alert('Template name contains only invalid characters. Please use alphanumeric characters.');
@@ -621,14 +622,24 @@ async function saveCustomTemplate(name, instructions) {
 
     const { customTemplates = {} } = await chrome.storage.sync.get('customTemplates');
 
-    // Generate unique ID
-    const id = Date.now().toString();
+    // Check if we're updating an existing template (by matching the name)
+    let existingId = null;
+    for (const [id, template] of Object.entries(customTemplates)) {
+        if (template.name === sanitizedName) {
+            existingId = id;
+            break;
+        }
+    }
 
-    // Add new template
+    // Use existing ID if updating, or generate new ID if creating
+    const id = existingId || Date.now().toString();
+
+    // Add or update template
     customTemplates[id] = {
         name: sanitizedName,
         instructions: instructions.trim(),
-        createdAt: new Date().toISOString()
+        createdAt: customTemplates[id]?.createdAt || new Date().toISOString(),
+        updatedAt: existingId ? new Date().toISOString() : undefined
     };
 
     // Save to storage with quota error handling
@@ -655,10 +666,14 @@ async function saveCustomTemplate(name, instructions) {
     // Clear template name input
     UI_ELEMENTS.templateName.value = '';
 
-    // Select the newly created template
+    // Reset save button to default state
+    UI_ELEMENTS.saveTemplateBtn.textContent = 'Save Template';
+    UI_ELEMENTS.saveTemplateBtn.style.background = '#28a745';
+
+    // Select the newly created/updated template
     UI_ELEMENTS.meetingType.value = `custom_${id}`;
 
-    alert('Template saved successfully!');
+    alert(existingId ? 'Template updated successfully!' : 'Template saved successfully!');
 }
 
 async function editCustomTemplate(templateId) {
@@ -673,8 +688,8 @@ async function editCustomTemplate(templateId) {
     }
 
     // Load template data into the form
-    UI_ELEMENTS.templateName.value = id;
-    UI_ELEMENTS.aiInstructions.value = customTemplates[id];
+    UI_ELEMENTS.templateName.value = customTemplates[id].name || id;
+    UI_ELEMENTS.aiInstructions.value = customTemplates[id].instructions || '';
 
     // Focus on the instructions field for editing
     UI_ELEMENTS.aiInstructions.focus();

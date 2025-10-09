@@ -918,7 +918,8 @@ chrome.downloads.onChanged?.addListener((delta) => {
     // Handle download state changes
     if (delta.state?.current === 'interrupted') {
         // Download was interrupted (network failure, disk full, etc.)
-        console.error('[Service Worker] Download interrupted:', delta.id, 'Error:', delta.error);
+        const errorMsg = delta.error?.current || 'Unknown error';
+        console.error('[Service Worker] Download interrupted:', delta.id, 'Error:', errorMsg);
 
         // Clean up from pending downloads
         pendingDownloads.delete(delta.id);
@@ -927,7 +928,7 @@ chrome.downloads.onChanged?.addListener((delta) => {
         chrome.runtime.sendMessage({
             message: 'download_failed',
             downloadId: delta.id,
-            error: delta.error?.current || 'Unknown error'
+            error: errorMsg
         }).catch(() => {
             // No listeners - popup/content script might not be open
             console.log('[Service Worker] Could not notify user of download failure');
@@ -938,10 +939,20 @@ chrome.downloads.onChanged?.addListener((delta) => {
         pendingDownloads.delete(delta.id);
     }
 
-    // Handle download errors without state change
-    if (delta.error?.current) {
-        console.error('[Service Worker] Download error:', delta.id, delta.error.current);
+    // Handle download errors without state change (in case state doesn't transition to interrupted)
+    if (delta.error?.current && delta.state?.current !== 'interrupted') {
+        const errorMsg = delta.error.current;
+        console.error('[Service Worker] Download error:', delta.id, errorMsg);
         pendingDownloads.delete(delta.id);
+
+        // Notify user of the error
+        chrome.runtime.sendMessage({
+            message: 'download_failed',
+            downloadId: delta.id,
+            error: errorMsg
+        }).catch(() => {
+            console.log('[Service Worker] Could not notify user of download failure');
+        });
     }
 });
 
