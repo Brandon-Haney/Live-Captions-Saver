@@ -47,7 +47,7 @@
         "platformConfig.js",
         "content_script.js"
       ],
-      "all_frames": false
+      "all_frames": true
     }
   ],
   

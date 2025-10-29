@@ -855,8 +855,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function handleSpeakerFilterClick(e) {
-        // Handle clicks on the button or its children (except edit icon)
+        // Handle clicks on the button or its children (except edit icon and alias editing UI)
         if (e.target.classList.contains('speaker-edit-icon')) return;
+
+        // Ignore clicks from speaker alias editing UI
+        if (e.target.classList.contains('speaker-alias-input')) return;
+
+        // Check if click is on alias editing save/cancel buttons or their container
+        const aliasInput = e.target.closest('.speaker-alias-input')?.parentElement;
+        if (aliasInput) return;
 
         // Find the actual button element
         // First check if the target itself is a button

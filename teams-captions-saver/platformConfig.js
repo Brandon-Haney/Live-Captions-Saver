@@ -153,8 +153,8 @@ const PLATFORM_CONFIGS = {
                 const attachments = [];
 
                 // Look for images in Teams messages using the correct selectors
-                // Teams uses fui-Image class and data-tid="lazy-image-2"
-                const images = msgElement.querySelectorAll('.fui-Image, img[data-tid*="lazy-image"], img[itemtype="http://schema.skype.com/AMSImage"]');
+                // Teams now uses file-attachment-grid structure for shared photos
+                const images = msgElement.querySelectorAll('img[data-tid="rich-file-preview-image"], .fui-Image, img[data-tid*="lazy-image"], img[itemtype="http://schema.skype.com/AMSImage"]');
                 console.log(`[Teams Chat] Found ${images.length} images in message ${messageId}`);
                 images.forEach(img => {
                     // Skip avatars, emojis, and icons
@@ -163,35 +163,58 @@ const PLATFORM_CONFIGS = {
                         !img.src.includes('avatar') &&
                         !img.closest('.fui-Icon-filled, .fui-Icon-regular')) {
 
-                        // Get the original source URL if available (Teams often uses blob URLs)
-                        const originalSrc = img.getAttribute('data-orig-src') || img.src;
-                        const galleryUrl = img.getAttribute('data-gallery-src');
+                        // For new file attachment structure, get URL from parent amspreviewurl attribute
+                        const filePreviewRoot = img.closest('[data-tid="file-preview-root"]');
+                        let imageUrl = img.src;
+                        let filename = 'Image attachment';
 
-                        // Use the best quality URL available
-                        const imageUrl = galleryUrl || originalSrc;
+                        if (filePreviewRoot) {
+                            // Get the better quality AMS preview URL
+                            const amsPreviewUrl = filePreviewRoot.getAttribute('amspreviewurl');
+                            if (amsPreviewUrl) {
+                                imageUrl = amsPreviewUrl;
+                            }
 
-                        // Extract filename from alt text or use a default
-                        const altText = img.alt || img.title || 'Image attachment';
-                        let filename = altText;
+                            // Get filename from the button's title attribute
+                            const button = filePreviewRoot.querySelector('button[title]');
+                            if (button) {
+                                const title = button.getAttribute('title');
+                                // Title format is "filename.png\nhttps://..."
+                                if (title) {
+                                    const lines = title.split('\n');
+                                    if (lines.length > 0 && lines[0].trim()) {
+                                        filename = lines[0].trim();
+                                    }
+                                }
+                            }
+                        } else {
+                            // Fallback to old logic for legacy inline images
+                            const originalSrc = img.getAttribute('data-orig-src') || img.src;
+                            const galleryUrl = img.getAttribute('data-gallery-src');
+                            imageUrl = galleryUrl || originalSrc;
 
-                        // If the alt text is just "image", try to generate a better filename
-                        if (filename.toLowerCase() === 'image' && imageUrl.includes('/')) {
-                            const urlParts = imageUrl.split('/');
-                            const lastPart = urlParts[urlParts.length - 1];
-                            if (lastPart && !lastPart.startsWith('img')) {
-                                filename = lastPart.split('?')[0];
-                            } else {
-                                filename = 'image.png';
+                            const altText = img.alt || img.title || 'Image attachment';
+                            filename = altText;
+
+                            // If the alt text is just "image", try to generate a better filename
+                            if (filename.toLowerCase() === 'image' && imageUrl.includes('/')) {
+                                const urlParts = imageUrl.split('/');
+                                const lastPart = urlParts[urlParts.length - 1];
+                                if (lastPart && !lastPart.startsWith('img')) {
+                                    filename = lastPart.split('?')[0];
+                                } else {
+                                    filename = 'image.png';
+                                }
                             }
                         }
 
                         attachments.push({
                             type: 'image',
                             url: imageUrl,
-                            alt: altText,
+                            alt: filename,
                             filename: filename
                         });
-                        console.log(`[Teams Chat] Added image attachment: ${filename}`, { url: imageUrl, alt: altText });
+                        console.log(`[Teams Chat] Added image attachment: ${filename}`, { url: imageUrl });
                     }
                 });
 
@@ -323,22 +346,59 @@ const PLATFORM_CONFIGS = {
         },
         
         selectors: {
-            // Caption selectors
-            captionsContainer: '.ZPyPXe[aria-label="Captions"]',
-            captionBlock: '.nMcdL.bj4p3b',
-            speakerName: '.KcIKyf .NWpY1d',
-            captionText: '.ygicle.VbkSUe',
-            
+            // Caption selectors with fallbacks (MeetGeek improvement #2)
+            captionsContainer: [
+                '.ZPyPXe[aria-label="Captions"]',
+                '[aria-label="Captions"]',
+                '.ZPyPXe',
+                '[class*="captions"][class*="container"]'
+            ],
+            captionBlock: [
+                '.nMcdL.bj4p3b',
+                '.bj4p3b',
+                '[class*="caption"][class*="block"]',
+                '.nMcdL'
+            ],
+            speakerName: [
+                '.KcIKyf .NWpY1d',
+                '.NWpY1d',
+                '[class*="speaker"] [class*="name"]',
+                '.KcIKyf'
+            ],
+            captionText: [
+                '.ygicle.VbkSUe',
+                '.VbkSUe',
+                '[class*="caption"][class*="text"]',
+                '.ygicle'
+            ],
+
             // Meeting controls
             hangupButton: 'button[aria-label="Leave call"], button[aria-label*="End call"]',
             turnOnCaptionsButton: 'button[aria-label="Turn on captions"][jsname="r8qRAd"]',
             turnOffCaptionsButton: 'button[aria-label="Turn off captions"]',
-            
-            // Attendee tracking selectors
-            peopleButton: 'button[aria-label*="People"][data-panel-id="1"], button[aria-label*="People - "]',
-            attendeeList: '.m3Uzve.RJRKn, .m3Uzve.LkEdie',  // In the meeting section
-            attendeeItem: '.cxdMu[role="listitem"]',
-            attendeeName: '.zWGUib',
+
+            // Attendee tracking selectors with fallbacks (MeetGeek improvement #2)
+            peopleButton: [
+                'button[aria-label*="People"][data-panel-id="1"]',
+                'button[aria-label*="People - "]',
+                'button[aria-label*="People"]'
+            ],
+            attendeeList: [
+                '.m3Uzve.RJRKn',
+                '.m3Uzve.LkEdie',
+                '.RJRKn',
+                '[class*="participant"][class*="list"]'
+            ],
+            attendeeItem: [
+                '.cxdMu[role="listitem"]',
+                '[role="listitem"]',
+                '.cxdMu'
+            ],
+            attendeeName: [
+                '.zWGUib',
+                '[class*="attendee"][class*="name"]',
+                '[class*="participant"][class*="name"]'
+            ],
             
             // Unused/Reserved selectors (kept for modularity)
             sidePanel: null,  // Not currently used
@@ -396,20 +456,40 @@ const PLATFORM_CONFIGS = {
             };
         },
         getAttendeeData: (element) => {
+            // Skip waiting room participants (MeetGeek improvement #1)
+            if (element.classList.contains('KV1GEc')) {
+                console.log('[Caption Saver] Skipping waiting room participant');
+                return null;
+            }
+
             const nameElement = element.querySelector('.zWGUib');
             const roleElement = element.querySelector('.d93U2d');
             const isYou = element.querySelector('.NnTWjc')?.textContent.includes('You');
-            
+            const participantId = element.getAttribute('data-participant-id');
+
             if (!nameElement) return null;
-            
+
             let attendeeName = nameElement.textContent.trim();
-            
+
+            // Skip "merged audio" containers without participant IDs (MeetGeek improvement #9)
+            if (attendeeName.toLowerCase() === 'merged audio' && !participantId) {
+                console.log('[Caption Saver] Skipping merged audio container');
+                return null;
+            }
+
+            // Skip presentation entries (MeetGeek improvement #9)
+            const roleText = roleElement?.textContent || '';
+            if (roleText.toLowerCase().includes('presentation')) {
+                console.log('[Caption Saver] Skipping presentation entry');
+                return null;
+            }
+
             // Store the actual name if this is the current user
             if (isYou && attendeeName && attendeeName !== 'You') {
                 window.currentUserName = attendeeName;
                 console.log('[Caption Saver] Detected current user name from attendee list:', attendeeName);
             }
-            
+
             return {
                 name: attendeeName,
                 role: roleElement ? roleElement.textContent.trim() : 'Participant',
@@ -456,6 +536,41 @@ const PLATFORM_CONFIGS = {
             
             return title || 'Untitled Meeting';
         },
+
+        // Language detection for meeting metadata (MeetGeek improvement #5)
+        detectCaptionLanguage: () => {
+            // Method 1: Check the captions button aria-label for language info
+            const captionButton = document.querySelector('button[aria-label*="captions" i]');
+            if (captionButton) {
+                const ariaLabel = captionButton.getAttribute('aria-label') || '';
+                // Example: "Turn on captions (en)" or "Captions: English"
+                const langMatch = ariaLabel.match(/\(([a-z]{2})\)/i) || ariaLabel.match(/:\s*([A-Za-z]+)/);
+                if (langMatch && langMatch[1]) {
+                    console.log('[Caption Saver] Detected caption language from button:', langMatch[1]);
+                    return langMatch[1].toLowerCase();
+                }
+            }
+
+            // Method 2: Check captions container for language attribute
+            const captionsContainer = document.querySelector('.ZPyPXe[aria-label="Captions"]');
+            if (captionsContainer) {
+                const lang = captionsContainer.getAttribute('lang') || captionsContainer.getAttribute('data-language');
+                if (lang) {
+                    console.log('[Caption Saver] Detected caption language from container:', lang);
+                    return lang.toLowerCase();
+                }
+            }
+
+            // Method 3: Check document language as fallback
+            const docLang = document.documentElement.lang || navigator.language;
+            if (docLang) {
+                console.log('[Caption Saver] Using document/browser language as fallback:', docLang);
+                return docLang.toLowerCase().split('-')[0]; // Extract just the language code (en-US -> en)
+            }
+
+            return 'en'; // Default to English
+        },
+
         isPanelOpen: () => {
             const panel = document.querySelector('aside[aria-label="Side panel"]');
             return panel && panel.style.display !== 'none';
@@ -743,9 +858,9 @@ const PLATFORM_CONFIGS = {
         },
         selectors: {
             // Caption selectors
-            captionsContainer: '.live-transcription-subtitle__box, .transcript-list, .closed-caption-container, .closed-caption-box',
-            captionBlock: '.live-transcription-subtitle__box, #live-transcription-subtitle, .live-transcription-subtitle__box div[id="live-transcription-subtitle"], .transcript-message, .closed-caption-line, .closed-caption-box__message',
-            speakerName: '.transcript-message-speaker, .closed-caption-speaker, .closed-caption-box__name',
+            captionsContainer: '#live-transcription-subtitle, .live-transcription-subtitle__box, .transcript-list, .closed-caption-container, .closed-caption-box',
+            captionBlock: '#live-transcription-subtitle, .live-transcription-subtitle__box, .live-transcription-subtitle__box div[id="live-transcription-subtitle"], .transcript-message, .closed-caption-line, .closed-caption-box__message',
+            speakerName: '.zmu-data-selector-item__icon, .transcript-message-speaker, .closed-caption-speaker, .closed-caption-box__name',
             captionText: '.live-transcription-subtitle__item, .transcript-message-text, .closed-caption-text, .closed-caption-box__text',
             speakerAvatar: '.zmu-data-selector-item__icon',
             
