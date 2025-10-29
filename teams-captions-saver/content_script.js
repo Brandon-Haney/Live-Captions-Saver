@@ -1,3 +1,133 @@
+// --- Enhanced Debug Logging System (MeetGeek improvement #3) ---
+const Logger = (function() {
+    // Log levels
+    const LogLevel = {
+        DEBUG: 0,
+        INFO: 1,
+        WARN: 2,
+        ERROR: 3,
+        NONE: 4
+    };
+
+    // Log categories for better organization
+    const Category = {
+        CAPTION: 'Caption',
+        ATTENDEE: 'Attendee',
+        CHAT: 'Chat',
+        STORAGE: 'Storage',
+        SESSION: 'Session',
+        PLATFORM: 'Platform',
+        SELECTOR: 'Selector',
+        MEETING: 'Meeting',
+        GENERAL: 'General'
+    };
+
+    // Default configuration - can be overridden via chrome.storage
+    let config = {
+        enabled: true,
+        level: LogLevel.INFO, // Only show INFO and above by default
+        showTimestamp: true,
+        showCategory: true,
+        categories: {} // Specific log level per category
+    };
+
+    // Load config from storage
+    async function loadConfig() {
+        try {
+            const result = await chrome.storage.sync.get(['debugLogging']);
+            if (result.debugLogging) {
+                config = { ...config, ...result.debugLogging };
+            }
+        } catch (e) {
+            // Silently fail - use defaults
+        }
+    }
+
+    // Initialize config on load
+    loadConfig();
+
+    // Format timestamp
+    function getTimestamp() {
+        const now = new Date();
+        return now.toLocaleTimeString('en-US', {
+            hour12: false,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            fractionalSecondDigits: 3
+        });
+    }
+
+    // Get level name
+    function getLevelName(level) {
+        const names = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
+        return names[level] || 'UNKNOWN';
+    }
+
+    // Core logging function
+    function log(level, category, message, ...args) {
+        // Check if logging is enabled
+        if (!config.enabled) return;
+
+        // Check if this log level should be displayed
+        const categoryLevel = config.categories[category];
+        const effectiveLevel = categoryLevel !== undefined ? categoryLevel : config.level;
+
+        if (level < effectiveLevel) return;
+
+        // Build log prefix
+        let prefix = '[Caption Saver]';
+
+        if (config.showTimestamp) {
+            prefix += ` [${getTimestamp()}]`;
+        }
+
+        if (config.showCategory) {
+            prefix += ` [${category}]`;
+        }
+
+        prefix += ` [${getLevelName(level)}]`;
+
+        // Choose console method based on level
+        const consoleMethods = [
+            console.debug,  // DEBUG
+            console.log,    // INFO
+            console.warn,   // WARN
+            console.error   // ERROR
+        ];
+
+        const consoleMethod = consoleMethods[level] || console.log;
+        consoleMethod(`${prefix} ${message}`, ...args);
+    }
+
+    // Public API
+    return {
+        LogLevel,
+        Category,
+
+        // Configure logger
+        setEnabled: (enabled) => { config.enabled = enabled; },
+        setLevel: (level) => { config.level = level; },
+        setCategoryLevel: (category, level) => { config.categories[category] = level; },
+
+        // Log methods by level
+        debug: (category, message, ...args) => log(LogLevel.DEBUG, category, message, ...args),
+        info: (category, message, ...args) => log(LogLevel.INFO, category, message, ...args),
+        warn: (category, message, ...args) => log(LogLevel.WARN, category, message, ...args),
+        error: (category, message, ...args) => log(LogLevel.ERROR, category, message, ...args),
+
+        // Shorthand for common operations
+        logCaption: (message, ...args) => log(LogLevel.INFO, Category.CAPTION, message, ...args),
+        logAttendee: (message, ...args) => log(LogLevel.INFO, Category.ATTENDEE, message, ...args),
+        logChat: (message, ...args) => log(LogLevel.INFO, Category.CHAT, message, ...args),
+        logStorage: (message, ...args) => log(LogLevel.DEBUG, Category.STORAGE, message, ...args),
+        logSession: (message, ...args) => log(LogLevel.INFO, Category.SESSION, message, ...args),
+        logPlatform: (message, ...args) => log(LogLevel.INFO, Category.PLATFORM, message, ...args),
+        logSelector: (message, ...args) => log(LogLevel.DEBUG, Category.SELECTOR, message, ...args),
+        logMeeting: (message, ...args) => log(LogLevel.INFO, Category.MEETING, message, ...args)
+    };
+})();
+
 // --- Platform Detection and Configuration ---
 let platformConfig = null;
 let SELECTORS = {};
@@ -556,25 +686,255 @@ function formatTimestamp(date) {
     }
 }
 
-// --- DOM Element Caching ---
-function getCachedElement(selector, expiry = 5000) {
+// --- DOM Element Caching with Selector Fallbacks (MeetGeek improvement #2) ---
+
+/**
+ * Helper function to query elements with fallback selectors
+ * @param {string|Array<string>} selectorOrArray - Single selector or array of fallback selectors
+ * @param {Document|Element} root - Root element to query from (defaults to document)
+ * @returns {Element|null} First matching element or null
+ */
+function queryElementWithFallbacks(selectorOrArray, root = document) {
+    // Handle null/undefined selectors
+    if (!selectorOrArray) return null;
+
+    // If it's a string (single selector), use it directly
+    if (typeof selectorOrArray === 'string') {
+        return root.querySelector(selectorOrArray);
+    }
+
+    // If it's an array, try each selector in order
+    if (Array.isArray(selectorOrArray)) {
+        for (const selector of selectorOrArray) {
+            if (!selector) continue; // Skip null/undefined entries
+            const element = root.querySelector(selector);
+            if (element) {
+                Logger.logSelector(`Selector fallback: found element with '${selector}'`);
+                return element;
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Get cached element with fallback selector support
+ * @param {string|Array<string>} selectorOrArray - Single selector or array of fallback selectors
+ * @param {number} expiry - Cache expiry time in milliseconds
+ * @returns {Element|null} Cached or newly found element
+ */
+function getCachedElement(selectorOrArray, expiry = 5000) {
     const now = Date.now();
-    const cached = cachedElements.get(selector);
-    
+
+    // Create cache key from selector(s)
+    const cacheKey = Array.isArray(selectorOrArray)
+        ? selectorOrArray.join('||')
+        : selectorOrArray;
+
+    const cached = cachedElements.get(cacheKey);
+
     if (cached && (now - cached.timestamp) < expiry && document.contains(cached.element)) {
         return cached.element;
     }
-    
-    const element = document.querySelector(selector);
+
+    // Use the fallback-aware query function
+    const element = queryElementWithFallbacks(selectorOrArray);
+
     if (element) {
-        cachedElements.set(selector, { element, timestamp: now });
+        cachedElements.set(cacheKey, { element, timestamp: now });
     }
+
     return element;
+}
+
+/**
+ * Helper function to query all elements with fallback selectors
+ * @param {string|Array<string>} selectorOrArray - Single selector or array of fallback selectors
+ * @param {Document|Element} root - Root element to query from (defaults to document)
+ * @returns {NodeList|Array} NodeList of matching elements or empty array
+ */
+function queryAllElementsWithFallbacks(selectorOrArray, root = document) {
+    // Handle null/undefined selectors
+    if (!selectorOrArray) return [];
+
+    // If it's a string (single selector), use it directly
+    if (typeof selectorOrArray === 'string') {
+        return root.querySelectorAll(selectorOrArray);
+    }
+
+    // If it's an array, try each selector in order
+    if (Array.isArray(selectorOrArray)) {
+        for (const selector of selectorOrArray) {
+            if (!selector) continue; // Skip null/undefined entries
+            const elements = root.querySelectorAll(selector);
+            if (elements && elements.length > 0) {
+                Logger.logSelector(`Selector fallback (querySelectorAll): found ${elements.length} elements with '${selector}'`);
+                return elements;
+            }
+        }
+    }
+
+    return [];
 }
 
 function clearElementCache() {
     cachedElements.clear();
 }
+
+// --- Health Check System (MeetGeek improvement #4) ---
+const HealthCheck = (function() {
+    // Health check state
+    const state = {
+        lastCaptionTime: null,
+        lastHealthCheck: null,
+        captionStuckWarningShown: false,
+        selectorFailureCount: 0,
+        consecutiveFailures: 0,
+        isHealthy: true,
+        issues: []
+    };
+
+    // Health check thresholds
+    const THRESHOLDS = {
+        CAPTION_TIMEOUT: 5 * 60 * 1000,  // 5 minutes without captions
+        MAX_SELECTOR_FAILURES: 10,        // Max consecutive selector failures
+        HEALTH_CHECK_INTERVAL: 30 * 1000  // Check every 30 seconds
+    };
+
+    // Record that a caption was successfully captured
+    function recordCaptionCapture() {
+        state.lastCaptionTime = Date.now();
+        state.consecutiveFailures = 0;
+        state.captionStuckWarningShown = false;
+
+        // If we were unhealthy, mark as recovered
+        if (!state.isHealthy) {
+            Logger.info(Logger.Category.GENERAL, 'Health check: Caption capture recovered');
+            state.isHealthy = true;
+            state.issues = [];
+        }
+    }
+
+    // Record a selector failure
+    function recordSelectorFailure(selector) {
+        state.selectorFailureCount++;
+        state.consecutiveFailures++;
+        Logger.warn(Logger.Category.SELECTOR, `Selector failure: ${selector} (consecutive: ${state.consecutiveFailures})`);
+    }
+
+    // Reset selector failure count (call when selector succeeds)
+    function resetSelectorFailures() {
+        if (state.consecutiveFailures > 0) {
+            Logger.debug(Logger.Category.SELECTOR, `Selector recovered after ${state.consecutiveFailures} failures`);
+            state.consecutiveFailures = 0;
+        }
+    }
+
+    // Check if caption capture is stuck
+    function checkCaptionHealth() {
+        if (!state.lastCaptionTime) {
+            // No captions captured yet - this is normal at start
+            return true;
+        }
+
+        const timeSinceLastCaption = Date.now() - state.lastCaptionTime;
+
+        // Only check if we're in a meeting
+        if (!isUserInMeeting()) {
+            return true;
+        }
+
+        // If it's been too long since last caption
+        if (timeSinceLastCaption > THRESHOLDS.CAPTION_TIMEOUT) {
+            if (!state.captionStuckWarningShown) {
+                Logger.warn(Logger.Category.CAPTION, `No captions captured in ${Math.floor(timeSinceLastCaption / 1000 / 60)} minutes`);
+                state.captionStuckWarningShown = true;
+                state.issues.push('No captions captured recently');
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Check if critical selectors are still working
+    function checkSelectorHealth() {
+        if (!platformConfig || !SELECTORS) {
+            return true;
+        }
+
+        // Check if caption container can be found
+        const captionsContainer = getCachedElement(SELECTORS.captionsContainer);
+        if (!captionsContainer && isUserInMeeting()) {
+            recordSelectorFailure('captionsContainer');
+
+            if (state.consecutiveFailures >= THRESHOLDS.MAX_SELECTOR_FAILURES) {
+                Logger.error(Logger.Category.SELECTOR, 'Critical: Caption container selector failing repeatedly');
+                state.issues.push('Cannot find caption container');
+                return false;
+            }
+        } else if (captionsContainer) {
+            resetSelectorFailures();
+        }
+
+        return true;
+    }
+
+    // Run comprehensive health check
+    function runHealthCheck() {
+        state.lastHealthCheck = Date.now();
+        state.issues = [];
+
+        const captionHealthy = checkCaptionHealth();
+        const selectorHealthy = checkSelectorHealth();
+
+        const wasHealthy = state.isHealthy;
+        state.isHealthy = captionHealthy && selectorHealthy;
+
+        // Log health status change
+        if (wasHealthy && !state.isHealthy) {
+            Logger.error(Logger.Category.GENERAL, 'Health check FAILED', state.issues);
+        } else if (!wasHealthy && state.isHealthy) {
+            Logger.info(Logger.Category.GENERAL, 'Health check RECOVERED');
+        }
+
+        return state.isHealthy;
+    }
+
+    // Get current health status
+    function getHealthStatus() {
+        return {
+            isHealthy: state.isHealthy,
+            issues: [...state.issues],
+            lastCaptionTime: state.lastCaptionTime,
+            timeSinceLastCaption: state.lastCaptionTime ? Date.now() - state.lastCaptionTime : null,
+            selectorFailureCount: state.selectorFailureCount,
+            consecutiveFailures: state.consecutiveFailures
+        };
+    }
+
+    // Start periodic health checks
+    function startHealthMonitoring() {
+        Logger.info(Logger.Category.GENERAL, 'Starting health monitoring system');
+
+        setInterval(() => {
+            if (isUserInMeeting()) {
+                runHealthCheck();
+            }
+        }, THRESHOLDS.HEALTH_CHECK_INTERVAL);
+    }
+
+    // Public API
+    return {
+        recordCaptionCapture,
+        recordSelectorFailure,
+        resetSelectorFailures,
+        runHealthCheck,
+        getHealthStatus,
+        startHealthMonitoring
+    };
+})();
 
 const isUserInMeeting = () => {
     if (!platformConfig || !platformConfig.isMeetingActive) return false;
@@ -632,7 +992,8 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
             transcriptElements = [];
         }
     } else {
-        transcriptElements = closedCaptionsContainer.querySelectorAll(SELECTORS.captionBlock);
+        // Use fallback-aware query function (MeetGeek improvement #2)
+        transcriptElements = queryAllElementsWithFallbacks(SELECTORS.captionBlock, closedCaptionsContainer);
     }
 
     transcriptElements.forEach(element => {
@@ -796,13 +1157,16 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                             timestamp: new Date().toISOString() // Add timestamp
                         };
                         transcriptArray.push(newCaption);
-                        
+
+                        // Record caption capture for health monitoring (MeetGeek improvement #4)
+                        HealthCheck.recordCaptionCapture();
+
                         // Broadcast new caption to viewer
                         broadcastCaptionUpdate({
                             type: 'new',
                             caption: newCaption
                         });
-                        
+
                         // Update the element ID for next comparison
                         element.setAttribute('data-caption-id', newCaptionId);
                     } else {
@@ -841,6 +1205,10 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                     timestamp: new Date().toISOString() // Add timestamp for Zoom tracking
                 };
                 transcriptArray.push(newCaption);
+
+                // Record caption capture for health monitoring (MeetGeek improvement #4)
+                HealthCheck.recordCaptionCapture();
+
                 // Broadcast new caption to viewer
                 broadcastCaptionUpdate({
                     type: 'new',
@@ -927,9 +1295,15 @@ function updateAttendeeList() {
             }
             
             if (!attendeeInfo) {
-                // Fallback to generic extraction
-                const nameElement = item.querySelector(SELECTORS.attendeeName || SELECTORS.ATTENDEE_NAME || '.participant-name, .attendee-name');
-                const roleElement = item.querySelector(SELECTORS.attendeeRole || SELECTORS.ATTENDEE_ROLE || '.participant-role, .attendee-role');
+                // Fallback to generic extraction with selector fallback support (MeetGeek improvement #2)
+                const nameElement = queryElementWithFallbacks(
+                    SELECTORS.attendeeName || SELECTORS.ATTENDEE_NAME || '.participant-name, .attendee-name',
+                    item
+                );
+                const roleElement = queryElementWithFallbacks(
+                    SELECTORS.attendeeRole || SELECTORS.ATTENDEE_ROLE || '.participant-role, .attendee-role',
+                    item
+                );
                 
                 if (nameElement) {
                     attendeeInfo = {
@@ -1803,6 +2177,10 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
 
                 // Check for saved transcript from iframe or backup
                 const { transcriptBackup, zoomMeetingEnded } = await chrome.storage.local.get(['transcriptBackup', 'zoomMeetingEnded']);
+                console.log(`[Zoom Main Frame] Storage check - zoomMeetingEnded: ${!!zoomMeetingEnded}, transcriptBackup: ${!!transcriptBackup}`);
+                if (transcriptBackup) {
+                    console.log(`[Zoom Main Frame] transcriptBackup has ${transcriptBackup.transcript?.length || 0} captions from ${transcriptBackup.frameType || 'unknown'} frame`);
+                }
 
                 if (zoomMeetingEnded && zoomMeetingEnded.transcript && zoomMeetingEnded.transcript.length > 0) {
                     console.log(`[Zoom Main Frame] Found iframe saved data with ${zoomMeetingEnded.transcript.length} captions`);
@@ -1836,9 +2214,11 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                         } else {
                             console.warn('[Zoom] Skipping backup conversion - storage quota exceeded');
                         }
+                    } else {
+                        console.log('[Zoom Main Frame] Auto-save disabled, backup data not triggered');
                     }
                 } else {
-                    console.log('[Zoom Main Frame] No caption data found from iframe or backup');
+                    console.log('[Zoom Main Frame] No caption data found - zoomMeetingEnded:', !!zoomMeetingEnded, 'transcriptBackup:', !!transcriptBackup);
                 }
 
                 wasInMeeting = nowInMeeting;
@@ -2133,11 +2513,12 @@ const handleCaptionsStateChange = ErrorHandler.wrap(async function() {
     }
     
     const captionsContainer = getCachedElement(SELECTORS.captionsContainer);
-    
+
     // For Google Meet, check if captions container actually has caption blocks
     let hasCaptions = false;
     if (captionsContainer && platformConfig && platformConfig.name === 'Google Meet') {
-        const captionBlocks = captionsContainer.querySelectorAll(SELECTORS.captionBlock);
+        // Use fallback-aware query function (MeetGeek improvement #2)
+        const captionBlocks = queryAllElementsWithFallbacks(SELECTORS.captionBlock, captionsContainer);
         hasCaptions = captionBlocks.length > 0;
     } else if (captionsContainer) {
         hasCaptions = true; // For Teams, container presence is enough
@@ -2364,6 +2745,7 @@ function startPeriodicBackup() {
                     // This ensures data persists when iframe is destroyed on meeting end
                     if (platformConfig && platformConfig.name === 'Zoom') {
                         const hasSpace = await checkStorageQuota();
+                        const isMainFrame = window === window.top;
                         if (hasSpace) {
                             await chrome.storage.local.set({
                                 transcriptBackup: {
@@ -2372,10 +2754,11 @@ function startPeriodicBackup() {
                                     recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : null,
                                     lastBackup: new Date().toISOString(),
                                     attendeeData: attendeeData,
-                                    sessionId: currentSessionId // Include session ID for better tracking
+                                    sessionId: currentSessionId, // Include session ID for better tracking
+                                    frameType: isMainFrame ? 'main' : 'iframe'
                                 }
                             });
-                            // console.log(`[Zoom Backup] Saved ${transcriptArray.length} captions to backup storage`);
+                            console.log(`[Zoom ${isMainFrame ? 'Main' : 'Iframe'}] Backup saved: ${transcriptArray.length} captions`);
                         } else {
                             console.warn('[Zoom Backup] Skipping backup - storage quota exceeded');
                         }
@@ -2623,7 +3006,7 @@ function initializeEventDrivenSystem() {
 
     // Clear badge on initialization (page load/refresh)
     updateBadgeStatus(false);
-    
+
     // Set up observers for meeting state changes
     setupMeetingObserver();
     setupCaptionsObserver();
@@ -2767,6 +3150,9 @@ document.addEventListener('visibilitychange', () => {
 // Initialize the system
 if (initializePlatform()) {
     initializeEventDrivenSystem();
+
+    // Start health monitoring system (MeetGeek improvement #4)
+    HealthCheck.startHealthMonitoring();
 } else {
     console.error('[Caption Saver] Failed to initialize - unsupported platform');
 }
