@@ -659,7 +659,6 @@ document.addEventListener('DOMContentLoaded', () => {
                             <img src="${escapeHtml(safeUrl)}"
                                  alt="${escapeHtml(att.alt || 'Image attachment')}"
                                  onerror="this.parentElement.style.display='none'">
-                            <div class="attachment-filename">${escapeHtml(att.filename || 'image')}</div>
                         </div>`;
                     }).join('')}
                 </div>
