@@ -1148,15 +1148,20 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                     if (speakerChanged) {
                         // New speaker - create a new caption entry
                         const newCaptionId = `${captionId}_${Date.now()}`;
-                        const newCaption = { 
-                            Name: name, 
-                            Text: text, 
+                        const newCaption = {
+                            Name: name,
+                            Text: text,
                             Time: time,
                             Type: 'caption',  // Mark as caption
                             key: newCaptionId,
                             timestamp: new Date().toISOString() // Add timestamp
                         };
                         transcriptArray.push(newCaption);
+
+                        // Log if capturing while hidden (helps diagnose lock screen behavior)
+                        if (document.hidden) {
+                            console.log('[Caption Saver] ✓ Captured caption while page HIDDEN:', text.substring(0, 50));
+                        }
 
                         // Record caption capture for health monitoring (MeetGeek improvement #4)
                         HealthCheck.recordCaptionCapture();
@@ -1196,15 +1201,20 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                 }
             } else {
                 // Add new entry with timestamp for Zoom tracking
-                const newCaption = { 
-                    Name: name, 
-                    Text: text, 
-                    Time: time, 
-                    Type: 'caption', 
+                const newCaption = {
+                    Name: name,
+                    Text: text,
+                    Time: time,
+                    Type: 'caption',
                     key: captionId,
                     timestamp: new Date().toISOString() // Add timestamp for Zoom tracking
                 };
                 transcriptArray.push(newCaption);
+
+                // Log if capturing while hidden (helps diagnose lock screen behavior)
+                if (document.hidden) {
+                    console.log('[Caption Saver] ✓ Captured caption while page HIDDEN:', text.substring(0, 50));
+                }
 
                 // Record caption capture for health monitoring (MeetGeek improvement #4)
                 HealthCheck.recordCaptionCapture();
@@ -1543,11 +1553,12 @@ async function startAttendeeTracking() {
         } else {
             // Teams logic - check if chat capture is enabled to avoid conflicts
             const { chatCapture } = await chrome.storage.sync.get(['chatCapture']);
-            
-            // Only auto-open participant panel if setting is enabled AND chat capture is not active
-            if (autoOpenAttendees && !chatCapture) {
+
+            // Only auto-open participant panel if setting is enabled AND chat capture is explicitly disabled
+            // Default to chat capture enabled (chatCapture !== false) to match popup behavior
+            if (autoOpenAttendees && chatCapture === false) {
                 await tryOpenParticipantPanel();
-            } else if (autoOpenAttendees && chatCapture) {
+            } else if (autoOpenAttendees && chatCapture !== false) {
                 console.log("Chat capture is enabled - skipping auto-open attendees to avoid panel conflicts");
             }
             
@@ -1769,7 +1780,14 @@ function captureChatMessages(skipInitialMessages = false) {
         
         // Create chat message with consistent format
         // Use the actual message timestamp from messageData for chronological sorting
-        const messageTime = messageData.timestamp ? new Date(messageData.timestamp) : new Date();
+        let messageTime = messageData.timestamp ? new Date(messageData.timestamp) : new Date();
+
+        // Validate that the Date object is valid, fallback to current time if not
+        if (isNaN(messageTime.getTime())) {
+            console.warn(`[Chat Capture] Invalid timestamp for message ${messageData.id}, using current time`);
+            messageTime = new Date();
+        }
+
         const chatMessage = {
             Name: messageData.author,
             Text: messageData.text,
@@ -1977,8 +1995,12 @@ function setupMeetingObserver() {
     // Setup visibility change handler to recheck meeting state when tab becomes visible
     if (!visibilityChangeHandler) {
         visibilityChangeHandler = () => {
-            if (!document.hidden) {
-                console.log('[Caption Saver] Tab became visible, rechecking meeting state');
+            if (document.hidden) {
+                console.log('[Caption Saver] Tab became HIDDEN - captions may stop updating if Teams stops rendering');
+                console.log('[Caption Saver] Current transcript count:', transcriptArray.length);
+            } else {
+                console.log('[Caption Saver] Tab became VISIBLE, rechecking meeting state');
+                console.log('[Caption Saver] Transcript count after being hidden:', transcriptArray.length);
                 // Delay check to allow DOM to stabilize
                 setTimeout(() => {
                     handleMeetingStateChange();
@@ -2673,7 +2695,8 @@ async function startCaptureSession() {
     // Start chat capture if enabled (for platforms that support it)
     if (platformConfig && platformConfig.chatCapture?.isSupported()) {
         chrome.storage.sync.get(['chatCapture'], (result) => {
-            if (result.chatCapture) {
+            // Default to true if not explicitly set to false (matches popup default behavior)
+            if (result.chatCapture !== false) {
                 // console.log('[Caption Saver] Starting chat capture for', platformConfig.name);
                 startChatCapture();
             }

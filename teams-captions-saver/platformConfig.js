@@ -147,7 +147,8 @@ const PLATFORM_CONFIGS = {
                 const authorEl = container?.querySelector('[data-tid="message-author-name"]');
                 const contentEl = msgElement.querySelector('[id^="content-"]');
 
-                if (!contentEl || !contentEl.textContent) return null;
+                // Don't skip if contentEl exists but has no text - might have images/attachments
+                if (!contentEl) return null;
 
                 // Extract image attachments
                 const attachments = [];
@@ -253,10 +254,16 @@ const PLATFORM_CONFIGS = {
                     timestamp = parseInt(messageId);
                 }
 
+                // Get text content, fallback to aria-label, or use placeholder if only attachments
+                const messageText = contentEl.textContent || contentEl.getAttribute('aria-label') || '';
+
+                // Skip if no text AND no attachments
+                if (!messageText && attachments.length === 0) return null;
+
                 return {
                     id: messageId,
                     author: authorEl?.textContent || 'Unknown',
-                    text: contentEl.textContent || contentEl.getAttribute('aria-label'),
+                    text: messageText || '[Attachment]',
                     time: null, // Will be replaced with formatted timestamp in content_script
                     timestamp: timestamp, // Unix timestamp in milliseconds for filtering
                     attachments: attachments.length > 0 ? attachments : undefined

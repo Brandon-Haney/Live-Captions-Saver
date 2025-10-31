@@ -354,7 +354,7 @@
 
         .caption-content {
             display: block;
-            overflow: hidden; /* Prevents float from affecting layout */
+            overflow: visible; /* Allow image hover effects to scale without clipping */
         }
         .caption-header {
             display: inline;
@@ -644,6 +644,7 @@
             margin-top: 10px;
             display: block; /* Changed from flex to block for better natural flow */
             width: 100%;
+            overflow: visible; /* Allow child thumbnails to scale on hover without clipping */
         }
 
         .attachment-container > .attachment-thumbnail {
@@ -666,6 +667,7 @@
             transform: scale(1.02);
             border-color: #60A5FA;
             box-shadow: 0 4px 12px rgba(96, 165, 250, 0.3);
+            z-index: 10; /* Ensure hover effect appears above other content */
         }
 
         .attachment-thumbnail img {
