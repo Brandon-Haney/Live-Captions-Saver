@@ -3354,6 +3354,11 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             })();
             return true; // Will respond asynchronously
         
+        case 'recording_transcript_saved':
+            // Show toast notification when recording transcript is detected
+            showToastNotification(request.meetingTitle || 'Recording');
+            break;
+
         default:
             // Ignore live updates that might be relayed back
             if (request.message !== 'live_caption_update' && request.message !== 'live_attendee_update') {
@@ -3363,6 +3368,99 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     }
 
     // Don't return true here - only specific cases that use async sendResponse should return true
+});
+
+// --- Toast Notification for Recording Transcripts ---
+function showToastNotification(meetingTitle) {
+    // Create toast element
+    const toast = document.createElement('div');
+    toast.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: #0078d4;
+        color: white;
+        padding: 16px 20px;
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        z-index: 10000;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 14px;
+        max-width: 400px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+    `;
+
+    toast.innerHTML = `
+        <div style="font-weight: 600; margin-bottom: 4px;">📥 Recording Transcript Detected</div>
+        <div style="font-size: 12px; opacity: 0.9;">${meetingTitle}</div>
+        <div style="font-size: 11px; opacity: 0.8; margin-top: 6px;">Click extension icon to download</div>
+    `;
+
+    // Add hover effect
+    toast.addEventListener('mouseenter', () => {
+        toast.style.transform = 'scale(1.02)';
+    });
+    toast.addEventListener('mouseleave', () => {
+        toast.style.transform = 'scale(1)';
+    });
+
+    // Click to open extension popup
+    toast.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ message: 'open_popup' });
+        toast.remove();
+    });
+
+    document.body.appendChild(toast);
+
+    // Auto-dismiss after 5 seconds
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(100%)';
+        setTimeout(() => toast.remove(), 300);
+    }, 5000);
+}
+
+// --- Recording Transcript Interceptor ---
+// Inject external script to intercept Teams recording transcript requests
+// Using external file to avoid CSP inline script violations
+(function injectTranscriptInterceptor() {
+    const script = document.createElement('script');
+    script.src = chrome.runtime.getURL('transcript_interceptor.js');
+    script.onload = function() {
+        console.log('[Recording Transcript] Interceptor script loaded');
+        this.remove();
+    };
+    script.onerror = function() {
+        console.error('[Recording Transcript] Failed to load interceptor script');
+        this.remove();
+    };
+
+    (document.head || document.documentElement).appendChild(script);
+})();
+
+// Listen for transcript data from injected script
+window.addEventListener('message', (event) => {
+    // Only accept messages from same origin
+    if (event.source !== window) return;
+
+    if (event.data && event.data.type === 'TEAMS_RECORDING_TRANSCRIPT') {
+        console.log('[Recording Transcript] Received transcript data from page');
+
+        // Extract meeting title from page if possible
+        const meetingTitle = document.title.replace(/ \| Microsoft Teams.*$/, '').trim();
+
+        // Send to service worker for storage
+        chrome.runtime.sendMessage({
+            message: 'save_recording_transcript',
+            transcript: event.data.data,
+            url: event.data.url,
+            timestamp: event.data.timestamp,
+            meetingTitle: meetingTitle || 'Teams Recording'
+        }).catch(err => {
+            console.error('[Recording Transcript] Failed to send to service worker:', err);
+        });
+    }
 });
 
 // Live Caption Saver content script is running

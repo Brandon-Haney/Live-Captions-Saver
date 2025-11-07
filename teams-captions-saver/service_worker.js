@@ -895,6 +895,42 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 // --- Download Filename Handler ---
 // Chrome ignores the filename parameter when saveAs is false (auto-download)
 // This handler ensures our filenames are used for auto-downloads
+// --- Recording Transcript Badge Management ---
+async function updateRecordingBadge(count) {
+    try {
+        if (count > 0) {
+            await chrome.action.setBadgeText({ text: String(count) });
+            await chrome.action.setBadgeBackgroundColor({ color: '#0078d4' }); // Teams blue
+            await chrome.action.setTitle({ title: `Live Captions Saver - ${count} recording transcript${count > 1 ? 's' : ''} available` });
+        } else {
+            await chrome.action.setBadgeText({ text: '' });
+            await chrome.action.setTitle({ title: 'Live Captions Saver' });
+        }
+    } catch (error) {
+        console.error('[Service Worker] Failed to update badge:', error);
+    }
+}
+
+// Clean up expired recording transcripts on startup
+(async function cleanupExpiredRecordings() {
+    try {
+        const { recording_transcripts = [] } = await chrome.storage.local.get('recording_transcripts');
+        const now = new Date().toISOString();
+
+        const validTranscripts = recording_transcripts.filter(rec => rec.expiresAt > now);
+
+        if (validTranscripts.length !== recording_transcripts.length) {
+            console.log(`[Service Worker] Cleaned up ${recording_transcripts.length - validTranscripts.length} expired recording transcripts`);
+            await chrome.storage.local.set({ recording_transcripts: validTranscripts });
+        }
+
+        // Update badge with current count
+        await updateRecordingBadge(validTranscripts.length);
+    } catch (error) {
+        console.error('[Service Worker] Failed to cleanup expired recordings:', error);
+    }
+})();
+
 chrome.downloads.onDeterminingFilename?.addListener((downloadItem, suggest) => {
     // Check if we have a pending filename for this download
     const pendingFilename = pendingDownloads.get(downloadItem.id) || pendingDownloads.get('next');
@@ -1295,6 +1331,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 break;
                 
+            case 'save_recording_transcript':
+                // Store recording transcript from network interceptor
+                try {
+                    console.log('[Service Worker] Saving recording transcript:', message.meetingTitle);
+
+                    const transcriptId = `recording_${Date.now()}`;
+                    const recordingData = {
+                        id: transcriptId,
+                        transcript: message.transcript,
+                        meetingTitle: message.meetingTitle,
+                        url: message.url,
+                        capturedAt: message.timestamp,
+                        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours
+                    };
+
+                    // Get existing recordings
+                    const { recording_transcripts = [] } = await chrome.storage.local.get('recording_transcripts');
+
+                    // Add new recording
+                    recording_transcripts.push(recordingData);
+
+                    // Store updated list
+                    await chrome.storage.local.set({ recording_transcripts });
+
+                    // Update badge to show count
+                    await updateRecordingBadge(recording_transcripts.length);
+
+                    // Show notification to content script (toast)
+                    if (sender.tab && sender.tab.id) {
+                        chrome.tabs.sendMessage(sender.tab.id, {
+                            message: 'recording_transcript_saved',
+                            meetingTitle: message.meetingTitle
+                        }).catch(err => {
+                            console.log('[Service Worker] Could not send toast notification:', err);
+                        });
+                    }
+
+                    console.log('[Service Worker] Recording transcript saved:', transcriptId);
+                    sendResponse({ success: true, id: transcriptId });
+                } catch (error) {
+                    console.error('[Service Worker] Failed to save recording transcript:', error);
+                    sendResponse({ success: false, error: error.message });
+                }
+                break;
+
+            case 'update_recording_badge':
+                // Update badge count for recording transcripts
+                await updateRecordingBadge(message.count);
+                sendResponse({ success: true });
+                break;
+
             case 'error_logged':
                 // Central error logging - could send to analytics service
                 console.warn('[Live Caption Saver] Error logged:', message.error);

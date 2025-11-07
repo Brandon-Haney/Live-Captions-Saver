@@ -1473,9 +1473,12 @@ async function initializePopup() {
     await loadCustomTemplates();
     setupEventListeners();
     await initializeSessionHistory(); // Initialize session history
-    
+
     // Load active sessions for multi-meeting support
     await loadActiveSessions();
+
+    // Load recording transcripts
+    await loadRecordingTranscripts();
 
     const tab = await getActiveMeetingTab();
     if (!tab) {
@@ -1675,6 +1678,263 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     return false; // No async response
 });
+
+// --- Recording Transcript Management ---
+async function loadRecordingTranscripts() {
+    try {
+        const { recording_transcripts = [] } = await chrome.storage.local.get('recording_transcripts');
+        const now = new Date().toISOString();
+
+        // Filter out expired transcripts
+        const validTranscripts = recording_transcripts.filter(rec => rec.expiresAt > now);
+
+        const section = document.getElementById('recording-transcripts-section');
+        const countEl = document.getElementById('recording-count');
+        const pluralEl = document.getElementById('recording-plural');
+        const listEl = document.getElementById('recordings-list');
+
+        if (validTranscripts.length > 0) {
+            section.style.display = 'block';
+            countEl.textContent = validTranscripts.length;
+            pluralEl.textContent = validTranscripts.length === 1 ? '' : 's';
+
+            // Build recordings list
+            listEl.innerHTML = validTranscripts.map(rec => {
+                const capturedDate = new Date(rec.capturedAt);
+                const timeAgo = getTimeAgo(capturedDate);
+
+                return `
+                    <div style="background: rgba(255,255,255,0.95); border-radius: 6px; padding: 10px; margin-bottom: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-weight: 600; font-size: 13px; color: #333; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${rec.meetingTitle}">
+                                    ${rec.meetingTitle}
+                                </div>
+                                <div style="font-size: 11px; color: #666;">
+                                    Captured ${timeAgo}
+                                </div>
+                            </div>
+                            <button class="delete-recording" data-id="${rec.id}" style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 10px; flex-shrink: 0; margin-left: 8px;">
+                                Delete
+                            </button>
+                        </div>
+                        <div style="display: flex; gap: 6px;">
+                            <button class="download-recording" data-id="${rec.id}" data-format="json" style="flex: 1; background: #0078d4; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 500;">
+                                📥 JSON
+                            </button>
+                            <button class="download-recording" data-id="${rec.id}" data-format="txt" style="flex: 1; background: #28a745; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 500;">
+                                📄 TXT
+                            </button>
+                            <button class="download-recording" data-id="${rec.id}" data-format="markdown" style="flex: 1; background: #6f42c1; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 500;">
+                                📝 MD
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // Add event listeners
+            document.querySelectorAll('.download-recording').forEach(btn => {
+                btn.addEventListener('click', handleRecordingDownload);
+            });
+
+            document.querySelectorAll('.delete-recording').forEach(btn => {
+                btn.addEventListener('click', handleRecordingDelete);
+            });
+
+            document.getElementById('clear-all-recordings').addEventListener('click', handleClearAllRecordings);
+        } else {
+            section.style.display = 'none';
+        }
+    } catch (error) {
+        console.error('[Popup] Failed to load recording transcripts:', error);
+    }
+}
+
+function getTimeAgo(date) {
+    const seconds = Math.floor((new Date() - date) / 1000);
+    if (seconds < 60) return 'just now';
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+async function handleRecordingDownload(e) {
+    const id = e.target.dataset.id;
+    const format = e.target.dataset.format;
+
+    try {
+        const { recording_transcripts = [] } = await chrome.storage.local.get('recording_transcripts');
+        const recording = recording_transcripts.find(r => r.id === id);
+
+        if (!recording) {
+            alert('Recording not found');
+            return;
+        }
+
+        // Download based on format
+        await downloadRecordingTranscript(recording, format);
+    } catch (error) {
+        console.error('[Popup] Download failed:', error);
+        alert('Failed to download recording transcript');
+    }
+}
+
+async function handleRecordingDelete(e) {
+    const id = e.target.dataset.id;
+
+    if (!confirm('Delete this recording transcript?')) return;
+
+    try {
+        const { recording_transcripts = [] } = await chrome.storage.local.get('recording_transcripts');
+        const filtered = recording_transcripts.filter(r => r.id !== id);
+
+        await chrome.storage.local.set({ recording_transcripts: filtered });
+
+        // Update badge
+        chrome.runtime.sendMessage({
+            message: 'update_recording_badge',
+            count: filtered.length
+        });
+
+        // Reload UI
+        await loadRecordingTranscripts();
+    } catch (error) {
+        console.error('[Popup] Delete failed:', error);
+        alert('Failed to delete recording transcript');
+    }
+}
+
+async function handleClearAllRecordings() {
+    if (!confirm('Clear all recording transcripts?')) return;
+
+    try {
+        await chrome.storage.local.set({ recording_transcripts: [] });
+
+        // Update badge
+        chrome.runtime.sendMessage({
+            message: 'update_recording_badge',
+            count: 0
+        });
+
+        // Reload UI
+        await loadRecordingTranscripts();
+    } catch (error) {
+        console.error('[Popup] Clear all failed:', error);
+        alert('Failed to clear recording transcripts');
+    }
+}
+
+async function downloadRecordingTranscript(recording, format) {
+    const date = new Date();
+    const dateStr = date.toISOString().split('T')[0];
+    const timeStr = date.toTimeString().split(' ')[0].replace(/:/g, '-');
+    const safeMeetingTitle = recording.meetingTitle.replace(/[^a-z0-9]/gi, '-').replace(/-+/g, '-');
+
+    let content, extension, mimeType;
+
+    if (format === 'json') {
+        content = JSON.stringify(recording.transcript, null, 2);
+        extension = 'json';
+        mimeType = 'application/json';
+    } else if (format === 'txt') {
+        content = convertRecordingToText(recording.transcript);
+        extension = 'txt';
+        mimeType = 'text/plain';
+    } else if (format === 'markdown') {
+        content = convertRecordingToMarkdown(recording.transcript);
+        extension = 'md';
+        mimeType = 'text/markdown';
+    }
+
+    const filename = `teams-recording-transcript-${safeMeetingTitle}-${dateStr}-${timeStr}.${extension}`;
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+
+    chrome.downloads.download({
+        url: url,
+        filename: filename,
+        saveAs: false
+    });
+}
+
+function convertRecordingToText(transcript) {
+    let output = '=== TEAMS RECORDING TRANSCRIPT ===\n\n';
+
+    // Handle Teams recording JSON format
+    if (transcript.entries && Array.isArray(transcript.entries)) {
+        transcript.entries.forEach(entry => {
+            // Parse timestamp from startOffset (format: "00:00:03.9178033")
+            const timestamp = formatRecordingTimestamp(entry.startOffset);
+            const text = entry.text || '';
+
+            // Format: [0:03] Caption text
+            output += `[${timestamp}] ${text}\n`;
+        });
+    } else if (Array.isArray(transcript)) {
+        // Fallback for other formats
+        transcript.forEach(item => {
+            if (item.speaker && item.text) {
+                output += `[${item.timestamp || ''}] ${item.speaker}: ${item.text}\n`;
+            } else if (item.text) {
+                output += `${item.text}\n`;
+            }
+        });
+    } else {
+        // Raw JSON fallback
+        output += JSON.stringify(transcript, null, 2);
+    }
+
+    return output;
+}
+
+function formatRecordingTimestamp(timeString) {
+    // Convert "00:00:03.9178033" to "0:03" format
+    if (!timeString) return '0:00';
+
+    const parts = timeString.split(':');
+    if (parts.length < 3) return timeString;
+
+    const hours = parseInt(parts[0]);
+    const minutes = parseInt(parts[1]);
+    const seconds = Math.floor(parseFloat(parts[2]));
+
+    if (hours > 0) {
+        return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    } else {
+        return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    }
+}
+
+function convertRecordingToMarkdown(transcript) {
+    let md = '# Teams Recording Transcript\n\n';
+
+    // Handle Teams recording JSON format
+    if (transcript.entries && Array.isArray(transcript.entries)) {
+        transcript.entries.forEach(entry => {
+            const timestamp = formatRecordingTimestamp(entry.startOffset);
+            const text = entry.text || '';
+
+            // Format each entry with timestamp in bold
+            md += `**[${timestamp}]** ${text}\n\n`;
+        });
+    } else if (Array.isArray(transcript)) {
+        // Fallback for other formats
+        transcript.forEach(item => {
+            if (item.speaker && item.text) {
+                md += `**${item.speaker}** _(${item.timestamp || 'Unknown time'})_\n\n`;
+                md += `${item.text}\n\n---\n\n`;
+            } else if (item.text) {
+                md += `${item.text}\n\n`;
+            }
+        });
+    } else {
+        // Raw JSON fallback
+        md += '```json\n' + JSON.stringify(transcript, null, 2) + '\n```\n';
+    }
+
+    return md;
+}
 
 document.addEventListener('DOMContentLoaded', () => {
     initializePopup();

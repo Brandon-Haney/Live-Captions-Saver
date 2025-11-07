@@ -365,7 +365,22 @@
 <body>
     <h2>Live Captions Saver v5.1</h2>
     <p class="subtitle" id="platform-info">Supporting Teams, Google Meet & Zoom</p>
-    
+
+    <!-- Recording Transcripts Section -->
+    <div id="recording-transcripts-section" style="display: none; margin: 15px 0; padding: 12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 8px; box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+            <div style="color: white; font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 6px;">
+                📥 <span id="recording-count">0</span> Recording Transcript<span id="recording-plural">s</span> Available
+            </div>
+            <button id="clear-all-recordings" style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); color: white; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; transition: all 0.2s;">
+                Clear All
+            </button>
+        </div>
+        <div id="recordings-list" style="max-height: 300px; overflow-y: auto;">
+            <!-- Recording items will be dynamically added here -->
+        </div>
+    </div>
+
     <!-- Session Selector for Multiple Meetings -->
     <div id="session-manager" style="display: none; width: calc(100% - 20px); margin: 10px auto;">
         <div style="margin-bottom: 8px; color: #6c757d; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;">Active Meeting Sessions</div>
