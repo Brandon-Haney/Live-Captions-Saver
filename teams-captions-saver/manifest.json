@@ -56,7 +56,8 @@
       "resources": [
         "viewer.html",
         "viewer.js",
-        "sessionManager.js"
+        "sessionManager.js",
+        "transcript_interceptor.js"
       ],
       "matches": [
         "<all_urls>"
