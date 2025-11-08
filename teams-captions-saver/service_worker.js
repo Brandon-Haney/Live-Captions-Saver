@@ -175,7 +175,7 @@ function applyAliasesToAttendeeReport(attendeeReport, aliases = {}) {
 // --- Formatting Functions ---
 function formatAsTxt(transcript, attendeeReport) {
     let content = '';
-    
+
     console.log('[formatAsTxt] Received attendeeReport:', attendeeReport);
 
     // Handle both formats of attendee reports (Teams/Meet vs Zoom)
@@ -213,6 +213,20 @@ function formatAsTxt(transcript, attendeeReport) {
         }
     } else {
         console.log('[formatAsTxt] No attendee report provided');
+    }
+
+    // Fallback: If still no attendees, generate from speakers in transcript
+    if (totalAttendees === 0) {
+        console.log('[formatAsTxt] No attendee data found, generating from speakers');
+        const speakers = [...new Set(transcript.map(entry => entry.Name).filter(name => name && name.trim()))];
+        if (speakers.length > 0) {
+            attendeeList = speakers.sort();
+            totalAttendees = speakers.length;
+            // Try to get meeting start from first transcript entry
+            if (transcript.length > 0 && transcript[0].timestamp) {
+                meetingStart = transcript[0].timestamp;
+            }
+        }
     }
 
     // Add attendee information if available
@@ -271,13 +285,19 @@ function formatAsTxt(transcript, attendeeReport) {
     return content;
 }
 
-function formatAsMarkdown(transcript, attendeeReport) {
+function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled Meeting', recordingStartTime = null) {
     let content = '';
+
+    // Add meeting title as H1
+    content += `# ${meetingTitle}\n\n`;
+
+    // Add meeting metadata section
+    content += '## Meeting Information\n\n';
 
     // Handle both formats of attendee reports (Teams/Meet vs Zoom)
     let attendeeList = [];
     let totalAttendees = 0;
-    let meetingStart = null;
+    let meetingStart = recordingStartTime;
     let attendeeHistory = [];
 
     if (attendeeReport) {
@@ -285,7 +305,7 @@ function formatAsMarkdown(transcript, attendeeReport) {
         if (attendeeReport.attendeeList && attendeeReport.totalUniqueAttendees) {
             attendeeList = attendeeReport.attendeeList;
             totalAttendees = attendeeReport.totalUniqueAttendees;
-            meetingStart = attendeeReport.meetingStartTime;
+            meetingStart = attendeeReport.meetingStartTime || recordingStartTime;
             attendeeHistory = attendeeReport.attendeeHistory || [];
         }
         // Format 2: Zoom format
@@ -298,24 +318,55 @@ function formatAsMarkdown(transcript, attendeeReport) {
                 attendeeList = Object.values(attendeeReport.allAttendees);
             }
             totalAttendees = attendeeList.length;
-            meetingStart = attendeeReport.meetingStartTime;
+            meetingStart = attendeeReport.meetingStartTime || recordingStartTime;
             attendeeHistory = attendeeReport.attendeeHistory || [];
         }
     }
 
-    // Add attendee information if available
-    if (totalAttendees > 0) {
-        content += '# Meeting Attendees\n\n';
-        content += `**Total Attendees:** ${totalAttendees}\n\n`;
-        if (meetingStart) {
-            content += `**Meeting Start:** ${new Date(meetingStart).toLocaleString()}\n\n`;
+    // Fallback: If still no attendees, generate from speakers in transcript
+    if (totalAttendees === 0) {
+        console.log('[formatAsMarkdown] No attendee data found, generating from speakers');
+        const speakers = [...new Set(transcript.map(entry => entry.Name).filter(name => name && name.trim()))];
+        if (speakers.length > 0) {
+            attendeeList = speakers.sort();
+            totalAttendees = speakers.length;
+            // Try to get meeting start from first transcript entry
+            if (transcript.length > 0 && transcript[0].timestamp) {
+                meetingStart = transcript[0].timestamp;
+            }
         }
-        content += '## Attendee List\n\n';
+    }
+
+    // Add metadata
+    content += `**Total Captions:** ${transcript.length}\n\n`;
+
+    if (totalAttendees > 0) {
+        content += `**Total Attendees:** ${totalAttendees}\n\n`;
+    }
+
+    if (meetingStart) {
+        content += `**Meeting Start:** ${new Date(meetingStart).toLocaleString()}\n\n`;
+    }
+
+    // Add first and last caption times if available
+    if (transcript.length > 0 && transcript[0].Time && transcript[transcript.length - 1].Time) {
+        content += `**First Caption:** ${transcript[0].Time}\n\n`;
+        content += `**Last Caption:** ${transcript[transcript.length - 1].Time}\n\n`;
+    }
+
+    content += `**Exported:** ${new Date().toLocaleString()}\n\n`;
+
+    // Add attendee list if available
+    if (totalAttendees > 0) {
+        content += '---\n\n';
+        content += '## Attendees\n\n';
         attendeeList.forEach(name => {
             content += `- ${name}\n`;
         });
-        content += '\n---\n\n# Transcript\n\n';
     }
+
+    content += '\n---\n\n';
+    content += '## Transcript\n\n';
 
     // Merge transcript and attendee events chronologically
     const combinedEvents = [...transcript];
@@ -341,41 +392,69 @@ function formatAsMarkdown(transcript, attendeeReport) {
         return timeA - timeB;
     });
 
+    // Format transcript with speaker headings and blockquotes
     let lastSpeaker = null;
-    content += combinedEvents.map(entry => {
+    combinedEvents.forEach(entry => {
         if (entry.Type === 'attendance') {
-            // Format: ● Name joined/left the meeting (Time)
-            lastSpeaker = null; // Reset speaker grouping
-            return `\n*● ${entry.Name} ${entry.Text}* (${entry.Time})\n`;
+            // Join/leave events - reset speaker grouping
+            lastSpeaker = null;
+            content += `\n*● ${entry.Name} ${entry.Text}* (${entry.Time})\n\n`;
         } else {
-            // Add text indicator for chat messages
+            // Regular captions or chat messages
             const typeIndicator = entry.Type === 'chat' ? '[CHAT] ' : '';
+
+            // Add speaker heading if speaker changed
             if (entry.Name !== lastSpeaker) {
                 lastSpeaker = entry.Name;
-                return `\n${typeIndicator}**${entry.Name}** (${entry.Time}):\n> ${entry.Text}`;
+                content += `\n### ${typeIndicator}${entry.Name}\n\n`;
             }
-            return `> ${entry.Text}`;
-        }
-    }).join('\n').trim();
 
-    return content;
+            // Add caption as blockquote with timestamp
+            content += `> **[${entry.Time}]** ${entry.Text}\n\n`;
+        }
+    });
+
+    return content.trim();
 }
 
 function formatAsDoc(transcript, attendeeReport) {
     let body = '';
     let attendeeHistory = [];
+    let attendeeList = [];
+    let totalAttendees = 0;
+    let meetingStart = null;
+
+    // Fallback: If no attendee report, generate from speakers in transcript
+    if (!attendeeReport || attendeeReport.totalUniqueAttendees === 0) {
+        console.log('[formatAsDoc] No attendee report, generating from speakers');
+        const speakers = [...new Set(transcript.map(entry => entry.Name).filter(name => name && name.trim()))];
+        if (speakers.length > 0) {
+            attendeeList = speakers.sort();
+            totalAttendees = speakers.length;
+            // Try to get meeting start from first transcript entry
+            if (transcript.length > 0 && transcript[0].timestamp) {
+                meetingStart = transcript[0].timestamp;
+            }
+        }
+    } else if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
+        attendeeList = attendeeReport.attendeeList;
+        totalAttendees = attendeeReport.totalUniqueAttendees;
+        meetingStart = attendeeReport.meetingStartTime;
+        attendeeHistory = attendeeReport.attendeeHistory || [];
+    }
 
     // Add attendee information if available
-    if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
+    if (totalAttendees > 0) {
         body += '<h2>Meeting Attendees</h2>';
-        body += `<p><b>Total Attendees:</b> ${attendeeReport.totalUniqueAttendees}</p>`;
-        body += `<p><b>Meeting Start:</b> ${escapeHtml(new Date(attendeeReport.meetingStartTime).toLocaleString())}</p>`;
+        body += `<p><b>Total Attendees:</b> ${totalAttendees}</p>`;
+        if (meetingStart) {
+            body += `<p><b>Meeting Start:</b> ${escapeHtml(new Date(meetingStart).toLocaleString())}</p>`;
+        }
         body += '<h3>Attendee List</h3><ul>';
-        attendeeReport.attendeeList.forEach(name => {
+        attendeeList.forEach(name => {
             body += `<li>${escapeHtml(name)}</li>`;
         });
         body += '</ul><hr><h2>Transcript</h2>';
-        attendeeHistory = attendeeReport.attendeeHistory || [];
     }
 
     // Merge transcript and attendee events chronologically
@@ -429,15 +508,32 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
 
     let metadataHeader = `Meeting Title: ${meetingTitle}\nDate: ${date.toLocaleString()}`;
     let attendeeHistory = [];
+    let attendeeList = [];
+    let totalAttendees = 0;
 
-    // Add attendee information if available
     if (attendeeReport && attendeeReport.totalUniqueAttendees > 0) {
-        metadataHeader += `\nTotal Attendees: ${attendeeReport.totalUniqueAttendees}`;
+        attendeeList = attendeeReport.attendeeList;
+        totalAttendees = attendeeReport.totalUniqueAttendees;
+        attendeeHistory = attendeeReport.attendeeHistory || [];
+    }
+
+    // Fallback: If still no attendees, generate from speakers in transcript
+    if (totalAttendees === 0) {
+        console.log('[formatForAi] No attendee data found, generating from speakers');
+        const speakers = [...new Set(transcript.map(entry => entry.Name).filter(name => name && name.trim()))];
+        if (speakers.length > 0) {
+            attendeeList = speakers.sort();
+            totalAttendees = speakers.length;
+        }
+    }
+
+    // Add attendee info to metadata header
+    if (totalAttendees > 0) {
+        metadataHeader += `\nTotal Attendees: ${totalAttendees}`;
         metadataHeader += '\n\nAttendee List:';
-        attendeeReport.attendeeList.forEach(name => {
+        attendeeList.forEach(name => {
             metadataHeader += `\n- ${name}`;
         });
-        attendeeHistory = attendeeReport.attendeeHistory || [];
     }
 
     // Merge transcript and attendee events chronologically
@@ -472,7 +568,7 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
         } else {
             return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
         }
-    }).join('\n\n');
+    }).join('\n');
 
     let finalContent = aiInstructions ? `${aiInstructions}\n\n---\n\n` : '';
     finalContent += `${metadataHeader}\n\n---\n\n${transcriptText}`;
@@ -588,6 +684,11 @@ async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
             filename = `Meeting_${dateStr}`;
         }
 
+        // Add -AI suffix for AI format exports
+        if (format === 'ai') {
+            filename += '-AI';
+        }
+
         console.log('[generateFilename] Final filename:', filename);
         return filename;
     } catch (error) {
@@ -632,7 +733,7 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
 
     switch (format) {
         case 'md':
-            content = formatAsMarkdown(processedTranscript, processedAttendeeReport);
+            content = formatAsMarkdown(processedTranscript, processedAttendeeReport, meetingTitle, recordingStartTime);
             extension = 'md';
             mimeType = 'text/markdown';
             break;
@@ -686,14 +787,43 @@ async function createViewerTab(transcriptArray, meetingTitle, platform, sessionI
     chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') });
 }
 
-function updateBadge(isCapturing) {
+async function updateBadge(isCapturing) {
     if (isCapturing) {
-        // Red recording indicator (like a rec button)
-        chrome.action.setBadgeText({ text: '●' }); // Unicode filled circle
-        chrome.action.setBadgeBackgroundColor({ color: '#dc3545' }); // Red
+        // Create a custom icon with a green dot overlay for better centering
+        const canvas = new OffscreenCanvas(128, 128);
+        const ctx = canvas.getContext('2d');
+
+        // Load the base icon
+        const baseIcon = await fetch(chrome.runtime.getURL('icon.png'));
+        const blob = await baseIcon.blob();
+        const bitmap = await createImageBitmap(blob);
+
+        // Draw base icon
+        ctx.drawImage(bitmap, 0, 0, 128, 128);
+
+        // Draw green recording dot in bottom-right corner
+        const dotSize = 40;
+        const dotX = 128 - dotSize / 2 - 8;
+        const dotY = 128 - dotSize / 2 - 8;
+
+        // Draw white background circle for contrast
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, dotSize / 2 + 2, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Draw green dot
+        ctx.fillStyle = '#28a745';
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, dotSize / 2, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Convert to ImageData and set as icon
+        const imageData = ctx.getImageData(0, 0, 128, 128);
+        chrome.action.setIcon({ imageData: imageData });
     } else {
-        // Clear badge when not recording
-        chrome.action.setBadgeText({ text: '' });
+        // Reset to original icon
+        chrome.action.setIcon({ path: 'icon.png' });
     }
 }
 
@@ -955,12 +1085,20 @@ chrome.downloads.onChanged?.addListener((delta) => {
     if (delta.state?.current === 'interrupted') {
         // Download was interrupted (network failure, disk full, etc.)
         const errorMsg = delta.error?.current || 'Unknown error';
-        console.error('[Service Worker] Download interrupted:', delta.id, 'Error:', errorMsg);
 
         // Clean up from pending downloads
         pendingDownloads.delete(delta.id);
 
-        // Try to show notification to user (may not work if no active page)
+        // Silently handle user cancellations - this is expected behavior
+        if (errorMsg === 'USER_CANCELED') {
+            console.log('[Service Worker] Download cancelled by user:', delta.id);
+            return;
+        }
+
+        // Log other errors (network failure, disk full, etc.)
+        console.error('[Service Worker] Download interrupted:', delta.id, 'Error:', errorMsg);
+
+        // Try to show notification to user for real errors (may not work if no active page)
         chrome.runtime.sendMessage({
             message: 'download_failed',
             downloadId: delta.id,
@@ -1238,27 +1376,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 break;
                 
-            case 'download_captions': {
-                console.log('[Service Worker] download_captions received with:', {
-                    meetingTitle: message.meetingTitle,
-                    transcriptCount: message.transcriptArray?.length,
-                    format: message.format,
-                    sessionId: message.sessionId,
-                    hasAttendeeReport: !!message.attendeeReport
-                });
-                
-                // Get session-specific aliases if they exist
-                const downloadSessionKey = `aliases_${message.sessionId || 'default'}`;
-                const downloadAliasData = await chrome.storage.local.get(downloadSessionKey);
-                const downloadAliases = downloadAliasData[downloadSessionKey] || {};
-                
-                // Ensure meeting title is not undefined/empty
-                const titleToSave = message.meetingTitle || 'Untitled Meeting';
-                console.log('[Service Worker] Saving with title:', titleToSave);
-                
-                await saveTranscript(titleToSave, message.transcriptArray, downloadAliases, message.format, message.recordingStartTime, true, message.attendeeReport);
+            case 'download_captions':
+                try {
+                    console.log('[Service Worker] download_captions received with:', {
+                        meetingTitle: message.meetingTitle,
+                        transcriptCount: message.transcriptArray?.length,
+                        format: message.format,
+                        sessionId: message.sessionId,
+                        hasAttendeeReport: !!message.attendeeReport
+                    });
+
+                    // Get session-specific aliases if they exist
+                    const downloadSessionKey = `aliases_${message.sessionId || 'default'}`;
+                    const downloadAliasData = await chrome.storage.local.get(downloadSessionKey);
+                    const downloadAliases = downloadAliasData[downloadSessionKey] || {};
+
+                    // Ensure meeting title is not undefined/empty
+                    const titleToSave = message.meetingTitle || 'Untitled Meeting';
+                    console.log('[Service Worker] Saving with title:', titleToSave);
+
+                    // Use auto-download (saveAs: false) to provide filename automatically
+                    await saveTranscript(titleToSave, message.transcriptArray, downloadAliases, message.format, message.recordingStartTime, false, message.attendeeReport);
+
+                    sendResponse({ success: true });
+                } catch (error) {
+                    console.error('[Service Worker] download_captions error:', error);
+                    sendResponse({ success: false, error: error.message });
+                }
+                return true; // Keep message channel open for async response
                 break;
-            }
 
             case 'save_on_leave':
                 // Validate required data
@@ -1380,6 +1526,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 // Update badge count for recording transcripts
                 await updateRecordingBadge(message.count);
                 sendResponse({ success: true });
+                break;
+
+            case 'open_extension_popup':
+                // Open the extension popup when toast notification is clicked
+                try {
+                    // Get the sender tab and open popup for that window
+                    if (sender.tab && sender.tab.windowId) {
+                        await chrome.action.openPopup({ windowId: sender.tab.windowId });
+                    } else {
+                        // Fallback - just open the popup
+                        await chrome.action.openPopup();
+                    }
+                    sendResponse({ success: true });
+                } catch (error) {
+                    console.log('[Service Worker] Could not programmatically open popup:', error);
+                    // Note: chrome.action.openPopup() requires user interaction in some cases
+                    sendResponse({ success: false, error: error.message });
+                }
+                break;
+
+            case 'download_blob':
+                // Download a blob URL with a specific filename
+                try {
+                    // Store the filename BEFORE initiating download (using 'next' key)
+                    pendingDownloads.set('next', message.filename);
+
+                    // Trigger the download
+                    const downloadId = await chrome.downloads.download({
+                        url: message.url,
+                        saveAs: false
+                    });
+
+                    // Also store with downloadId as backup
+                    pendingDownloads.set(downloadId, message.filename);
+
+                    console.log('[Service Worker] Recording download initiated:', downloadId, message.filename);
+                    sendResponse({ success: true, downloadId: downloadId });
+                } catch (error) {
+                    console.error('[Service Worker] Download blob failed:', error);
+                    sendResponse({ success: false, error: error.message });
+                }
                 break;
 
             case 'error_logged':
