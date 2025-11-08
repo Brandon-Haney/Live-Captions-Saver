@@ -1491,7 +1491,7 @@ async function tryOpenParticipantPanel() {
 
 async function startAttendeeTracking() {
     // Check if attendee tracking is enabled
-    const { trackAttendees, autoOpenAttendees } = await chrome.storage.sync.get(['trackAttendees', 'autoOpenAttendees']);
+    const { trackAttendees } = await chrome.storage.sync.get(['trackAttendees']);
     if (trackAttendees === false) {
         // console.log("[Attendee Tracking] Disabled in settings");
         return;
@@ -1538,14 +1538,12 @@ async function startAttendeeTracking() {
             // Since participant panel may not be reliably available
             console.log('[Attendee Tracking] Zoom - using transcript-based attendee tracking');
 
-            // Try to open participant panel if enabled (optional)
-            if (autoOpenAttendees) {
-                const opened = await tryOpenParticipantPanel();
-                if (opened) {
-                    console.log('[Attendee Tracking] Zoom participant panel opened');
-                    await delay(2000); // Give panel more time to populate
-                    updateAttendeeList(); // Try to get from panel
-                }
+            // Try to open participant panel automatically
+            const opened = await tryOpenParticipantPanel();
+            if (opened) {
+                console.log('[Attendee Tracking] Zoom participant panel opened');
+                await delay(2000); // Give panel more time to populate
+                updateAttendeeList(); // Try to get from panel
             }
 
             // ALWAYS check transcript for speakers - this is more reliable for Zoom
@@ -1554,14 +1552,14 @@ async function startAttendeeTracking() {
             // Teams logic - check if chat capture is enabled to avoid conflicts
             const { chatCapture } = await chrome.storage.sync.get(['chatCapture']);
 
-            // Only auto-open participant panel if setting is enabled AND chat capture is explicitly disabled
+            // Auto-open participant panel if chat capture is disabled
             // Default to chat capture enabled (chatCapture !== false) to match popup behavior
-            if (autoOpenAttendees && chatCapture === false) {
+            if (chatCapture === false) {
                 await tryOpenParticipantPanel();
-            } else if (autoOpenAttendees && chatCapture !== false) {
+            } else {
                 console.log("Chat capture is enabled - skipping auto-open attendees to avoid panel conflicts");
             }
-            
+
             updateAttendeeList();
         }
 
@@ -2506,18 +2504,25 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         clearElementCache();
     }
     
-    wasInMeeting = nowInMeeting;
-    
-    if (!nowInMeeting) {
+    // Only log and clear when transitioning from meeting to not-in-meeting
+    if (!nowInMeeting && wasInMeeting) {
+        console.log('[Caption Saver] Meeting ended - clearing metadata');
         stopCaptureSession();
         stopAttendeeTracking();
 
         // Reset meeting metadata now that meeting has definitely ended
         // This ensures next meeting starts fresh
-        console.log('[Caption Saver] Meeting ended - clearing metadata');
         currentMeetingTitle = '';
         recordingStartTime = null;
+    } else if (!nowInMeeting) {
+        // Still not in meeting, but already cleaned up - no need to log
+        stopCaptureSession();
+        stopAttendeeTracking();
+    }
 
+    wasInMeeting = nowInMeeting;
+
+    if (!nowInMeeting) {
         return;
     }
     
@@ -3405,9 +3410,10 @@ function showToastNotification(meetingTitle) {
         toast.style.transform = 'scale(1)';
     });
 
-    // Click to open extension popup
+    // Click to open extension action (popup)
     toast.addEventListener('click', () => {
-        chrome.runtime.sendMessage({ message: 'open_popup' });
+        // Open the extension popup using chrome.action API
+        chrome.runtime.sendMessage({ message: 'open_extension_popup' });
         toast.remove();
     });
 
@@ -3447,8 +3453,21 @@ window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'TEAMS_RECORDING_TRANSCRIPT') {
         console.log('[Recording Transcript] Received transcript data from page');
 
-        // Extract meeting title from page if possible
-        const meetingTitle = document.title.replace(/ \| Microsoft Teams.*$/, '').trim();
+        // Extract meeting title from page - try to get from the span title attribute first
+        let meetingTitle = '';
+
+        // Look for the meeting title span with title attribute
+        const titleSpan = document.querySelector('span.fui-StyledText[title]');
+        if (titleSpan && titleSpan.getAttribute('title')) {
+            meetingTitle = titleSpan.getAttribute('title');
+            console.log('[Recording Transcript] Found meeting title from span:', meetingTitle);
+        }
+
+        // Fallback to document title
+        if (!meetingTitle) {
+            meetingTitle = document.title.replace(/ \| Microsoft Teams.*$/, '').trim();
+            console.log('[Recording Transcript] Using document title:', meetingTitle);
+        }
 
         // Send to service worker for storage
         chrome.runtime.sendMessage({

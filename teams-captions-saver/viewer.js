@@ -1,6 +1,12 @@
 // Global interval references for cleanup
 let connectionCheckInterval = null;
 
+// Global variables for save functionality
+let currentMeetingTitle = 'Untitled Meeting';
+let currentPlatform = '';
+let currentFilteredSpeaker = null;
+let currentAttendeeReport = null;
+
 // Cleanup function to prevent memory leaks
 function cleanupViewerIntervals() {
     if (connectionCheckInterval) {
@@ -806,6 +812,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const activeSpeakerFilter = speakerFiltersContainer.querySelector('button.active');
         const speakerToFilter = activeSpeakerFilter?.id === 'show-all-btn' ? null : activeSpeakerFilter?.dataset.speaker;
 
+        // Update global filtered speaker for save functionality
+        currentFilteredSpeaker = speakerToFilter;
+
         // Performance: Use cached elements instead of querying DOM
         captionElementsCache.forEach(captionDiv => {
             const text = captionDiv.querySelector('.text').textContent.toLowerCase();
@@ -960,13 +969,122 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function formatTranscriptForExport(captions, format = 'txt') {
         if (!captions || captions.length === 0) {
-            return 'No captions to export.';
+            return format === 'json' ? '[]' : 'No captions to export.';
         }
-        
-        if (format === 'markdown') {
-            return captions.map(entry => `**${entry.Name}** (${entry.Time}): ${entry.Text}`).join('\n\n');
+
+        if (format === 'json') {
+            return JSON.stringify(captions, null, 2);
+        } else if (format === 'md') {
+            // Build Markdown with metadata header
+            let content = '';
+
+            // Add meeting title
+            content += `# ${currentMeetingTitle}\n\n`;
+
+            // Add meeting metadata
+            content += '## Meeting Information\n\n';
+            content += `**Platform:** ${currentPlatform || 'Unknown'}\n\n`;
+            content += `**Total Captions:** ${captions.length}\n\n`;
+
+            // Calculate duration if timestamps are available
+            if (captions.length > 0 && captions[0].Time && captions[captions.length - 1].Time) {
+                content += `**First Caption:** ${captions[0].Time}\n\n`;
+                content += `**Last Caption:** ${captions[captions.length - 1].Time}\n\n`;
+            }
+
+            // Add filter information if applicable
+            if (currentFilteredSpeaker) {
+                content += `**Filtered By Speaker:** ${currentFilteredSpeaker}\n\n`;
+            }
+
+            content += `**Exported:** ${new Date().toLocaleString()}\n\n`;
+
+            content += '---\n\n';
+            content += '## Transcript\n\n';
+
+            // Group by speaker for better readability
+            let lastSpeaker = null;
+            captions.forEach(entry => {
+                if (entry.Name !== lastSpeaker) {
+                    lastSpeaker = entry.Name;
+                    content += `\n### ${entry.Name}\n\n`;
+                }
+                content += `> **[${entry.Time}]** ${entry.Text}\n\n`;
+            });
+
+            return content;
         } else {
-            return captions.map(entry => `[${entry.Time}] ${entry.Name}: ${entry.Text}`).join('\n');
+            // TXT format with attendee section
+            let content = '';
+
+            // Add attendee section - use attendee report if available, otherwise generate from speakers
+            let attendeeList = [];
+            let totalAttendees = 0;
+            let meetingStart = null;
+
+            if (currentAttendeeReport) {
+                // Handle both formats of attendee reports (Teams/Meet vs Zoom)
+                if (currentAttendeeReport.attendeeList && currentAttendeeReport.totalUniqueAttendees) {
+                    attendeeList = currentAttendeeReport.attendeeList;
+                    totalAttendees = currentAttendeeReport.totalUniqueAttendees;
+                    meetingStart = currentAttendeeReport.meetingStartTime;
+                } else if (currentAttendeeReport.allAttendees) {
+                    if (currentAttendeeReport.allAttendees instanceof Set) {
+                        attendeeList = Array.from(currentAttendeeReport.allAttendees);
+                    } else if (Array.isArray(currentAttendeeReport.allAttendees)) {
+                        attendeeList = currentAttendeeReport.allAttendees;
+                    } else if (typeof currentAttendeeReport.allAttendees === 'object') {
+                        attendeeList = Object.values(currentAttendeeReport.allAttendees);
+                    }
+                    totalAttendees = attendeeList.length;
+                    meetingStart = currentAttendeeReport.meetingStartTime;
+                }
+            }
+
+            // Fallback: If no attendee report, generate from speakers in captions
+            if (totalAttendees === 0) {
+                const speakers = [...new Set(
+                    captions
+                        .filter(entry => entry.Type !== 'attendance') // Exclude join/leave events
+                        .map(entry => entry.Name)
+                        .filter(name => name && name.trim())
+                )];
+                if (speakers.length > 0) {
+                    attendeeList = speakers.sort();
+                    totalAttendees = speakers.length;
+                    // Try to get meeting start from first caption entry
+                    if (captions.length > 0 && captions[0].Time) {
+                        meetingStart = captions[0].timestamp || null;
+                    }
+                }
+            }
+
+            // Add attendee header if we have attendees
+            if (totalAttendees > 0) {
+                content += '=== MEETING ATTENDEES ===\n';
+                content += `Total Attendees: ${totalAttendees}\n`;
+                if (meetingStart) {
+                    content += `Meeting Start: ${new Date(meetingStart).toLocaleString()}\n`;
+                }
+                content += '\nAttendee List:\n';
+                attendeeList.forEach(name => {
+                    content += `- ${name}\n`;
+                });
+                content += '\n=== TRANSCRIPT ===\n';
+            }
+
+            // Add captions (including join/leave events if present)
+            content += captions.map(entry => {
+                if (entry.Type === 'attendance') {
+                    return `[${entry.Time}] ● ${entry.Name} ${entry.Text}`;
+                } else if (entry.Type === 'chat') {
+                    return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+                } else {
+                    return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
+                }
+            }).join('\n');
+
+            return content;
         }
     }
     
@@ -998,15 +1116,39 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        // Show format selection dialog
+        const format = await showFormatDialog();
+        if (!format) return; // User cancelled
+
         // Create download
-        const content = formatTranscriptForExport(visibleCaptions);
+        const content = formatTranscriptForExport(visibleCaptions, format);
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
         const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
-        const filename = `filtered-transcript-${dateStr}-${timeStr}.txt`;
+
+        // Sanitize title (same logic as service_worker.js getSanitizedMeetingName)
+        let cleanTitle = currentMeetingTitle || 'Meeting';
+        const parts = cleanTitle.split('|');
+        const meetingName = parts.length > 2 ? parts[1] : parts[0];
+        cleanTitle = meetingName.replace('Microsoft Teams', '').trim();
+        cleanTitle = cleanTitle.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+
+        // Add filter suffix if applicable
+        const filterSuffix = currentFilteredSpeaker ? `-filtered-${currentFilteredSpeaker.replace(/[^a-z0-9]/gi, '_')}` : '';
+
+        // Build filename: {date}_{title}{filterSuffix}_{time}.{format}
+        const filename = `${dateStr}_${cleanTitle}${filterSuffix}_${timeStr}.${format}`;
 
         try {
-            const blob = new Blob([content], { type: 'text/plain' });
+            let mimeType;
+            if (format === 'json') {
+                mimeType = 'application/json';
+            } else if (format === 'md') {
+                mimeType = 'text/markdown';
+            } else {
+                mimeType = 'text/plain';
+            }
+            const blob = new Blob([content], { type: mimeType });
             const url = URL.createObjectURL(blob);
 
             try {
@@ -1034,12 +1176,79 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
+    // Show format selection dialog
+    function showFormatDialog() {
+        return new Promise((resolve) => {
+            // Create modal
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.5);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 10000;
+            `;
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `
+                background: white;
+                padding: 24px;
+                border-radius: 8px;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+                max-width: 400px;
+            `;
+
+            dialog.innerHTML = `
+                <h3 style="margin: 0 0 16px 0; font-size: 18px;">Select Save Format</h3>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button data-format="txt" style="padding: 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                        TXT (Plain Text)
+                    </button>
+                    <button data-format="json" style="padding: 12px; background: #0078d4; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                        JSON (Structured Data)
+                    </button>
+                    <button data-format="md" style="padding: 12px; background: #6f42c1; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                        Markdown (Formatted)
+                    </button>
+                    <button data-format="cancel" style="padding: 12px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                        Cancel
+                    </button>
+                </div>
+            `;
+
+            modal.appendChild(dialog);
+            document.body.appendChild(modal);
+
+            // Handle clicks
+            dialog.addEventListener('click', (e) => {
+                if (e.target.tagName === 'BUTTON') {
+                    const format = e.target.dataset.format;
+                    document.body.removeChild(modal);
+                    resolve(format === 'cancel' ? null : format);
+                }
+            });
+
+            // Close on background click
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    document.body.removeChild(modal);
+                    resolve(null);
+                }
+            });
+        });
+    }
+
     function showButtonSuccess(button, successText, originalText) {
         const originalHtml = button.innerHTML;
         button.classList.add('success');
         const svg = button.querySelector('svg');
         button.innerHTML = `${svg.outerHTML}${successText}`;
-        
+
         setTimeout(() => {
             button.classList.remove('success');
             button.innerHTML = originalHtml;
@@ -1162,6 +1371,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const h1 = document.querySelector('h1');
             const meetingTitle = sessionData.metadata?.meetingTitle || sessionData.metadata?.title || 'Untitled Meeting';
             const platform = sessionData.metadata?.platform || '';
+
+            // Set global variables for save functionality
+            currentMeetingTitle = meetingTitle;
+            currentPlatform = platform;
+            currentAttendeeReport = sessionData.attendeeReport || null;
+
             const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
             const platformBadge = platform ? `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>` : '';
             h1.innerHTML = `${platformBadge}Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
@@ -1270,29 +1485,74 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function initialize() {
         try {
-            // Check if we have captions passed via storage (from popup)
-            const result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId', 'meetingTitle', 'platform']);
+            // Check if we have a session parameter in the URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const sessionKey = urlParams.get('session');
 
-            if (!result) {
-                throw new Error('Failed to load data from storage');
-            }
+            let result;
+            let viewerData;
+            let transcript;
 
-            let transcript = result.captionsToView;
-            let viewerData = result.viewerData;
+            if (sessionKey) {
+                // Load from unique session key (for historical sessions)
+                console.log('[Viewer] Loading historical session from key:', sessionKey);
+                const sessionResult = await chrome.storage.local.get(sessionKey);
+                viewerData = sessionResult[sessionKey];
 
-            // Store the session ID for filtering live updates
-            viewerSessionId = result.viewerSessionId;
-            debug.log(`[Viewer] Initialized with session ID: ${viewerSessionId}`);
+                if (viewerData) {
+                    transcript = viewerData.transcriptArray;
+                    console.log('[Viewer] Loaded historical session data:', {
+                        meetingTitle: viewerData.meetingTitle,
+                        platform: viewerData.platform,
+                        captionCount: transcript?.length,
+                        hasDebug: !!viewerData._debug
+                    });
+                }
+            } else {
+                // Fallback to old method (for live sessions or backwards compatibility)
+                result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId', 'meetingTitle', 'platform']);
 
-            // Use viewerData if captionsToView is not available
-            if (!transcript && viewerData && viewerData.transcriptArray) {
-                transcript = viewerData.transcriptArray;
+                if (!result) {
+                    throw new Error('Failed to load data from storage');
+                }
+
+                transcript = result.captionsToView;
+                viewerData = result.viewerData;
+
+                // Store the session ID for filtering live updates
+                viewerSessionId = result.viewerSessionId;
+                debug.log(`[Viewer] Initialized with session ID: ${viewerSessionId}`);
+
+                // Use viewerData if captionsToView is not available
+                if (!transcript && viewerData && viewerData.transcriptArray) {
+                    transcript = viewerData.transcriptArray;
+                }
             }
 
             if (transcript && transcript.length > 0) {
                 // Update meeting title if provided (from either direct meetingTitle or viewerData)
-                const meetingTitle = result.meetingTitle || viewerData?.meetingTitle;
-                const platform = result.platform || viewerData?.platform || '';
+                const meetingTitle = result?.meetingTitle || viewerData?.meetingTitle;
+                const platform = result?.platform || viewerData?.platform || '';
+
+                // Set global variables for save functionality
+                currentMeetingTitle = meetingTitle || 'Untitled Meeting';
+                currentPlatform = platform;
+                currentAttendeeReport = viewerData?.attendeeReport || null;
+
+                console.log('[Viewer] Loading session with data:', {
+                    meetingTitle,
+                    platform,
+                    isHistorical: viewerData?.isHistorical,
+                    hasViewerData: !!viewerData,
+                    viewerDataKeys: viewerData ? Object.keys(viewerData) : [],
+                    DEBUG_INFO: viewerData?._debug
+                });
+
+                // Log debug info if available
+                if (viewerData?._debug) {
+                    console.log('[Viewer] Session Load Details:', viewerData._debug);
+                }
+
                 if (meetingTitle) {
                     const h1 = document.querySelector('h1');
                     const isHistorical = viewerData?.isHistorical;
@@ -1303,6 +1563,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     } else {
                         h1.innerHTML = `${platformBadge}Live Transcript<span class="live-indicator"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
                     }
+                } else {
+                    console.warn('[Viewer] No meeting title found! viewerData:', viewerData, 'result:', result);
                 }
 
                 // Calculate and display analytics
@@ -1344,8 +1606,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     captionElementsCache = []; // Clear cache when showing status message
 
                     // Update meeting title and platform if provided even when waiting for captions
-                    const meetingTitle = result.meetingTitle || viewerData?.meetingTitle;
-                    const platform = result.platform || viewerData?.platform || '';
+                    const meetingTitle = result?.meetingTitle || viewerData?.meetingTitle;
+                    const platform = result?.platform || viewerData?.platform || '';
                     if (meetingTitle || platform) {
                         const h1 = document.querySelector('h1');
                         const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
