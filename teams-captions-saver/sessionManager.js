@@ -14,7 +14,36 @@ class SessionManager {
         this.MAX_SESSIONS = 20; // Support up to 20 concurrent meetings
         this.MAX_CHUNK_SIZE = 7000; // Stay under 8KB limit per key
         this.STORAGE_QUOTA = 8 * 1024 * 1024; // Reserve 8MB for sessions
-        this.initializeFromStorage();
+        this._initialized = false; // Track initialization state
+        this._initPromise = this.initializeFromStorage(); // Store promise for awaiting
+        this._sessionLocks = new Map(); // Per-session locks to prevent read/write conflicts
+        this._emergencyCleanupInProgress = false; // Guard against concurrent emergency cleanup
+    }
+
+    // Acquire a lock for a specific session (prevents concurrent read/write)
+    async _acquireSessionLock(sessionId, timeout = 10000) {
+        const startTime = Date.now();
+        while (this._sessionLocks.get(sessionId)) {
+            if (Date.now() - startTime > timeout) {
+                console.warn(`[SessionManager] Lock timeout for session ${sessionId}`);
+                return false;
+            }
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        this._sessionLocks.set(sessionId, true);
+        return true;
+    }
+
+    // Release a session lock
+    _releaseSessionLock(sessionId) {
+        this._sessionLocks.delete(sessionId);
+    }
+
+    // Ensure initialization is complete before operations
+    async ensureInitialized() {
+        if (!this._initialized) {
+            await this._initPromise;
+        }
     }
 
     // Initialize sessions from storage on extension load
@@ -45,8 +74,10 @@ class SessionManager {
             
             // Clean up stale sessions
             await this.cleanupStaleSessions();
+            this._initialized = true; // Mark as initialized
         } catch (error) {
             console.error('[SessionManager] Error initializing:', error);
+            this._initialized = true; // Still mark as initialized to prevent infinite waiting
         }
     }
 
@@ -81,7 +112,8 @@ class SessionManager {
                     
                     for (let i = 0; i < (oldSession.chunkCount || 0); i++) {
                         const chunk = chunks[`${oldSession.id}_chunk_${i}`];
-                        if (chunk) {
+                        // Validate chunk is array before spreading
+                        if (chunk && Array.isArray(chunk)) {
                             transcriptArray.push(...chunk);
                         }
                     }
@@ -93,11 +125,19 @@ class SessionManager {
                     // Determine platform from old data
                     // Default to teams for old sessions (since this extension was originally Teams-only)
                     let platform = 'teams';
-                    // Only check for specific platform names, not generic words
-                    if (oldSession.title && oldSession.title.toLowerCase().includes('zoom')) {
-                        platform = 'zoom';
-                    } else if (oldSession.title && oldSession.title.toLowerCase().includes('google meet')) {
-                        platform = 'meet';
+                    // Use specific patterns to avoid false positives
+                    // e.g., "Zoom Meeting" should match, but "Let's zoom in on..." should not
+                    if (oldSession.title) {
+                        const titleLower = oldSession.title.toLowerCase();
+                        // Check for Zoom - match "zoom meeting", "zoom call", standalone "zoom" at word boundary
+                        if (/\bzoom\s+(meeting|call|webinar)\b/i.test(oldSession.title) ||
+                            /^zoom\b/i.test(oldSession.title)) {
+                            platform = 'zoom';
+                        // Check for Google Meet - match explicit "google meet" or meet.google URLs
+                        } else if (/\bgoogle\s+meet\b/i.test(oldSession.title) ||
+                                   /meet\.google\.com/i.test(oldSession.title)) {
+                            platform = 'meet';
+                        }
                     }
                     
                     // Create new format metadata
@@ -188,32 +228,70 @@ class SessionManager {
     // Helper function to parse old duration format to seconds
     parseDurationToSeconds(durationStr) {
         if (!durationStr) return 0;
-        
+
         // Parse formats like "45 min" or "1h 30m"
         const hourMatch = durationStr.match(/(\d+)h/);
         const minMatch = durationStr.match(/(\d+)\s*m/);
-        
+
         let seconds = 0;
         if (hourMatch) {
-            seconds += parseInt(hourMatch[1]) * 3600;
+            const hours = parseInt(hourMatch[1], 10);
+            if (!isNaN(hours)) {
+                seconds += hours * 3600;
+            }
         }
         if (minMatch) {
-            seconds += parseInt(minMatch[1]) * 60;
+            const mins = parseInt(minMatch[1], 10);
+            if (!isNaN(mins)) {
+                seconds += mins * 60;
+            }
         }
-        
+
         // If no matches, try to parse as just minutes
         if (!hourMatch && !minMatch) {
             const plainMinMatch = durationStr.match(/(\d+)/);
             if (plainMinMatch) {
-                seconds = parseInt(plainMinMatch[1]) * 60;
+                const mins = parseInt(plainMinMatch[1], 10);
+                if (!isNaN(mins)) {
+                    seconds = mins * 60;
+                }
             }
         }
-        
+
         return seconds;
     }
-    
+
+    // Validate sessionId format
+    isValidSessionId(sessionId) {
+        if (!sessionId || typeof sessionId !== 'string') return false;
+        // Valid formats: session_tabId_timestamp or session_migrated_timestamp
+        return /^session_(\d+_\d+|migrated_\d+)$/.test(sessionId);
+    }
+
+    // Safely extract timestamp from sessionId
+    extractTimestampFromSessionId(sessionId) {
+        if (!sessionId || typeof sessionId !== 'string') return null;
+
+        // Handle session_migrated_timestamp format
+        if (sessionId.startsWith('session_migrated_')) {
+            const timestampStr = sessionId.replace('session_migrated_', '');
+            const timestamp = parseInt(timestampStr, 10);
+            return isNaN(timestamp) ? null : timestamp;
+        }
+
+        // Handle session_tabId_timestamp format
+        const parts = sessionId.split('_');
+        if (parts.length === 3 && parts[0] === 'session') {
+            const timestamp = parseInt(parts[2], 10);
+            return isNaN(timestamp) ? null : timestamp;
+        }
+
+        return null;
+    }
+
     // Create a new session for a tab
-    createSession(tabId, platform, url) {
+    async createSession(tabId, platform, url) {
+        await this.ensureInitialized(); // Wait for initialization before creating sessions
         const sessionId = `session_${tabId}_${Date.now()}`;
         const session = {
             metadata: {
@@ -231,7 +309,7 @@ class SessionManager {
                 attendeeCount: 0,
                 chatCount: 0,
                 duration: 0,
-                speakers: new Set()
+                speakers: [] // Use array instead of Set for JSON serialization compatibility
             }
         };
 
@@ -330,9 +408,10 @@ class SessionManager {
             session.stats.attendeeCount = data.attendeeCount;
         }
 
-        // Update speakers
+        // Update speakers (use array for JSON compatibility)
         if (data.speakers) {
-            session.stats.speakers = new Set(data.speakers);
+            // Ensure unique speakers using Set, then convert back to array
+            session.stats.speakers = [...new Set(data.speakers)];
         }
 
         // Calculate duration if session is active
@@ -382,15 +461,25 @@ class SessionManager {
 
     // Save session transcript data
     async saveSessionTranscript(sessionId, transcriptArray, attendeeReport = null, chatMessages = null) {
+        // Skip chunking if transcript is empty
+        if (!transcriptArray || transcriptArray.length === 0) {
+            return true; // Nothing to save, but not an error
+        }
+
+        // Acquire lock to prevent concurrent read/write
+        const lockAcquired = await this._acquireSessionLock(sessionId);
+        if (!lockAcquired) {
+            console.error(`[SessionManager] Could not acquire lock for session ${sessionId}`);
+            return false;
+        }
+
         try {
             if (!this.sessions.has(sessionId)) {
                 console.warn(`[SessionManager] Session ${sessionId} not found`);
                 return false;
             }
 
-            const chunks = this.chunkTranscript(transcriptArray);
-
-            // Check storage quota before saving
+            // Check storage quota BEFORE chunking to avoid wasted memory
             let currentUsage = 0;
             if (chrome.storage.local.getBytesInUse) {
                 try {
@@ -402,26 +491,53 @@ class SessionManager {
                 currentUsage = await this.getStorageUsage();
             }
 
-            const newDataSize = this.calculateSize(chunks) +
-                               (attendeeReport ? this.calculateSize(attendeeReport) : 0) +
-                               (chatMessages ? this.calculateSize(chatMessages) : 0);
+            // Estimate new data size before chunking (rough estimate based on JSON size)
+            const estimatedTranscriptSize = this.calculateSize(transcriptArray);
+            const estimatedAttendeeSize = attendeeReport ? this.calculateSize(attendeeReport) : 0;
+            const estimatedChatSize = chatMessages ? this.calculateSize(chatMessages) : 0;
+            const estimatedNewDataSize = estimatedTranscriptSize + estimatedAttendeeSize + estimatedChatSize;
 
             // Use 7MB as safe limit to leave room for other data
             const SAFE_QUOTA = 7 * 1024 * 1024;
 
-            if (currentUsage + newDataSize > SAFE_QUOTA) {
-                console.log(`[SessionManager] Storage cleanup needed. Current: ${(currentUsage / 1024 / 1024).toFixed(2)}MB, New data: ${(newDataSize / 1024 / 1024).toFixed(2)}MB`);
+            if (currentUsage + estimatedNewDataSize > SAFE_QUOTA) {
+                console.log(`[SessionManager] Storage cleanup needed. Current: ${(currentUsage / 1024 / 1024).toFixed(2)}MB, Estimated new data: ${(estimatedNewDataSize / 1024 / 1024).toFixed(2)}MB`);
                 // Need to clean up old sessions - free up enough space plus 1MB buffer
-                await this.cleanupOldSessions(newDataSize + 1024 * 1024);
+                await this.cleanupOldSessions(estimatedNewDataSize + 1024 * 1024);
             }
 
-            // Save transcript chunks
-            const chunkPromises = chunks.map((chunk, index) => 
+            // Now chunk the transcript after quota check passes
+            const chunks = this.chunkTranscript(transcriptArray);
+
+            // Save transcript chunks using Promise.allSettled to handle partial failures
+            const chunkPromises = chunks.map((chunk, index) =>
                 chrome.storage.local.set({
                     [`${sessionId}_chunk_${index}`]: chunk
-                })
+                }).then(() => ({ index, success: true }))
+                  .catch(error => ({ index, success: false, error }))
             );
-            await Promise.all(chunkPromises);
+            const chunkResults = await Promise.allSettled(chunkPromises);
+
+            // Check which chunks actually saved successfully
+            const successfulChunks = [];
+            const failedChunks = [];
+            for (const result of chunkResults) {
+                if (result.status === 'fulfilled' && result.value.success) {
+                    successfulChunks.push(result.value.index);
+                } else {
+                    const chunkInfo = result.status === 'fulfilled' ? result.value : { index: -1, error: result.reason };
+                    failedChunks.push(chunkInfo);
+                }
+            }
+
+            // If any chunks failed, log warning but continue with what we have
+            if (failedChunks.length > 0) {
+                console.warn(`[SessionManager] ${failedChunks.length}/${chunks.length} chunks failed to save for session ${sessionId}`);
+                // If ALL chunks failed, this is a critical error
+                if (successfulChunks.length === 0) {
+                    throw new Error(`All ${chunks.length} chunks failed to save`);
+                }
+            }
 
             // Save attendee data if exists
             if (attendeeReport) {
@@ -437,28 +553,46 @@ class SessionManager {
                 });
             }
 
-            // Update session stats
+            // Update session stats - use actual saved chunk count, not intended count
+            // This ensures metadata matches what's actually in storage
+            const actualChunkCount = successfulChunks.length;
             await this.updateSession(sessionId, {
                 captionCount: transcriptArray.length,
                 attendeeCount: attendeeReport?.totalUniqueAttendees || 0,
                 chatCount: chatMessages?.length || 0,
                 speakers: [...new Set(transcriptArray.map(c => c.Name).filter(n => n))],
                 metadata: {
-                    chunkCount: chunks.length
+                    chunkCount: actualChunkCount,
+                    partialSave: failedChunks.length > 0 // Flag if some data was lost
                 }
             });
-            
-            console.log(`[SessionManager] Saved transcript for session ${sessionId} with ${chunks.length} chunks`);
+
+            if (failedChunks.length > 0) {
+                console.log(`[SessionManager] Partial save: ${actualChunkCount}/${chunks.length} chunks saved for session ${sessionId}`);
+            } else {
+                console.log(`[SessionManager] Saved transcript for session ${sessionId} with ${chunks.length} chunks`);
+            }
             return true;
-            
+
         } catch (error) {
             console.error('[SessionManager] Failed to save session transcript:', error);
             return false;
+        } finally {
+            // Always release the lock
+            this._releaseSessionLock(sessionId);
         }
     }
 
     // Load full session data from storage
     async loadSessionData(sessionId) {
+        await this.ensureInitialized(); // Wait for initialization before loading
+
+        // Acquire lock to prevent reading while write is in progress
+        const lockAcquired = await this._acquireSessionLock(sessionId);
+        if (!lockAcquired) {
+            throw new Error(`Could not acquire lock for session ${sessionId} - save may be in progress`);
+        }
+
         try {
             const session = this.sessions.get(sessionId);
             let metadata = null;
@@ -496,12 +630,13 @@ class SessionManager {
                 }
 
                 if (maxChunkIndex >= 0) {
-                    // Create basic metadata for orphaned session
+                    // Create basic metadata for orphaned session (uses SM-9 safe extraction)
+                    const timestamp = this.extractTimestampFromSessionId(sessionId);
                     metadata = {
                         sessionId,
                         chunkCount: maxChunkIndex + 1,
                         meetingTitle: 'Migrated Meeting',
-                        startTime: new Date(parseInt(sessionId.replace('session_migrated_', ''))).toISOString(),
+                        startTime: timestamp ? new Date(timestamp).toISOString() : new Date().toISOString(),
                         status: 'ended'
                     };
                 } else {
@@ -516,18 +651,36 @@ class SessionManager {
             // Load all chunks
             const chunkKeys = [];
             const chunkCount = metadata.chunkCount || 0;
+
+            // Validate chunk count
+            if (typeof chunkCount !== 'number' || chunkCount < 0 || isNaN(chunkCount)) {
+                console.error(`[SessionManager] Invalid chunkCount: ${chunkCount} for session ${sessionId}`);
+                throw new Error('Corrupted session metadata: invalid chunkCount');
+            }
+
             for (let i = 0; i < chunkCount; i++) {
                 chunkKeys.push(`${sessionId}_chunk_${i}`);
             }
-            
+
             const chunks = await chrome.storage.local.get(chunkKeys);
             const transcriptArray = [];
-            
+            let missingChunks = [];
+
             for (let i = 0; i < chunkCount; i++) {
                 const chunk = chunks[`${sessionId}_chunk_${i}`];
-                if (chunk) {
+                // Validate chunk is array before spreading
+                if (chunk && Array.isArray(chunk)) {
                     transcriptArray.push(...chunk);
+                } else if (chunk) {
+                    console.warn(`[SessionManager] Chunk ${i} is not an array:`, typeof chunk);
+                } else {
+                    missingChunks.push(i);
                 }
+            }
+
+            // Warn about missing chunks but don't fail - return partial data
+            if (missingChunks.length > 0) {
+                console.warn(`[SessionManager] Missing ${missingChunks.length} chunks for session ${sessionId}: [${missingChunks.join(', ')}]`);
             }
 
             // Load attendee data if exists
@@ -541,18 +694,22 @@ class SessionManager {
                 attendeeReport: attendeeData[`${sessionId}_attendees`] || null,
                 chatMessages: chatData[`${sessionId}_chat`] || []
             };
-            
+
         } catch (error) {
             console.error('[SessionManager] Failed to load session:', error);
             throw error;
+        } finally {
+            // Always release the lock
+            this._releaseSessionLock(sessionId);
         }
     }
 
     // Get all active sessions
-    getActiveSessions() {
+    async getActiveSessions() {
+        await this.ensureInitialized(); // Wait for initialization before getting sessions
         const activeSessions = [];
         for (const [sessionId, session] of this.sessions) {
-            if (session.metadata.status === 'active') {
+            if (session?.metadata?.status === 'active') {
                 activeSessions.push({
                     sessionId,
                     ...session.metadata,
@@ -692,6 +849,7 @@ class SessionManager {
 
     // Get list of all sessions (active and ended)
     async getAllSessions() {
+        await this.ensureInitialized(); // Wait for initialization before getting sessions
         const allSessions = [];
         const sessionIds = new Set();
 
@@ -817,14 +975,16 @@ class SessionManager {
                     }
                 }
 
-                // Create reconstructed session info
+                // Create reconstructed session info (uses SM-9 safe extraction)
+                const timestamp = this.extractTimestampFromSessionId(sessionId);
+                const fallbackTime = timestamp ? new Date(timestamp).toISOString() : new Date().toISOString();
                 const reconstructedSession = {
                     sessionId,
                     tabId: 'migrated',
                     platform: 'teams', // Default to teams for migrated sessions
                     url: '',
                     meetingTitle: firstCaption.Name ? `Meeting with ${firstCaption.Name}` : 'Migrated Meeting',
-                    startTime: firstCaption.Time || new Date(parseInt(sessionId.replace('session_migrated_', ''))).toISOString(),
+                    startTime: firstCaption.Time || fallbackTime,
                     endTime: lastCaption.Time || new Date().toISOString(),
                     status: 'ended',
                     lastActivity: new Date().toISOString(),
@@ -853,18 +1013,21 @@ class SessionManager {
 
         for (const session of allSessions) {
             // Create a key based on meeting title and approximate time (within 5 minutes)
-            const sessionTime = new Date(session.startTime || 0).getTime();
+            const sessionTime = Math.max(0, new Date(session.startTime || 0).getTime());
             const timeWindow = Math.floor(sessionTime / (5 * 60 * 1000)); // 5-minute windows
             const dedupKey = `${session.meetingTitle || 'untitled'}_${timeWindow}_${session.captionCount || 0}`;
 
             // Check if we've seen a similar session
             const existing = seenSessions.get(dedupKey);
             if (existing) {
-                // Keep the session with more data or the newer one
+                // Keep the session with more data or the newer one (use timestamps not string comparison)
                 const existingCaptions = existing.captionCount || 0;
                 const currentCaptions = session.captionCount || 0;
+                // Compare by extracted timestamps for proper chronological ordering
+                const existingTimestamp = this.extractTimestampFromSessionId(existing.sessionId) || 0;
+                const currentTimestamp = this.extractTimestampFromSessionId(session.sessionId) || 0;
                 if (currentCaptions > existingCaptions ||
-                    (currentCaptions === existingCaptions && session.sessionId > existing.sessionId)) {
+                    (currentCaptions === existingCaptions && currentTimestamp > existingTimestamp)) {
                     // Replace with current session
                     const index = dedupedSessions.findIndex(s => s.sessionId === existing.sessionId);
                     if (index >= 0) {
@@ -1231,8 +1394,8 @@ class SessionManager {
             new Date(a.startTime || 0) - new Date(b.startTime || 0)
         );
 
-        // If usage exceeds quota, we need to clean up immediately
-        if (usage > quotaBytes) {
+        // If usage exceeds quota, we need to clean up immediately (with guard against concurrent runs)
+        if (usage > quotaBytes && !this._emergencyCleanupInProgress) {
             console.warn(`[SessionManager] Storage usage (${usage} bytes) exceeds quota (${quotaBytes} bytes)`);
 
             // Run diagnostic to see what's taking up space
@@ -1241,6 +1404,9 @@ class SessionManager {
             // Calculate how much we need to free (overage + 2MB buffer)
             const bytesToFree = usage - quotaBytes + (2 * 1024 * 1024);
             console.log(`[SessionManager] Need to free ${(bytesToFree / 1024 / 1024).toFixed(2)}MB`);
+
+            // Set guard flag before starting cleanup
+            this._emergencyCleanupInProgress = true;
 
             // Trigger immediate cleanup - don't wait, do it now
             (async () => {
@@ -1265,6 +1431,9 @@ class SessionManager {
                     console.log(`[SessionManager] Cleanup complete. Final usage: ${(finalUsage / 1024 / 1024).toFixed(2)}MB / ${(quotaBytes / 1024 / 1024).toFixed(2)}MB`);
                 } catch (error) {
                     console.error('[SessionManager] Emergency cleanup failed:', error);
+                } finally {
+                    // Always release the guard flag
+                    this._emergencyCleanupInProgress = false;
                 }
             })();
         }
@@ -1273,7 +1442,7 @@ class SessionManager {
             usedBytes: usage,
             usedMB: (usage / (1024 * 1024)).toFixed(2),
             quotaMB: (quotaBytes / (1024 * 1024)).toFixed(2),
-            percentUsed: ((usage / quotaBytes) * 100).toFixed(1),
+            percentUsed: quotaBytes > 0 ? ((usage / quotaBytes) * 100).toFixed(1) : '0.0',
             sessionCount: allSessions.length,
             oldestSession: sortedSessions[0]?.startTime ? new Date(sortedSessions[0].startTime).toLocaleDateString() : 'N/A',
             newestSession: sortedSessions[sortedSessions.length - 1]?.startTime ? new Date(sortedSessions[sortedSessions.length - 1].startTime).toLocaleDateString() : 'N/A'

@@ -52,10 +52,11 @@ const PLATFORM_CONFIGS = {
             const docTitle = document.title;
             
             // Don't return generic page names that appear after redirect
-            if (docTitle === 'Calendar' || 
-                docTitle === 'Microsoft Teams' || 
+            // Check for generic titles that indicate we're not in a real meeting
+            if (docTitle === 'Calendar' ||
+                docTitle === 'Microsoft Teams' ||
                 docTitle === 'Teams' ||
-                docTitle.startsWith('Calendar |') && !docTitle.includes('|', 10)) {
+                (docTitle.startsWith('Calendar |') && docTitle.indexOf('|', 10) === -1)) {
                 return 'Untitled Meeting';
             }
             
@@ -249,9 +250,15 @@ const PLATFORM_CONFIGS = {
                 });
 
                 // Extract timestamp from message ID (data-mid is Unix timestamp in milliseconds)
+                // Validate timestamp is reasonable (after year 2000 = 946684800000ms)
+                const YEAR_2000_MS = 946684800000; // Jan 1, 2000 in milliseconds
                 let timestamp = null;
                 if (messageId && !isNaN(messageId)) {
-                    timestamp = parseInt(messageId);
+                    const parsedTimestamp = parseInt(messageId, 10);
+                    // Only accept timestamps that are after year 2000 and not NaN
+                    if (!isNaN(parsedTimestamp) && parsedTimestamp > YEAR_2000_MS) {
+                        timestamp = parsedTimestamp;
+                    }
                 }
 
                 // Get text content, fallback to aria-label, or use placeholder if only attachments
@@ -407,14 +414,12 @@ const PLATFORM_CONFIGS = {
                 '[class*="participant"][class*="name"]'
             ],
             
-            // Unused/Reserved selectors (kept for modularity)
-            sidePanel: null,  // Not currently used
-            attendeeRole: null,  // Not currently used
-            attendeeCount: null,  // Not currently used
-            searchBox: null,  // Not currently used
-            moreButton: null,  // Not needed for Google Meet (caption button is directly accessible)
-            
-            // Teams-specific selectors not applicable to Google Meet
+            // Unused selectors (kept for API consistency with Teams)
+            sidePanel: null,
+            attendeeRole: null,
+            attendeeCount: null,
+            searchBox: null,
+            moreButton: null,
             MORE_BUTTON: null,
             MORE_BUTTON_EXPANDED: null,
             LANGUAGE_SPEECH_BUTTON: null,
@@ -427,10 +432,39 @@ const PLATFORM_CONFIGS = {
             ATTENDEE_ITEM: null
         },
         getCaptionData: (element) => {
-            const speakerElement = element.querySelector('.KcIKyf .NWpY1d');
-            const textElement = element.querySelector('.ygicle.VbkSUe');
+            // Use fallback selectors for speaker and text
+            const config = PLATFORM_CONFIGS['meet.google.com'];
+            const speakerSelectors = config.SELECTORS.speakerName;
+            const textSelectors = config.SELECTORS.captionText;
+
+            // Try each speaker selector in order
+            let speakerElement = null;
+            if (Array.isArray(speakerSelectors)) {
+                for (const selector of speakerSelectors) {
+                    if (selector) {
+                        speakerElement = element.querySelector(selector);
+                        if (speakerElement) break;
+                    }
+                }
+            } else if (speakerSelectors) {
+                speakerElement = element.querySelector(speakerSelectors);
+            }
+
+            // Try each text selector in order
+            let textElement = null;
+            if (Array.isArray(textSelectors)) {
+                for (const selector of textSelectors) {
+                    if (selector) {
+                        textElement = element.querySelector(selector);
+                        if (textElement) break;
+                    }
+                }
+            } else if (textSelectors) {
+                textElement = element.querySelector(textSelectors);
+            }
+
             if (!speakerElement || !textElement) return null;
-            
+
             let speakerName = speakerElement.textContent.trim();
             
             // If speaker is "You", try to get the actual name
@@ -584,20 +618,20 @@ const PLATFORM_CONFIGS = {
         },
         areCaptionsEnabled: () => {
             // Check multiple ways to detect if captions are enabled
-            // Look for visible captions with actual caption blocks
-            const captionsWithContent = document.querySelector('.ZPyPXe[aria-label="Captions"]:has(.nMcdL.bj4p3b)');
+            // Look for visible captions with actual caption blocks (avoid :has() for browser compatibility)
+            const captionsContainer = document.querySelector('.ZPyPXe[aria-label="Captions"]');
+            const captionsWithContent = captionsContainer && captionsContainer.querySelector('.nMcdL.bj4p3b');
             const turnOffButton = document.querySelector('button[aria-label="Turn off captions"]');
             // Also check for the captions button pressed state
             const captionsButton = document.querySelector('button[aria-label*="captions"][aria-pressed="true"]');
-            
+
             // Check if captions container is visible (not just exists)
             let containerVisible = false;
-            const captionsContainer = document.querySelector('.ZPyPXe[aria-label="Captions"]');
             if (captionsContainer) {
                 const rect = captionsContainer.getBoundingClientRect();
                 containerVisible = rect.width > 0 && rect.height > 0;
             }
-            
+
             const result = !!(captionsWithContent || turnOffButton || captionsButton || containerVisible);
             console.log('[Caption Saver] Checking captions enabled:', {
                 captionsWithContent: !!captionsWithContent,
@@ -652,7 +686,8 @@ const PLATFORM_CONFIGS = {
             return false;
         },
         async openAttendeePanel() {
-            const peopleButton = document.querySelector('button[aria-label*="People"][data-panel-id="1"], button[aria-label*="People - "]');
+            // Use selectors.peopleButton instead of hardcoded selector
+            const peopleButton = queryWithSelectorArray(this.selectors.peopleButton);
             if (peopleButton && peopleButton.getAttribute('aria-expanded') !== 'true') {
                 console.log('[Caption Saver] Opening attendee panel on Google Meet');
                 peopleButton.click();
@@ -668,12 +703,14 @@ const PLATFORM_CONFIGS = {
             detectCurrentPanel: () => {
                 // Google Meet uses a side panel that can show different views
                 // Check which panel button is active (aria-expanded="true")
+                // Use queryWithSelectorArray for peopleButton
                 const chatButton = document.querySelector('button[aria-label*="Chat"][data-panel-id="2"]');
-                const peopleButton = document.querySelector('button[aria-label*="People"][data-panel-id="1"]');
-                
+                const meetConfig = PLATFORM_CONFIGS['meet.google.com'];
+                const peopleButton = queryWithSelectorArray(meetConfig?.selectors?.peopleButton);
+
                 // Also check for visible chat messages as confirmation
                 const hasVisibleChat = document.querySelector('.RLrADb[data-message-id], .Ss4fHf');
-                
+
                 if (chatButton?.getAttribute('aria-expanded') === 'true' || hasVisibleChat) {
                     return 'chat';
                 } else if (peopleButton?.getAttribute('aria-expanded') === 'true') {
@@ -681,7 +718,7 @@ const PLATFORM_CONFIGS = {
                 }
                 return 'none';
             },
-            
+
             openChatPanel: async () => {
                 const chatButton = document.querySelector('button[aria-label*="Chat"][data-panel-id="2"]');
                 if (chatButton && chatButton.getAttribute('aria-expanded') !== 'true') {
@@ -691,9 +728,11 @@ const PLATFORM_CONFIGS = {
                 }
                 return false;
             },
-            
+
             openPeoplePanel: async () => {
-                const peopleButton = document.querySelector('button[aria-label*="People"][data-panel-id="1"]');
+                // Use queryWithSelectorArray for peopleButton
+                const meetConfig = PLATFORM_CONFIGS['meet.google.com'];
+                const peopleButton = queryWithSelectorArray(meetConfig?.selectors?.peopleButton);
                 if (peopleButton && peopleButton.getAttribute('aria-expanded') !== 'true') {
                     peopleButton.click();
                     await new Promise(resolve => setTimeout(resolve, 500));
@@ -872,8 +911,8 @@ const PLATFORM_CONFIGS = {
             speakerAvatar: '.zmu-data-selector-item__icon',
             
             // Meeting controls
-            hangupButton: 'button[aria-label="End"], button[aria-label="Leave"], .footer-button-base__button[aria-label*="End"], .footer-button-base__button[aria-label*="Leave"], button:has(.footer-button-base__button-label:text("End")), button:has(.footer-button-base__button-label:text("Leave"))',
-            moreButton: '.footer-button-base__button',
+            hangupButton: 'button[aria-label="End"], button[aria-label="Leave"], .footer-button-base__button[aria-label*="End"], .footer-button-base__button[aria-label*="Leave"]',
+            moreButton: 'button[aria-label="More"], .footer-button-base__button[aria-label*="More"]',
             turnOnCaptionsButton: 'a[aria-label="Captions"], .more-button__item-box a[aria-label="Captions"], button[aria-label*="Closed Caption"], button[aria-label*="Show captions"], button[aria-label*="Show subtitle"]',
             turnOffCaptionsButton: 'button[aria-label*="Hide subtitle"], button[aria-label*="Hide captions"]',
             
@@ -896,7 +935,6 @@ const PLATFORM_CONFIGS = {
             // Unused/Reserved selectors
             sidePanel: '.window-content-container',
             searchBox: null,
-            moreButton: 'button[aria-label="More"]',
             
             // Teams-specific selectors not applicable
             MORE_BUTTON: null,
@@ -1106,7 +1144,8 @@ const PLATFORM_CONFIGS = {
             const hasTranscriptionElement = !!document.querySelector('.live-transcription-subtitle__box, #live-transcription-subtitle');
 
             // Special check for iframe contexts - if we're in an iframe with meeting path, we're in a meeting
-            const isInIframe = window !== window.top;
+            let isInIframe = false;
+            try { isInIframe = window !== window.top; } catch (e) { isInIframe = true; }
             const iframeHasMeetingPath = isInIframe && isOnMeetingPage;
 
             // For Zoom, we consider it active if we have any strong indicators of being in a meeting
@@ -1667,11 +1706,45 @@ const PLATFORM_CONFIGS = {
     }
 };
 
+// Helper to query element using selector array (avoid hardcoded selectors)
+function queryWithSelectorArray(selectors) {
+    if (!selectors) return null;
+    if (typeof selectors === 'string') {
+        return document.querySelector(selectors);
+    }
+    if (Array.isArray(selectors)) {
+        for (const selector of selectors) {
+            const element = document.querySelector(selector);
+            if (element) return element;
+        }
+    }
+    return null;
+}
+
+// Deep copy helper for platform configs (shallow copy of nested objects)
+function deepCopyPlatformConfig(source) {
+    const copy = { ...source };
+    // Deep copy nested objects
+    if (source.selectors) {
+        copy.selectors = { ...source.selectors };
+    }
+    if (source.chatCapture) {
+        copy.chatCapture = { ...source.chatCapture };
+    }
+    // Create new Map instance for speakerNameCache to avoid shared state
+    if (source.speakerNameCache instanceof Map) {
+        copy.speakerNameCache = new Map(source.speakerNameCache);
+    }
+    return copy;
+}
+
 // Copy the Teams configuration for teams.live.com (personal accounts use the same interface)
-PLATFORM_CONFIGS['teams.live.com'] = {
-    ...PLATFORM_CONFIGS['teams.microsoft.com'],
-    name: 'Microsoft Teams (Personal)' // Slightly different name to distinguish
-};
+PLATFORM_CONFIGS['teams.live.com'] = deepCopyPlatformConfig(PLATFORM_CONFIGS['teams.microsoft.com']);
+PLATFORM_CONFIGS['teams.live.com'].name = 'Microsoft Teams (Personal)'; // Slightly different name to distinguish
+
+// Copy the Teams configuration for teams.cloud.microsoft (new Teams cloud URL)
+PLATFORM_CONFIGS['teams.cloud.microsoft'] = deepCopyPlatformConfig(PLATFORM_CONFIGS['teams.microsoft.com']);
+PLATFORM_CONFIGS['teams.cloud.microsoft'].name = 'Microsoft Teams (Cloud)'; // Slightly different name to distinguish
 
 // Helper function to get current platform config
 function getCurrentPlatformConfig() {
