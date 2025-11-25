@@ -868,6 +868,29 @@ async function handleSave(target) {
     // Capture session ID at start to prevent race condition if user switches sessions
     const capturedSessionId = selectedSessionId;
 
+    // For SRT, we need to get the meeting start time first to use as default
+    let userRecordingStartTime = null;
+    let meetingStartTime = null;
+
+    if (format === 'srt') {
+        // Try to get meeting start time for the default value
+        if (capturedSessionId) {
+            try {
+                const response = await chrome.runtime.sendMessage({
+                    action: 'getSessionData',
+                    sessionId: capturedSessionId
+                });
+                meetingStartTime = response?.sessionData?.metadata?.startTime;
+            } catch (e) {
+                // Ignore - will use current time as fallback
+            }
+        }
+
+        const srtResult = await showSrtExportDialog(meetingStartTime);
+        if (!srtResult) return; // User cancelled
+        userRecordingStartTime = srtResult.userRecordingStartTime;
+    }
+
     UI_ELEMENTS.statusMessage.textContent = `Saving as ${format === 'ai' ? 'AI' : format.toUpperCase()}...`;
 
     try {
@@ -888,7 +911,8 @@ async function handleSave(target) {
                     meetingTitle: meetingTitle,
                     format: format,
                     recordingStartTime: recordingStartTime,
-                    attendeeReport: attendeeReport
+                    attendeeReport: attendeeReport,
+                    userRecordingStartTime: userRecordingStartTime
                 });
 
                 if (saveResponse?.success) {
@@ -903,7 +927,7 @@ async function handleSave(target) {
         } else {
             const tab = await getActiveMeetingTab();
             if (tab) {
-                await chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format });
+                await chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format, userRecordingStartTime });
                 UI_ELEMENTS.statusMessage.textContent = 'Save initiated...';
                 UI_ELEMENTS.statusMessage.style.color = '#17a2b8';
             } else {
@@ -1170,17 +1194,21 @@ async function exportPreviousSession(sessionId) {
             throw new Error('No transcript data available');
         }
 
-        // Show format selection dialog
-        const format = await showExportFormatDialog();
-        if (!format) return; // User cancelled
+        // Get meeting start time for SRT default
+        const meetingStartTime = sessionData.metadata?.startTime;
+
+        // Show format selection dialog with meeting start time for SRT
+        const result = await showExportFormatDialog(meetingStartTime);
+        if (!result) return; // User cancelled
 
         await chrome.runtime.sendMessage({
             message: "download_captions",
             transcriptArray: sessionData.transcript,
-            format: format,
+            format: result.format,
             meetingTitle: sessionData.metadata?.meetingTitle || 'Meeting',
             attendeeReport: sessionData.attendeeReport,
-            recordingStartTime: sessionData.metadata?.startTime || new Date().toISOString()
+            recordingStartTime: sessionData.metadata?.startTime || new Date().toISOString(),
+            userRecordingStartTime: result.userRecordingStartTime
         });
 
         UI_ELEMENTS.statusMessage.textContent = 'Session exported!';
@@ -1207,7 +1235,9 @@ async function deletePreviousSession(sessionId) {
 }
 
 // Show format selection dialog for exports
-function showExportFormatDialog() {
+// Returns { format, userRecordingStartTime } or null if cancelled
+// meetingStartTime: optional ISO string to use as SRT default
+function showExportFormatDialog(meetingStartTime = null) {
     return new Promise((resolve) => {
         // Create modal
         const modal = document.createElement('div');
@@ -1248,6 +1278,9 @@ function showExportFormatDialog() {
                 <button data-format="ai" style="padding: 12px; background: #ff6b6b; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                     AI Analysis (with Instructions)
                 </button>
+                <button data-format="srt" style="padding: 12px; background: #fd7e14; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                    SRT (Subtitles for Video)
+                </button>
                 <button data-format="cancel" style="padding: 12px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                     Cancel
                 </button>
@@ -1258,12 +1291,122 @@ function showExportFormatDialog() {
         document.body.appendChild(modal);
 
         // Handle clicks
-        dialog.addEventListener('click', (e) => {
+        dialog.addEventListener('click', async (e) => {
             if (e.target.tagName === 'BUTTON') {
                 const format = e.target.dataset.format;
                 document.body.removeChild(modal);
-                resolve(format === 'cancel' ? null : format);
+
+                if (format === 'cancel') {
+                    resolve(null);
+                } else if (format === 'srt') {
+                    // Show SRT-specific dialog for recording start time
+                    const srtResult = await showSrtExportDialog(meetingStartTime);
+                    resolve(srtResult);
+                } else {
+                    resolve({ format, userRecordingStartTime: null });
+                }
             }
+        });
+
+        // Close on background click
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                document.body.removeChild(modal);
+                resolve(null);
+            }
+        });
+    });
+}
+
+// Show SRT export dialog with recording start time input
+// meetingStartTime: optional ISO string to use as default instead of current time
+function showSrtExportDialog(meetingStartTime = null) {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+        `;
+
+        // Use meeting start time if provided, otherwise fall back to current time
+        const defaultTime = meetingStartTime ? new Date(meetingStartTime) : new Date();
+        const dateStr = defaultTime.toISOString().split('T')[0];
+        const timeStr = defaultTime.toTimeString().slice(0, 5);
+
+        const dialog = document.createElement('div');
+        dialog.style.cssText = `
+            background: white;
+            padding: 24px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            max-width: 420px;
+            width: 90%;
+        `;
+
+        dialog.innerHTML = `
+            <h3 style="margin: 0 0 8px 0; font-size: 18px;">Export as SRT Subtitles</h3>
+            <p style="margin: 0 0 16px 0; font-size: 13px; color: #666;">
+                Enter when you started your external recording (OBS, etc.) to sync subtitles with your video.
+            </p>
+
+            <div style="margin-bottom: 16px;">
+                <label style="display: block; margin-bottom: 4px; font-weight: 500; font-size: 14px;">Recording Start Date</label>
+                <input type="date" id="srt-date" value="${dateStr}" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box;">
+            </div>
+
+            <div style="margin-bottom: 16px;">
+                <label style="display: block; margin-bottom: 4px; font-weight: 500; font-size: 14px;">Recording Start Time</label>
+                <input type="time" id="srt-time" value="${timeStr}" step="1" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box;">
+            </div>
+
+            <p style="margin: 0 0 16px 0; font-size: 12px; color: #888;">
+                Tip: You may need to adjust by a few seconds in your video editor for perfect sync.
+            </p>
+
+            <div style="display: flex; gap: 8px;">
+                <button id="srt-export-btn" style="flex: 1; padding: 12px; background: #fd7e14; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500;">
+                    Export SRT
+                </button>
+                <button id="srt-cancel-btn" style="flex: 1; padding: 12px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                    Cancel
+                </button>
+            </div>
+        `;
+
+        modal.appendChild(dialog);
+        document.body.appendChild(modal);
+
+        const dateInput = dialog.querySelector('#srt-date');
+        const timeInput = dialog.querySelector('#srt-time');
+        const exportBtn = dialog.querySelector('#srt-export-btn');
+        const cancelBtn = dialog.querySelector('#srt-cancel-btn');
+
+        exportBtn.addEventListener('click', () => {
+            const date = dateInput.value;
+            const time = timeInput.value;
+
+            if (!date || !time) {
+                alert('Please enter both date and time');
+                return;
+            }
+
+            // Combine date and time into ISO string
+            const userRecordingStartTime = new Date(`${date}T${time}`).toISOString();
+            document.body.removeChild(modal);
+            resolve({ format: 'srt', userRecordingStartTime });
+        });
+
+        cancelBtn.addEventListener('click', () => {
+            document.body.removeChild(modal);
+            resolve(null);
         });
 
         // Close on background click
