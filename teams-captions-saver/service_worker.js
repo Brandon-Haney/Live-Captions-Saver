@@ -914,6 +914,8 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
 
     let content, extension, mimeType;
 
+    console.log('[saveTranscript] Processing format:', format, 'userRecordingStartTime:', userRecordingStartTime);
+
     switch (format) {
         case 'md':
             content = formatAsMarkdown(processedTranscript, processedAttendeeReport, meetingTitle, recordingStartTime);
@@ -949,7 +951,7 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
             }
             content = formatAsSrt(processedTranscript, userRecordingStartTime);
             extension = 'srt';
-            mimeType = 'text/plain';
+            mimeType = 'application/x-subrip';
             break;
         case 'txt':
         default:
