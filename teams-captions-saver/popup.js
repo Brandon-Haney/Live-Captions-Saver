@@ -87,6 +87,19 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+// Platform detection utility
+function detectPlatformFromUrl(url) {
+    if (!url) return null;
+    if (url.includes('teams.microsoft.com') || url.includes('teams.live.com') || url.includes('teams.cloud.microsoft')) {
+        return 'teams';
+    } else if (url.includes('meet.google.com')) {
+        return 'meet';
+    } else if (url.includes('zoom.us')) {
+        return 'zoom';
+    }
+    return null;
+}
+
 async function getActiveMeetingTab() {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const supportedPlatforms = [
@@ -154,6 +167,11 @@ async function loadActiveSessions() {
                 chrome.runtime.sendMessage({
                     action: 'endSession',
                     sessionId: staleSession.sessionId
+                }, (response) => {
+                    // Check for Chrome runtime errors
+                    if (chrome.runtime.lastError) {
+                        console.warn('[Popup] Error ending stale session:', chrome.runtime.lastError.message);
+                    }
                 });
             }
 
@@ -165,6 +183,14 @@ async function loadActiveSessions() {
 }
 
 function updateMultiSessionUI() {
+    // Handle empty activeSessions by resetting selectedSessionId
+    if (activeSessions.length === 0) {
+        selectedSessionId = null;
+        UI_ELEMENTS.sessionIndicator.style.display = 'none';
+        UI_ELEMENTS.switchSessionBtn.style.display = 'none';
+        return;
+    }
+
     // If multiple sessions, show session indicator and switch button
     if (activeSessions.length > 1) {
         const currentSessionIndex = activeSessions.findIndex(s => s.sessionId === selectedSessionId) + 1;
@@ -246,17 +272,27 @@ if (UI_ELEMENTS.switchSessionBtn) {
 
         // Find current session index
         const currentIndex = activeSessions.findIndex(s => s.sessionId === selectedSessionId);
+        // If current session not found, start from beginning
+        const safeCurrentIndex = currentIndex === -1 ? 0 : currentIndex;
         // Move to next session (wrap around)
-        const nextIndex = (currentIndex + 1) % activeSessions.length;
-        selectedSessionId = activeSessions[nextIndex].sessionId;
+        const nextIndex = (safeCurrentIndex + 1) % activeSessions.length;
+        const nextSession = activeSessions[nextIndex];
+
+        // Validate next session exists before accessing properties
+        if (!nextSession || !nextSession.sessionId) {
+            console.warn('[Popup] Next session is invalid, cannot switch');
+            return;
+        }
+
+        selectedSessionId = nextSession.sessionId;
 
         // Update UI
-        updateHeaderFromSession(activeSessions[nextIndex]);
+        updateHeaderFromSession(nextSession);
         updateMultiSessionUI();
 
         // Enable buttons based on session data
         UI_ELEMENTS.viewButton.disabled = false;
-        if (activeSessions[nextIndex].captionCount > 0) {
+        if (nextSession.captionCount > 0) {
             UI_ELEMENTS.copyButton.disabled = false;
             UI_ELEMENTS.copyDropdownButton.disabled = false;
             UI_ELEMENTS.saveButton.disabled = false;
@@ -532,6 +568,11 @@ function setupEventListeners() {
                 chrome.tabs.sendMessage(tab.id, {
                     message: "toggle_chat_capture",
                     enabled: e.target.checked
+                }, (response) => {
+                    // Check for Chrome runtime errors
+                    if (chrome.runtime.lastError) {
+                        console.warn('[Popup] Error toggling chat capture:', chrome.runtime.lastError.message);
+                    }
                 });
             }
         });
@@ -551,8 +592,9 @@ function setupEventListeners() {
             chrome.storage.sync.set({ filenamePattern: validatedPattern });
             e.target.style.borderColor = '';
         } catch (error) {
+            // Don't save invalid patterns, just show visual feedback
             e.target.style.borderColor = 'red';
-            chrome.storage.sync.set({ filenamePattern: e.target.value });
+            console.warn('[Popup] Invalid filename pattern, not saving:', error.message);
         }
     });
 
@@ -571,6 +613,15 @@ function setupEventListeners() {
                 if (customTemplates[id]) {
                     UI_ELEMENTS.aiInstructions.value = customTemplates[id].instructions;
                     UI_ELEMENTS.aiInstructions.dispatchEvent(new Event('change'));
+                } else {
+                    // Template was deleted (possibly by another tab) - notify user and reset
+                    console.warn(`[Templates] Custom template '${id}' not found, may have been deleted`);
+                    UI_ELEMENTS.aiInstructions.value = '';
+                    UI_ELEMENTS.meetingType.value = '';
+                    UI_ELEMENTS.editTemplateBtn.style.display = 'none';
+                    UI_ELEMENTS.deleteTemplateBtn.style.display = 'none';
+                    // Refresh the template list to remove stale entry
+                    await loadCustomTemplates();
                 }
             } else if (MEETING_TYPE_PROMPTS[value]) {
                 UI_ELEMENTS.aiInstructions.value = MEETING_TYPE_PROMPTS[value];
@@ -621,7 +672,11 @@ function setupEventListeners() {
     UI_ELEMENTS.saveButton.addEventListener('click', async () => {
         const tab = await getActiveMeetingTab();
         if (tab) {
-            chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format: currentDefaultFormat });
+            chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format: currentDefaultFormat }, (response) => {
+                if (chrome.runtime.lastError) {
+                    console.warn('[Popup] Error saving transcript:', chrome.runtime.lastError.message);
+                }
+            });
         }
     });
 
@@ -629,12 +684,20 @@ function setupEventListeners() {
         if (selectedSessionId) {
             const session = activeSessions.find(s => s.sessionId === selectedSessionId);
             if (session) {
-                chrome.tabs.sendMessage(session.tabId, { message: "get_captions_for_viewing" });
+                chrome.tabs.sendMessage(session.tabId, { message: "get_captions_for_viewing" }, (response) => {
+                    if (chrome.runtime.lastError) {
+                        console.warn('[Popup] Error getting captions for viewing:', chrome.runtime.lastError.message);
+                    }
+                });
             }
         } else {
             const tab = await getActiveMeetingTab();
             if (tab) {
-                chrome.tabs.sendMessage(tab.id, { message: "get_captions_for_viewing" });
+                chrome.tabs.sendMessage(tab.id, { message: "get_captions_for_viewing" }, (response) => {
+                    if (chrome.runtime.lastError) {
+                        console.warn('[Popup] Error getting captions for viewing:', chrome.runtime.lastError.message);
+                    }
+                });
             } else {
                 // No active meeting - check if we have previous sessions
                 if (typeof SessionManager !== 'undefined') {
@@ -756,14 +819,17 @@ async function handleCopy(target) {
     const copyType = target?.dataset?.copyType;
     if (!copyType) return;
 
+    // Capture session ID at start to prevent race condition if user switches sessions
+    const capturedSessionId = selectedSessionId;
+
     UI_ELEMENTS.statusMessage.textContent = "Preparing text to copy...";
     try {
         let transcriptArray = null;
 
-        if (selectedSessionId) {
+        if (capturedSessionId) {
             const response = await chrome.runtime.sendMessage({
                 action: 'getSessionData',
-                sessionId: selectedSessionId
+                sessionId: capturedSessionId
             });
             if (response?.sessionData?.transcript) {
                 transcriptArray = response.sessionData.transcript;
@@ -799,13 +865,16 @@ async function handleSave(target) {
     const format = target.dataset.format;
     if (!format) return;
 
+    // Capture session ID at start to prevent race condition if user switches sessions
+    const capturedSessionId = selectedSessionId;
+
     UI_ELEMENTS.statusMessage.textContent = `Saving as ${format === 'ai' ? 'AI' : format.toUpperCase()}...`;
 
     try {
-        if (selectedSessionId) {
+        if (capturedSessionId) {
             const response = await chrome.runtime.sendMessage({
                 action: 'getSessionData',
-                sessionId: selectedSessionId
+                sessionId: capturedSessionId
             });
 
             if (response?.sessionData) {
@@ -857,10 +926,29 @@ async function loadPreviousSessions() {
             const script = document.createElement('script');
             script.src = 'sessionManager.js';
             document.head.appendChild(script);
+
             await new Promise((resolve, reject) => {
-                script.onload = resolve;
-                script.onerror = () => resolve(); // Don't block if it fails
-                setTimeout(resolve, 100);
+                let resolved = false;
+                script.onload = () => {
+                    if (!resolved) {
+                        resolved = true;
+                        resolve();
+                    }
+                };
+                script.onerror = (error) => {
+                    if (!resolved) {
+                        resolved = true;
+                        console.warn('[Previous Sessions] Failed to load sessionManager.js:', error);
+                        resolve(); // Don't reject - allow graceful degradation
+                    }
+                };
+                // Timeout as fallback
+                setTimeout(() => {
+                    if (!resolved) {
+                        resolved = true;
+                        resolve();
+                    }
+                }, 1000); // Increased timeout
             });
         }
 
@@ -888,24 +976,32 @@ async function loadPreviousSessions() {
         countEl.textContent = sessions.length;
         pluralEl.textContent = sessions.length === 1 ? '' : 's';
 
-        // Add click handler to toggle folder
-        headerEl.addEventListener('click', () => {
-            const isOpen = listEl.style.display !== 'none';
-            if (isOpen) {
-                listEl.style.display = 'none';
-                folderIcon.classList.remove('open');
-            } else {
-                listEl.style.display = 'block';
-                folderIcon.classList.add('open');
-            }
-        });
+        // Add click handler to toggle folder (check if listener already added)
+        if (!headerEl.dataset.listenerAdded) {
+            headerEl.dataset.listenerAdded = 'true';
+            headerEl.addEventListener('click', () => {
+                const isOpen = listEl.style.display !== 'none';
+                if (isOpen) {
+                    listEl.style.display = 'none';
+                    folderIcon.classList.remove('open');
+                } else {
+                    listEl.style.display = 'block';
+                    folderIcon.classList.add('open');
+                }
+            });
+        }
 
         // Sort by most recent first
         sessions.sort((a, b) => new Date(b.startTime || b.timestamp) - new Date(a.startTime || a.timestamp));
 
         // Show all sessions (scrollable)
         listEl.innerHTML = sessions.map(session => {
+            // Validate session ID exists
             const sessionId = session.sessionId || session.id;
+            if (!sessionId) {
+                console.warn('[Previous Sessions] Session missing sessionId:', session);
+                return ''; // Skip sessions without valid ID
+            }
             const title = session.meetingTitle || session.title || 'Untitled Meeting';
             const startTime = session.startTime || session.timestamp;
             const date = new Date(startTime);
@@ -1231,11 +1327,13 @@ async function initializePopup() {
             status = null;
         }
 
+        // Zoom uses iframes, need delay to allow meeting iframe to respond
+        const ZOOM_IFRAME_RESPONSE_DELAY_MS = 500;
         if (tab.url?.includes('zoom.us')) {
             if (status && status.frameType === 'non-meeting-iframe') {
                 status = null;
             }
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, ZOOM_IFRAME_RESPONSE_DELAY_MS));
             try {
                 const secondStatus = await chrome.tabs.sendMessage(tab.id, { message: "get_status" });
                 if (secondStatus && secondStatus.frameType !== 'non-meeting-iframe') {
@@ -1280,15 +1378,11 @@ async function initializePopup() {
 
             // Only show meeting info when actually in a meeting
             if (status.isInMeeting) {
-                // Determine platform from tab URL
-                let platform = 'Unknown';
-                if (tab.url.includes('teams.microsoft.com') || tab.url.includes('teams.live.com')) {
-                    platform = 'Teams';
-                } else if (tab.url.includes('meet.google.com')) {
-                    platform = 'Meet';
-                } else if (tab.url.includes('zoom.us')) {
-                    platform = 'Zoom';
-                }
+                // Determine platform from tab URL using utility function
+                const platformKey = detectPlatformFromUrl(tab.url);
+                const platform = platformKey === 'teams' ? 'Teams' :
+                                platformKey === 'meet' ? 'Meet' :
+                                platformKey === 'zoom' ? 'Zoom' : 'Unknown';
 
                 // Get meeting title from status (if available) or tab title as fallback
                 const meetingTitle = status.meetingTitle ||
@@ -1400,15 +1494,11 @@ async function updateLiveStats() {
 
         // Only update meeting title/platform if in a meeting
         if (status.isInMeeting) {
-            // Determine platform from tab URL
-            let platform = 'Unknown';
-            if (tab.url.includes('teams.microsoft.com') || tab.url.includes('teams.live.com')) {
-                platform = 'Teams';
-            } else if (tab.url.includes('meet.google.com')) {
-                platform = 'Meet';
-            } else if (tab.url.includes('zoom.us')) {
-                platform = 'Zoom';
-            }
+            // Determine platform from tab URL using utility function
+            const platformKey = detectPlatformFromUrl(tab.url);
+            const platform = platformKey === 'teams' ? 'Teams' :
+                            platformKey === 'meet' ? 'Meet' :
+                            platformKey === 'zoom' ? 'Zoom' : 'Unknown';
 
             // Only update if we don't already have a title or if status provides one
             if (status.meetingTitle || UI_ELEMENTS.meetingTitle.textContent === 'No Active Meeting') {
@@ -1534,13 +1624,7 @@ async function loadRecordingTranscripts() {
     }
 }
 
-function getTimeAgo(date) {
-    const seconds = Math.floor((new Date() - date) / 1000);
-    if (seconds < 60) return 'just now';
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-    return `${Math.floor(seconds / 86400)}d ago`;
-}
+// Note: getTimeAgo is defined earlier in the file (line ~1183)
 
 async function handleRecordingDownload(e) {
     const id = e.target.dataset.id;
@@ -1578,6 +1662,10 @@ async function handleRecordingDelete(e) {
         chrome.runtime.sendMessage({
             message: 'update_recording_badge',
             count: filtered.length
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.warn('[Popup] Error updating badge:', chrome.runtime.lastError.message);
+            }
         });
 
         // Reload UI
@@ -1763,7 +1851,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 30000);
 });
 
-// Stop updates when popup closes
-window.addEventListener('beforeunload', () => {
+// Stop updates when popup closes and clean up temporary storage
+window.addEventListener('beforeunload', async () => {
     stopLiveUpdates();
+
+    // Clean up temporary historicalSession_ keys to prevent orphaned storage
+    try {
+        const allKeys = await chrome.storage.local.get(null);
+        const keysToRemove = Object.keys(allKeys).filter(key => key.startsWith('historicalSession_'));
+        if (keysToRemove.length > 0) {
+            await chrome.storage.local.remove(keysToRemove);
+            console.log(`[Popup] Cleaned up ${keysToRemove.length} temporary session keys`);
+        }
+    } catch (error) {
+        console.warn('[Popup] Failed to clean up temporary storage:', error);
+    }
 });

@@ -139,9 +139,16 @@ async function checkStorageQuota() {
     try {
         const usage = await chrome.storage.local.getBytesInUse();
         const limit = chrome.storage.local.QUOTA_BYTES;
+
+        // Guard against division by zero if QUOTA_BYTES is undefined or 0
+        if (!limit || limit === 0) {
+            console.warn('[Storage] QUOTA_BYTES unavailable, assuming storage OK');
+            return true;
+        }
+
         const percentUsed = usage / limit;
 
-        if (percentUsed > 0.9) { // 90% threshold
+        if (percentUsed >= 0.9) { // 90% threshold
             console.warn(`[Storage] Quota near limit: ${(percentUsed * 100).toFixed(1)}%`);
             return false;
         }
@@ -153,9 +160,12 @@ async function checkStorageQuota() {
 }
 
 // Helper function to acquire save lock (prevents race conditions in Zoom multi-frame scenarios)
+// 5 seconds: long enough to complete typical save operations, short enough to recover from stale locks
+const SAVE_LOCK_TIMEOUT_MS = 5000;
+
 async function acquireSaveLock(sessionId) {
     const lockKey = `save_lock_${sessionId}`;
-    const lockTimeout = 5000; // 5 seconds
+    const lockTimeout = SAVE_LOCK_TIMEOUT_MS;
 
     try {
         const result = await chrome.storage.local.get(lockKey);
@@ -298,8 +308,14 @@ async function createNewMeetingSession() {
             url: url
         });
         
+        // Validate sessionId format before accepting
         if (response && response.sessionId) {
-            currentSessionId = response.sessionId;
+            const sessionId = response.sessionId;
+            const isValidFormat = /^session_(\d+_\d+|migrated_\d+)$/.test(sessionId);
+            if (!isValidFormat) {
+                console.warn(`[Caption Saver] Received invalid sessionId format: ${sessionId}`);
+            }
+            currentSessionId = sessionId;
             console.log(`[Caption Saver] New meeting session created: ${currentSessionId}`);
             return true;
         }
@@ -335,6 +351,7 @@ let recordingStartTime = null;
 let observer = null;
 let observedElement = null;
 let hasInitializedListeners = false;
+let isCleanedUp = false; // Track cleanup state to prevent timers being set after cleanup
 let wasInMeeting = false;
 let meetingObserver = null;
 let captionsObserver = null;
@@ -352,6 +369,13 @@ window.currentUserName = null;
 // Map to track recent captions: key = hash(speaker+text), value = timestamp
 const recentCaptionCache = new Map();
 const CAPTION_CACHE_WINDOW = 30000; // 30 seconds
+let captionCacheCleanupInterval = null; // Periodic cleanup interval
+
+// Constants for Zoom caption overlap detection
+// Zoom shows overlapping text fragments as captions scroll (sliding window effect)
+const ZOOM_CAPTION_CONTINUATION_MS = 10000;    // Max time (ms) between captions to be considered continuation
+const ZOOM_MIN_WORD_MATCH_LENGTH = 3;          // Min consecutive words to count as substantial overlap
+const ZOOM_MIN_SUBSTRING_LENGTH = 10;          // Min chars for substring overlap detection
 
 // Clean old entries from caption cache
 function cleanCaptionCache() {
@@ -363,13 +387,38 @@ function cleanCaptionCache() {
     }
 }
 
+// Start periodic cleanup to prevent memory leak in long meetings
+function startCaptionCacheCleanup() {
+    if (captionCacheCleanupInterval) return;
+    captionCacheCleanupInterval = setInterval(() => {
+        cleanCaptionCache();
+        // Stop cleanup if cache is empty (no active meeting)
+        if (recentCaptionCache.size === 0) {
+            clearInterval(captionCacheCleanupInterval);
+            captionCacheCleanupInterval = null;
+        }
+    }, 60000); // Clean every 60 seconds
+}
+
+// Stop periodic cleanup
+function stopCaptionCacheCleanup() {
+    if (captionCacheCleanupInterval) {
+        clearInterval(captionCacheCleanupInterval);
+        captionCacheCleanupInterval = null;
+    }
+    recentCaptionCache.clear(); // Clear cache when stopping
+}
+
 // Check if caption is duplicate using time-windowed cache
 function isDuplicateCaption(speakerName, captionText) {
     const hash = `${speakerName}:${captionText}`;
     const now = Date.now();
 
-    // Clean old entries periodically
-    if (recentCaptionCache.size > 100) { // Clean when cache gets large
+    // Ensure periodic cleanup is running
+    startCaptionCacheCleanup();
+
+    // Also clean if cache gets large (immediate cleanup)
+    if (recentCaptionCache.size > 100) {
         cleanCaptionCache();
     }
 
@@ -406,6 +455,7 @@ let chatCaptureState = {
     lastChatCheck: null,
     isRotating: false,
     chatCheckInterval: null,
+    panelCheckInterval: null,  // Track the panel monitoring interval
     currentPanel: 'unknown',
     sessionStartTime: null,  // Track when this capture session started
     initialScanComplete: false,  // Track if we've done initial scan of existing messages
@@ -437,7 +487,7 @@ function showContextInvalidationNotification() {
     notification.innerHTML = `
         <strong>Live Captions Saver</strong><br>
         Extension was updated. Please refresh this page to continue capturing captions.
-        <button style="
+        <button id="lcs-refresh-btn" style="
             margin-top: 8px;
             background: white;
             color: #ff9800;
@@ -446,9 +496,15 @@ function showContextInvalidationNotification() {
             border-radius: 4px;
             cursor: pointer;
             font-weight: bold;
-        " onclick="location.reload()">Refresh Page</button>
+        ">Refresh Page</button>
     `;
     document.body.appendChild(notification);
+
+    // Add click handler after element is in DOM (CSP-compliant)
+    const refreshBtn = document.getElementById('lcs-refresh-btn');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => location.reload());
+    }
 
     // Auto-remove after 30 seconds
     setTimeout(() => {
@@ -536,6 +592,14 @@ async function broadcastAttendeeUpdate(data) {
 
 // --- Error Handling & Logging ---
 class ErrorHandler {
+    /**
+     * Log an error with context information
+     * @param {Error|string} error - The error to log
+     * @param {string} context - Description of where the error occurred
+     * @param {boolean} silent - If true, only log to console without notifying service worker.
+     *                          Console logging always happens for debugging; silent just prevents
+     *                          message propagation to avoid cascading errors during cleanup.
+     */
     static log(error, context = '', silent = false) {
         const timestamp = new Date().toISOString();
         const errorInfo = {
@@ -545,17 +609,17 @@ class ErrorHandler {
             stack: error?.stack,
             url: window.location.href
         };
-        
-        // Format error message properly
+
+        // Always log to console for debugging
         const errorMessage = errorInfo.message || 'Unknown error';
         if (errorInfo.stack) {
             console.error(`[Live Caption Saver] ${context}: ${errorMessage}\nStack:`, errorInfo.stack);
         } else {
             console.error(`[Live Caption Saver] ${context}: ${errorMessage}`);
         }
-        
+
         if (!silent) {
-            // Could send to analytics or show user notification
+            // Only notify service worker when not in silent mode
             safeSendMessage({
                 message: "error_logged",
                 error: errorInfo
@@ -606,7 +670,20 @@ class RetryHandler {
 // --- Utility Functions ---
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-const getCleanTranscript = () => transcriptArray.map(({ key, ...rest }) => rest);
+// Create shallow copy before mapping to prevent issues from concurrent mutation
+const getCleanTranscript = () => [...transcriptArray].map(({ key, ...rest }) => rest);
+
+// Sanitize attendee/speaker names from DOM to prevent XSS and normalize whitespace
+function sanitizeNameFromDOM(rawName) {
+    if (!rawName || typeof rawName !== 'string') return '';
+
+    return rawName
+        .replace(/<[^>]*>/g, '')           // Strip HTML tags
+        .replace(/[\x00-\x1F\x7F]/g, '')   // Remove control characters
+        .replace(/\s+/g, ' ')              // Normalize whitespace
+        .trim()
+        .substring(0, 100);                // Limit length to prevent DoS
+}
 
 // --- Timestamp Formatting ---
 let timestampFormat = '12hr'; // Default format
@@ -616,6 +693,9 @@ chrome.storage.sync.get('timestampFormat').then(result => {
     if (result.timestampFormat) {
         timestampFormat = result.timestampFormat;
     }
+}).catch(error => {
+    // Silently use default if storage read fails
+    console.warn('[Caption Saver] Could not load timestamp format, using default:', error.message);
 });
 
 // Listen for changes to timestamp format
@@ -734,7 +814,17 @@ function getCachedElement(selectorOrArray, expiry = 5000) {
 
     const cached = cachedElements.get(cacheKey);
 
-    if (cached && (now - cached.timestamp) < expiry && document.contains(cached.element)) {
+    // Enhanced staleness check:
+    // - Check if cache entry exists and is not expired
+    // - Check document.contains() for basic containment
+    // - Check isConnected for proper DOM attachment (handles React re-renders)
+    // - Check parentNode to ensure element hasn't been detached
+    if (cached &&
+        (now - cached.timestamp) < expiry &&
+        cached.element &&
+        cached.element.isConnected &&
+        document.contains(cached.element) &&
+        cached.element.parentNode) {
         return cached.element;
     }
 
@@ -998,6 +1088,11 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
 
     transcriptElements.forEach(element => {
         try {
+            // Defensive null check for element
+            if (!element) {
+                return;
+            }
+
             // Defensive null check for platformConfig and its methods
             if (!platformConfig || !platformConfig.getCaptionData) {
                 console.error('[Caption Processing] Platform config or getCaptionData method missing');
@@ -1012,7 +1107,7 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
             const time = getFormattedTimestamp(); // Always use our formatted timestamp
             if (text.length === 0) return;
 
-            let captionId = element.getAttribute('data-caption-id');
+            let captionId = element.getAttribute ? element.getAttribute('data-caption-id') : null;
             
             // For Zoom, don't rely on element IDs since elements are destroyed/recreated
             if (platformConfig.name === 'Zoom') {
@@ -1031,7 +1126,7 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                 const now = new Date();
                 const isContinuation = lastCaptionIndex !== -1 &&
                     transcriptArray[lastCaptionIndex].timestamp &&
-                    (now - new Date(transcriptArray[lastCaptionIndex].timestamp)) < 10000; // Within 10 seconds
+                    (now - new Date(transcriptArray[lastCaptionIndex].timestamp)) < ZOOM_CAPTION_CONTINUATION_MS;
 
                 // Check for exact duplicates using time-windowed cache
                 // This handles rapid speakers better than checking last 10 captions
@@ -1065,18 +1160,18 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                                        lastWords[i + matchLength] === newWords[j + matchLength]) {
                                     matchLength++;
                                 }
-                                if (matchLength >= 3) { // At least 3 words in common
+                                if (matchLength >= ZOOM_MIN_WORD_MATCH_LENGTH) {
                                     wordsInCommon.push(matchLength);
                                 }
                             }
                         }
                     }
 
-                    const hasSubstantialOverlap = wordsInCommon.length > 0 && Math.max(...wordsInCommon) >= 3;
+                    const hasSubstantialOverlap = wordsInCommon.length > 0 && Math.max(...wordsInCommon) >= ZOOM_MIN_WORD_MATCH_LENGTH;
 
                     // Check if new text contains substantial portion of old text
                     // This catches cases like: "Testing, testing" -> "Testing, testing… Test line"
-                    const substringOverlap = lastText.length > 10 && text.includes(lastText.substring(0, lastText.length - 5));
+                    const substringOverlap = lastText.length > ZOOM_MIN_SUBSTRING_LENGTH && text.includes(lastText.substring(0, lastText.length - 5));
 
                     // Check if old text is contained within new text (direct extension)
                     // This catches: "Test number 5." -> "Test number 5. Test number 6."
@@ -1234,7 +1329,8 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
 // --- Attendee Tracking Functions ---
 function updateAttendeesFromTranscript() {
     // Fallback method: Extract unique speakers from transcript
-    const speakers = [...new Set(transcriptArray.map(item => item.Name))];
+    // Create shallow copy before mapping to prevent issues from concurrent mutation
+    const speakers = [...new Set([...transcriptArray].map(item => item.Name))];
     const currentTime = new Date().toLocaleTimeString();
     
     speakers.forEach(name => {
@@ -1290,7 +1386,8 @@ function updateAttendeeList() {
         const attendeeItems = document.querySelectorAll(attendeeItemSelector);
         // console.log(`[Attendee Tracking] Found ${attendeeItems.length} attendees with selector: ${attendeeItemSelector}`);
         const currentTime = new Date().toLocaleTimeString();
-        
+        const currentTimestamp = Date.now(); // Use numeric timestamp for reliable comparison
+
         // Clear current attendees for fresh update
         const previousAttendees = new Set(attendeeData.currentAttendees.keys());
         attendeeData.currentAttendees.clear();
@@ -1317,8 +1414,8 @@ function updateAttendeeList() {
                 
                 if (nameElement) {
                     attendeeInfo = {
-                        name: nameElement.textContent.trim(),
-                        role: roleElement ? roleElement.textContent.trim() : 'Attendee'
+                        name: sanitizeNameFromDOM(nameElement.textContent),
+                        role: roleElement ? sanitizeNameFromDOM(roleElement.textContent) : 'Attendee'
                     };
                 }
             }
@@ -1351,12 +1448,13 @@ function updateAttendeeList() {
                 // Broadcast join event for both first joins AND rejoins
                 if (isFirstJoin || isRejoin) {
                     // Check for duplicate join event in recent history (within last 5 seconds)
+                    // Use numeric timestamp for reliable comparison
                     const recentJoin = attendeeData.attendeeHistory
                         .slice(-10) // Check last 10 events
                         .find(event =>
                             event.name === cleanName &&
                             event.action === 'joined' &&
-                            (new Date(currentTime) - new Date(event.time)) < 5000 // Within 5 seconds
+                            event.timestamp && (currentTimestamp - event.timestamp) < 5000 // Within 5 seconds
                         );
 
                     if (recentJoin) {
@@ -1368,7 +1466,8 @@ function updateAttendeeList() {
                             name: cleanName,
                             role,
                             action: 'joined',
-                            time: currentTime
+                            time: currentTime,
+                            timestamp: currentTimestamp // Store numeric timestamp for comparison
                         };
                         attendeeData.attendeeHistory.push(joinEvent);
 
@@ -1396,12 +1495,13 @@ function updateAttendeeList() {
         previousAttendees.forEach(name => {
             if (!attendeeData.currentAttendees.has(name)) {
                 // Check for duplicate leave event in recent history (within last 5 seconds)
+                // Use numeric timestamp for reliable comparison
                 const recentLeave = attendeeData.attendeeHistory
                     .slice(-10) // Check last 10 events
                     .find(event =>
                         event.name === name &&
                         event.action === 'left' &&
-                        (new Date(currentTime) - new Date(event.time)) < 5000 // Within 5 seconds
+                        event.timestamp && (currentTimestamp - event.timestamp) < 5000 // Within 5 seconds
                     );
 
                 if (recentLeave) {
@@ -1411,7 +1511,8 @@ function updateAttendeeList() {
                     const leaveEvent = {
                         name,
                         action: 'left',
-                        time: currentTime
+                        time: currentTime,
+                        timestamp: currentTimestamp // Store numeric timestamp for comparison
                     };
                     attendeeData.attendeeHistory.push(leaveEvent);
                     console.log(`Attendee left: ${name}`);
@@ -1852,23 +1953,34 @@ async function openPeoplePanel() {
     return await platformConfig.chatCapture.openPeoplePanel();
 }
 
+// Track typing postponement to prevent infinite recursion
+let typingPostponeCount = 0;
+const MAX_TYPING_POSTPONE = 30; // Max ~30 seconds of postponement at 1s intervals
+
 async function performHybridRotation() {
     if (chatCaptureState.isRotating || !chatCaptureState.enabled) return;
-    
+
     // For Google Meet, we don't need panel rotation since both can be visible
     if (platformConfig?.name === 'Google Meet') {
         // Just capture chat messages if the panel is open
         captureChatMessages(false);  // Normal capture, not initial scan
         return;
     }
-    
+
     // Check if user is typing (Teams/other platforms)
     if (isUserTyping()) {
-        // Silently postpone without logging (reduces console spam when tab is inactive)
-        setTimeout(performHybridRotation, TIMING.TYPING_RECHECK_DELAY);
-        return;
+        typingPostponeCount++;
+        // Prevent infinite postponement - after max attempts, proceed anyway
+        if (typingPostponeCount < MAX_TYPING_POSTPONE) {
+            // Silently postpone without logging (reduces console spam when tab is inactive)
+            setTimeout(performHybridRotation, TIMING.TYPING_RECHECK_DELAY);
+            return;
+        }
+        // Reset counter and proceed with rotation
+        console.log('[Chat Capture] Max typing postponement reached, proceeding with rotation');
     }
-    
+    typingPostponeCount = 0; // Reset counter when proceeding
+
     chatCaptureState.isRotating = true;
     // console.log('[Chat Capture] Starting hybrid rotation');
     
@@ -1956,14 +2068,17 @@ async function startChatCapture() {
             // Initial scan - mark existing messages as seen but don't capture
             captureChatMessages(true);  // Skip initial messages
             chatCaptureState.initialScanComplete = true;
-            
-            // Set up continuous chat monitoring
-            setInterval(() => {
+
+            // Set up continuous chat monitoring (store interval for cleanup)
+            if (chatCaptureState.panelCheckInterval) {
+                clearInterval(chatCaptureState.panelCheckInterval);
+            }
+            chatCaptureState.panelCheckInterval = setInterval(() => {
                 if (detectCurrentPanel() === 'chat' && !chatCaptureState.isRotating) {
                     captureChatMessages(false);  // Capture new messages normally
                 }
             }, 2000);
-            
+
             // Set up periodic rotation for attendee checks
             chatCaptureState.chatCheckInterval = setInterval(performHybridRotation, TIMING.CHAT_CHECK_INTERVAL);
         });
@@ -1977,6 +2092,10 @@ function stopChatCapture() {
     if (chatCaptureState.chatCheckInterval) {
         clearInterval(chatCaptureState.chatCheckInterval);
         chatCaptureState.chatCheckInterval = null;
+    }
+    if (chatCaptureState.panelCheckInterval) {
+        clearInterval(chatCaptureState.panelCheckInterval);
+        chatCaptureState.panelCheckInterval = null;
     }
     // console.log('[Chat Capture] Stopped');
 }
@@ -2449,16 +2568,25 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                     // Try alternative: save directly if we have permission
                     if (cleanTranscript.length > 0) {
                         console.log("Attempting direct save fallback...");
-                        // Store for manual save
-                        chrome.storage.local.set({
-                            pendingAutoSave: {
-                                transcript: cleanTranscript,
-                                meetingTitle: currentMeetingTitle || 'Untitled Meeting',
-                                recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
-                                attendeeReport: attendeeReport,
-                                timestamp: new Date().toISOString()
+                        // Store for manual save with error handling
+                        try {
+                            const hasSpace = await checkStorageQuota();
+                            if (hasSpace) {
+                                await chrome.storage.local.set({
+                                    pendingAutoSave: {
+                                        transcript: cleanTranscript,
+                                        meetingTitle: currentMeetingTitle || 'Untitled Meeting',
+                                        recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
+                                        attendeeReport: attendeeReport,
+                                        timestamp: new Date().toISOString()
+                                    }
+                                });
+                            } else {
+                                console.warn('[Auto-save] Storage quota exceeded, cannot save pending data');
                             }
-                        });
+                        } catch (storageError) {
+                            console.error('[Auto-save] Failed to save pending data:', storageError);
+                        }
                     }
                 }
             } else {
@@ -2699,13 +2827,17 @@ async function startCaptureSession() {
     
     // Start chat capture if enabled (for platforms that support it)
     if (platformConfig && platformConfig.chatCapture?.isSupported()) {
-        chrome.storage.sync.get(['chatCapture'], (result) => {
+        try {
+            const result = await chrome.storage.sync.get(['chatCapture']);
             // Default to true if not explicitly set to false (matches popup default behavior)
             if (result.chatCapture !== false) {
                 // console.log('[Caption Saver] Starting chat capture for', platformConfig.name);
                 startChatCapture();
             }
-        });
+        } catch (error) {
+            console.warn('[Caption Saver] Could not check chat capture setting, defaulting to enabled:', error.message);
+            startChatCapture(); // Default to enabled on error
+        }
     }
     
     updateBadgeStatus(true);
@@ -2994,6 +3126,9 @@ async function attemptAutoEnableCaptions() {
 }
 
 function debouncedAutoEnableCaptions() {
+    // Don't set new timers after cleanup
+    if (isCleanedUp) return;
+
     if (autoEnableDebounceTimer) {
         clearTimeout(autoEnableDebounceTimer);
     }
@@ -3063,6 +3198,9 @@ function initializeEventDrivenSystem() {
 
 // --- Memory Leak Prevention ---
 function cleanupObservers() {
+    // Mark as cleaned up to prevent new timers
+    isCleanedUp = true;
+
     if (observer) {
         observer.disconnect();
         observer = null;
@@ -3080,6 +3218,12 @@ function cleanupObservers() {
     if (leaveButtonListener) {
         document.removeEventListener('click', leaveButtonListener, true);
         leaveButtonListener = null;
+    }
+
+    // Remove visibility change handler
+    if (visibilityChangeHandler) {
+        document.removeEventListener('visibilitychange', visibilityChangeHandler);
+        visibilityChangeHandler = null;
     }
 
     // Clear all intervals (memory leak prevention)
@@ -3125,10 +3269,16 @@ function cleanupObservers() {
     // Reset auto-enable state
     autoEnableInProgress = false;
 
+    // Stop caption cache cleanup and clear cache
+    stopCaptionCacheCleanup();
+
     // Stop attendee tracking
     stopAttendeeTracking();
 
     clearElementCache();
+
+    // Clean up global user name
+    window.currentUserName = null;
 }
 
 // Cleanup on page unload
@@ -3152,7 +3302,7 @@ window.addEventListener('beforeunload', () => {
                     attendeeReport: {
                         allAttendees: attendeeReport.allAttendees,
                         totalUniqueAttendees: attendeeReport.totalUniqueAttendees,
-                        attendeeHistory: attendeeHistory
+                        attendeeHistory: attendeeReport.attendeeHistory
                     },
                     timestamp: new Date().toISOString(),
                     shouldAutoSave: true,
@@ -3348,7 +3498,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             break;
 
         case 'get_unique_speakers':
-            const speakers = [...new Set(transcriptArray.map(item => item.Name))];
+            // Create shallow copy before mapping to prevent issues from concurrent mutation
+            const speakers = [...new Set([...transcriptArray].map(item => item.Name))];
             sendResponse({ speakers });
             break;
             

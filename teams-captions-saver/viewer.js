@@ -1,11 +1,19 @@
 // Global interval references for cleanup
 let connectionCheckInterval = null;
+let notificationStyleAdded = false;
 
 // Global variables for save functionality
 let currentMeetingTitle = 'Untitled Meeting';
 let currentPlatform = '';
 let currentFilteredSpeaker = null;
 let currentAttendeeReport = null;
+
+// Helper to generate platform badge HTML (VW-20: centralized to avoid duplication)
+function createPlatformBadge(platform) {
+    if (!platform) return '';
+    const platformName = platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET');
+    return `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>`;
+}
 
 // Cleanup function to prevent memory leaks
 function cleanupViewerIntervals() {
@@ -120,6 +128,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const sessionListModal = document.getElementById('sessionListModal');
     const closeModal = document.querySelector('.close-modal');
 
+    // Validate critical DOM elements exist
+    if (!captionsContainer) {
+        console.error('[Viewer] Critical element missing: captions-container');
+    }
+
     // --- State ---
     let allCaptions = [];
     let searchDebounceTimer = null;
@@ -138,6 +151,16 @@ document.addEventListener('DOMContentLoaded', () => {
     let speakerAliases = {};  // Session-specific speaker aliases
     let isNearBottom = true;  // Track if user is near bottom of scroll
     let captionElementsCache = [];  // Performance: Cache caption elements to avoid repeated DOM queries
+
+    // Clear stale cache entries when switching sessions or clearing view
+    function clearCaptionCache() {
+        captionElementsCache = [];
+    }
+
+    // Rebuild cache from current DOM state - use after filtering or major DOM changes
+    function rebuildCaptionCache() {
+        captionElementsCache = Array.from(captionsContainer.querySelectorAll('.caption'));
+    }
 
     // --- Utility ---
     function escapeHtml(str) {
@@ -414,22 +437,32 @@ document.addEventListener('DOMContentLoaded', () => {
             const existingIndex = allCaptions.findIndex(c => c.key === caption.key);
             if (existingIndex !== -1) {
                 debug.log('[Viewer] Caption with key already exists, updating instead:', caption.key);
-                updateExistingCaption(caption);
+                updateExistingCaption(caption, true); // Pass true to prevent infinite recursion
                 return;
             }
         }
 
         // Check if this is actually a new caption or just a fragment
         // For Google Meet, check if we already have a recent caption from this speaker
+        // Use 2 second window instead of 10 seconds to avoid incorrectly merging separate short captions
         const recentCaptionIndex = allCaptions.findIndex(c =>
             c.Name === caption.Name &&
-            Math.abs(new Date(c.Time).getTime() - new Date(caption.Time).getTime()) < 10000 // Within 10 seconds
+            Math.abs(new Date(c.Time).getTime() - new Date(caption.Time).getTime()) < 2000 // Within 2 seconds
         );
 
-        if (recentCaptionIndex !== -1 && caption.Text.length < 50) {
+        // Only treat as fragment if:
+        // 1. Recent caption from same speaker exists (within 2 seconds)
+        // 2. New caption is short (< 50 chars)
+        // 3. New caption text is similar to (contained in or extends) existing text
+        const existingCaption = recentCaptionIndex !== -1 ? allCaptions[recentCaptionIndex] : null;
+        const isLikelyFragment = existingCaption &&
+            caption.Text.length < 50 &&
+            (existingCaption.Text.includes(caption.Text) || caption.Text.includes(existingCaption.Text));
+
+        if (isLikelyFragment) {
             // This looks like a fragment, update the existing caption instead
             debug.log('[Viewer] Fragment detected, updating existing caption instead of adding new');
-            updateExistingCaption(caption);
+            updateExistingCaption(caption, true); // Pass true to prevent infinite recursion
             return;
         }
 
@@ -467,11 +500,9 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Smart auto-scroll logic
         checkIfNearBottom();
-        
-        // Auto-scroll if:
-        // 1. User has auto-scroll enabled AND is near bottom, OR
-        // 2. User is very close to bottom (within 150px) regardless of setting
-        if ((autoScroll && isNearBottom) || isNearBottom) {
+
+        // Auto-scroll if user has auto-scroll enabled AND is near bottom
+        if (autoScroll && isNearBottom) {
             newCaptionElement.scrollIntoView({ behavior: 'smooth', block: 'end' });
             // Add a small extra scroll to ensure the caption is fully visible
             setTimeout(() => {
@@ -493,12 +524,13 @@ document.addEventListener('DOMContentLoaded', () => {
         updateLiveIndicator();
     }
     
-    function updateExistingCaption(caption) {
+    // Prevent infinite recursion between appendNewCaption and updateExistingCaption
+    function updateExistingCaption(caption, fromAppend = false) {
         debug.log('[Viewer] Updating caption with key:', caption.key);
-        
+
         // First, try to find by key
         let index = allCaptions.findIndex(c => c.key === caption.key);
-        
+
         // If not found by key, try to find by speaker name (for Google Meet)
         if (index === -1 && caption.Name) {
             debug.log('[Viewer] Key not found, searching by name:', caption.Name);
@@ -511,11 +543,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         }
-        
+
         if (index !== -1) {
             // Update in data array
             allCaptions[index] = { ...allCaptions[index], ...caption };
-            
+
             // Update in DOM
             const captionElement = captionsContainer.querySelector(`[data-index="${index}"]`);
             if (captionElement) {
@@ -529,9 +561,12 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 debug.log('[Viewer] Caption element not found at index:', index);
             }
-        } else {
+        } else if (!fromAppend) {
+            // Only add as new if not already called from appendNewCaption (prevent infinite recursion)
             debug.log('[Viewer] Caption not found for update, adding as new');
             appendNewCaption(caption);
+        } else {
+            debug.log('[Viewer] Caption not found, skipping to prevent recursion');
         }
     }
     
@@ -618,7 +653,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Handle attendance events differently
         if (item.Type === 'attendance') {
             const actionClass = item.action || (item.Text.includes('joined') ? 'joined' : 'left');
-            const displayName = speakerAliases[item.Name] || item.Name;
+            const displayName = (item.Name && speakerAliases[item.Name]) || item.Name || 'Unknown';
             return `
                 <div class="attendance-event ${actionClass}" data-type="attendance" data-action="${actionClass}">
                     <span class="attendance-icon">●</span>
@@ -636,8 +671,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const typeLabel = isChat ? 'Chat' : 'Caption';
 
         // Apply speaker alias if exists
-        const displayName = speakerAliases[item.Name] || item.Name;
-        const hasAlias = speakerAliases[item.Name] ? true : false;
+        const displayName = (item.Name && speakerAliases[item.Name]) || item.Name || 'Unknown';
+        const hasAlias = !!(item.Name && speakerAliases[item.Name]);
 
         // Check for attachments and remove [Image:] text from display
         let displayText = item.Text;
@@ -664,7 +699,7 @@ document.addEventListener('DOMContentLoaded', () => {
                              title="${escapeHtml(att.filename || att.alt)}">
                             <img src="${escapeHtml(safeUrl)}"
                                  alt="${escapeHtml(att.alt || 'Image attachment')}"
-                                 onerror="this.parentElement.style.display='none'">
+                                 class="attachment-image">
                         </div>`;
                     }).join('')}
                 </div>
@@ -810,15 +845,25 @@ document.addEventListener('DOMContentLoaded', () => {
         const searchTerm = searchBox.value.toLowerCase().trim();
         activeSearch = searchTerm; // Store for live updates
         const activeSpeakerFilter = speakerFiltersContainer.querySelector('button.active');
-        const speakerToFilter = activeSpeakerFilter?.id === 'show-all-btn' ? null : activeSpeakerFilter?.dataset.speaker;
+        // Use originalSpeaker for consistency
+        const speakerToFilter = activeSpeakerFilter?.id === 'show-all-btn' ? null : (activeSpeakerFilter?.dataset.originalSpeaker || activeSpeakerFilter?.dataset.speaker);
 
         // Update global filtered speaker for save functionality
         currentFilteredSpeaker = speakerToFilter;
 
         // Performance: Use cached elements instead of querying DOM
         captionElementsCache.forEach(captionDiv => {
-            const text = captionDiv.querySelector('.text').textContent.toLowerCase();
-            const speaker = captionDiv.dataset.speaker;
+            const textElement = captionDiv.querySelector('.text');
+            // Handle attendance events (joins/leaves) which don't have .text element
+            if (!textElement) {
+                // For attendance events, show unless there's a search term or speaker filter
+                captionDiv.style.display = (searchTerm || speakerToFilter) ? 'none' : 'block';
+                return;
+            }
+
+            const text = textElement.textContent.toLowerCase();
+            // Use originalSpeaker for filtering
+            const speaker = captionDiv.dataset.originalSpeaker || captionDiv.dataset.speaker || '';
 
             const matchesSearch = !searchTerm || text.includes(searchTerm) || speaker.toLowerCase().includes(searchTerm);
             const matchesSpeaker = !speakerToFilter || speaker === speakerToFilter;
@@ -873,31 +918,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const aliasInput = e.target.closest('.speaker-alias-input')?.parentElement;
         if (aliasInput) return;
 
-        // Find the actual button element
-        // First check if the target itself is a button
-        let filterBtn = null;
-        if (e.target.classList.contains('speaker-filter-btn') || e.target.id === 'show-all-btn') {
+        // Simplified button finding logic
+        // Use closest() to find button - works whether clicking on button or its children
+        let filterBtn = e.target.closest('button.speaker-filter-btn, button#show-all-btn');
+
+        // Fallback: if target is a button element in the container, use it directly
+        if (!filterBtn && e.target.tagName === 'BUTTON' && speakerFiltersContainer.contains(e.target)) {
             filterBtn = e.target;
-        } else if (e.target.tagName === 'BUTTON') {
-            // It's a button but doesn't have the expected classes/id
-            // Check if it's inside the speaker filters container
-            if (speakerFiltersContainer.contains(e.target)) {
-                filterBtn = e.target;
-                console.log('[Viewer] Found button without expected class/id:', e.target, 'classes:', Array.from(e.target.classList));
+        }
+
+        // Validate the button is still in the DOM and connected (prevents stale reference issues)
+        if (!filterBtn || !filterBtn.isConnected || !speakerFiltersContainer.contains(filterBtn)) {
+            // Only log if we found something but it was stale
+            if (filterBtn) {
+                debug.log('[Viewer] Filter button is stale or detached, ignoring click');
             }
-        }
-
-        // If still not found, search up the tree for a parent button
-        if (!filterBtn) {
-            filterBtn = e.target.closest('.speaker-filter-btn, #show-all-btn');
-        }
-
-        if (!filterBtn) {
-            console.warn('[Viewer] Could not find filter button for click event');
-            console.warn('  Target:', e.target.tagName, e.target);
-            console.warn('  Classes:', Array.from(e.target.classList));
-            console.warn('  ID:', e.target.id);
-            console.warn('  Parent:', e.target.parentElement);
             return;
         }
 
@@ -1288,22 +1323,14 @@ document.addEventListener('DOMContentLoaded', () => {
             animation: slideInFromRight 0.3s ease-out;
         `;
         
-        // Add slide-in animation
-        const style = document.createElement('style');
-        style.textContent = `
-            @keyframes slideInFromRight {
-                from {
-                    transform: translateX(100%);
-                    opacity: 0;
-                }
-                to {
-                    transform: translateX(0);
-                    opacity: 1;
-                }
-            }
-        `;
-        document.head.appendChild(style);
-        
+        // Add slide-in animation style once
+        if (!notificationStyleAdded) {
+            const style = document.createElement('style');
+            style.textContent = `@keyframes slideInFromRight { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }`;
+            document.head.appendChild(style);
+            notificationStyleAdded = true;
+        }
+
         document.body.appendChild(notification);
         
         setTimeout(() => {
@@ -1320,15 +1347,35 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // --- Initialization ---
+    let eventListenersSetup = false; // Prevent duplicate event listeners
+
     function setupEventListeners() {
+        // Prevent duplicate event listener setup
+        if (eventListenersSetup) {
+            debug.log('[Viewer] Event listeners already set up, skipping');
+            return;
+        }
+        eventListenersSetup = true;
+
         searchBox.addEventListener('input', debouncedApplyFilters);
         speakerFiltersContainer.addEventListener('click', handleSpeakerFilterClick);
         captionsContainer.addEventListener('click', handleCopyClick);
         copyAllBtn.addEventListener('click', handleCopyAllClick);
         saveAllBtn.addEventListener('click', handleSaveAllClick);
-        
+
+        // Handle image load errors using event delegation (CSP-compliant)
+        captionsContainer.addEventListener('error', (event) => {
+            if (event.target.classList.contains('attachment-image')) {
+                // Hide the parent thumbnail container when image fails to load
+                const thumbnail = event.target.closest('.attachment-thumbnail');
+                if (thumbnail) {
+                    thumbnail.style.display = 'none';
+                }
+            }
+        }, true); // Use capture phase to catch error events
+
         // No longer need inline caption editing since we use filter buttons
-        
+
         // Smart scroll monitoring
         window.addEventListener('scroll', () => {
             checkIfNearBottom();
@@ -1340,7 +1387,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         });
-        
+
         // Session history handlers
         historyBtn.addEventListener('click', showSessionHistory);
         closeModal.addEventListener('click', () => sessionModal.style.display = 'none');
@@ -1377,9 +1424,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currentPlatform = platform;
             currentAttendeeReport = sessionData.attendeeReport || null;
 
-            const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
-            const platformBadge = platform ? `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>` : '';
-            h1.innerHTML = `${platformBadge}Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
+            h1.innerHTML = `${createPlatformBadge(platform)}Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
 
             // Calculate and display analytics
             const analytics = calculateAnalytics(allCaptions);
@@ -1411,6 +1456,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     async function loadSessionHistory() {
+        if (!sessionListModal) {
+            console.error('[Session History] sessionListModal element not found');
+            return;
+        }
         try {
             // Check if SessionManager already exists or load it
             if (typeof SessionManager === 'undefined') {
@@ -1419,9 +1468,31 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.head.appendChild(script);
 
                 await new Promise((resolve, reject) => {
-                    script.onload = resolve;
-                    script.onerror = () => reject(new Error('Failed to load sessionManager.js'));
-                    setTimeout(resolve, 200);
+                    let resolved = false;
+                    script.onload = () => {
+                        if (!resolved) {
+                            resolved = true;
+                            resolve();
+                        }
+                    };
+                    script.onerror = () => {
+                        if (!resolved) {
+                            resolved = true;
+                            reject(new Error('Failed to load sessionManager.js'));
+                        }
+                    };
+                    // Timeout as fallback, but only resolve if script hasn't errored
+                    setTimeout(() => {
+                        if (!resolved) {
+                            resolved = true;
+                            // Check if SessionManager is now defined
+                            if (typeof SessionManager !== 'undefined') {
+                                resolve();
+                            } else {
+                                reject(new Error('Timeout waiting for sessionManager.js'));
+                            }
+                        }
+                    }, 2000); // Increased timeout for slower connections
                 });
             }
 
@@ -1556,12 +1627,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (meetingTitle) {
                     const h1 = document.querySelector('h1');
                     const isHistorical = viewerData?.isHistorical;
-                    const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
-            const platformBadge = platform ? `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>` : '';
+                    const badge = createPlatformBadge(platform);
                     if (isHistorical) {
-                        h1.innerHTML = `${platformBadge}Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
+                        h1.innerHTML = `${badge}Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
                     } else {
-                        h1.innerHTML = `${platformBadge}Live Transcript<span class="live-indicator"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
+                        h1.innerHTML = `${badge}Live Transcript<span class="live-indicator"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
                     }
                 } else {
                     console.warn('[Viewer] No meeting title found! viewerData:', viewerData, 'result:', result);
@@ -1610,9 +1680,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const platform = result?.platform || viewerData?.platform || '';
                     if (meetingTitle || platform) {
                         const h1 = document.querySelector('h1');
-                        const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
-                        const platformBadge = platform ? `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>` : '';
-                        h1.innerHTML = `${platformBadge}Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span>${meetingTitle ? `<span class="meeting-title">${escapeHtml(meetingTitle)}</span>` : ''}`;
+                        h1.innerHTML = `${createPlatformBadge(platform)}Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span>${meetingTitle ? `<span class="meeting-title">${escapeHtml(meetingTitle)}</span>` : ''}`;
                     }
                 }
 
@@ -1681,13 +1749,16 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // --- Live Streaming Setup ---
     let messageListenerSetup = false;
-    
+    let viewerMessageHandler = null; // Store reference to remove old listener
+
     async function setupLiveStreaming() {
         // Setup message listener for live updates FIRST (before trying to connect)
         // This ensures we don't miss any broadcasts from the content script
         if (!messageListenerSetup) {
             messageListenerSetup = true;
-            chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+
+            // Define the handler so we can reference it for removal if needed
+            viewerMessageHandler = (request, sender, sendResponse) => {
                 // Don't use async here to avoid automatic Promise return behavior
                 // Handle async operations with IIFE when needed
 
@@ -1743,7 +1814,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 return false; // No async response needed for these messages
-            });
+            };
+
+            chrome.runtime.onMessage.addListener(viewerMessageHandler);
         }
         
         // Try to connect to content script if it exists
@@ -1779,10 +1852,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 // Update meeting title if provided
                                 if (transcriptResponse.meetingTitle) {
                                     const h1 = document.querySelector('h1');
-                                    const platform = transcriptResponse.platform || '';
-                                    const platformName = platform ? platform.toUpperCase().replace('MICROSOFT TEAMS', 'TEAMS').replace('GOOGLE MEET', 'MEET') : '';
-            const platformBadge = platform ? `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>` : '';
-                                    h1.innerHTML = `${platformBadge}Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(transcriptResponse.meetingTitle)}</span>`;
+                                    h1.innerHTML = `${createPlatformBadge(transcriptResponse.platform)}Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span><span class="meeting-title">${escapeHtml(transcriptResponse.meetingTitle)}</span>`;
                                 }
 
                                 renderCaptions(allCaptions);
@@ -1929,15 +1999,25 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Analytics Functions ---
     function calculateAnalytics(captions) {
         if (!captions || captions.length === 0) return null;
-        
+
+        // Filter out attendance events (join/leave) and chat messages for accurate stats
+        const captionEntries = captions.filter(caption =>
+            caption.Type !== 'attendance' && caption.Type !== 'chat'
+        );
+
+        if (captionEntries.length === 0) return null;
+
         const speakerStats = {};
         let totalWords = 0;
-        
-        // Calculate speaker statistics
-        captions.forEach(caption => {
+
+        // Calculate speaker statistics (captions only)
+        captionEntries.forEach(caption => {
             const speaker = caption.Name;
-            const words = caption.Text.split(/\s+/).length;
-            
+            if (!speaker) return; // Skip entries without speaker name
+
+            const text = caption.Text || '';
+            const words = text.split(/\s+/).filter(w => w.length > 0).length;
+
             if (!speakerStats[speaker]) {
                 speakerStats[speaker] = {
                     messageCount: 0,
@@ -1946,20 +2026,22 @@ document.addEventListener('DOMContentLoaded', () => {
                     lastMessage: caption.Time
                 };
             }
-            
+
             speakerStats[speaker].messageCount++;
             speakerStats[speaker].wordCount += words;
             speakerStats[speaker].lastMessage = caption.Time;
             totalWords += words;
         });
-        
+
         // Calculate percentages
         Object.keys(speakerStats).forEach(speaker => {
-            speakerStats[speaker].wordPercentage = ((speakerStats[speaker].wordCount / totalWords) * 100).toFixed(1);
+            speakerStats[speaker].wordPercentage = totalWords > 0
+                ? ((speakerStats[speaker].wordCount / totalWords) * 100).toFixed(1)
+                : '0.0';
         });
-        
+
         return {
-            totalMessages: captions.length,
+            totalMessages: captionEntries.length,
             totalWords: totalWords,
             uniqueSpeakers: Object.keys(speakerStats).length,
             speakerStats: speakerStats

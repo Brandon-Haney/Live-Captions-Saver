@@ -2,8 +2,43 @@
 importScripts('sessionManager.js');
 const sessionManager = new SessionManager();
 
+// Constants for documented magic numbers
+const PENDING_DOWNLOAD_CLEANUP_INTERVAL_MS = 30000;  // 30s - how often to check for stale downloads
+const PENDING_DOWNLOAD_STALE_THRESHOLD_MS = 60000;   // 60s - downloads older than this are stale
+const AVG_CAPTION_DURATION_SEC = 3;                  // Avg seconds per caption (for duration estimation)
+const MAX_SESSION_HISTORY = 10;                      // Max sessions to keep in history
+const SESSION_CHUNK_SIZE = 100;                      // Captions per storage chunk (Chrome has 8KB item limit)
+
 // --- Track pending downloads to set their filenames ---
 const pendingDownloads = new Map();
+// Queue of filenames waiting to be assigned to downloads (FIFO order)
+const pendingFilenameQueue = [];
+// Periodic cleanup interval for stale entries
+let pendingDownloadsCleanupInterval = null;
+
+// Start periodic cleanup of stale pending downloads
+function startPendingDownloadsCleanup() {
+    if (pendingDownloadsCleanupInterval) return;
+    pendingDownloadsCleanupInterval = setInterval(() => {
+        const now = Date.now();
+        // Clean up stale entries from the Map
+        for (const [key, value] of pendingDownloads) {
+            if (typeof value === 'object' && value.timestamp && now - value.timestamp > PENDING_DOWNLOAD_STALE_THRESHOLD_MS) {
+                pendingDownloads.delete(key);
+            }
+        }
+        // Clean up stale entries from the queue
+        while (pendingFilenameQueue.length > 0 && now - pendingFilenameQueue[0].timestamp > PENDING_DOWNLOAD_STALE_THRESHOLD_MS) {
+            pendingFilenameQueue.shift();
+        }
+        // Stop cleanup if nothing to clean
+        if (pendingDownloads.size === 0 && pendingFilenameQueue.length === 0) {
+            clearInterval(pendingDownloadsCleanupInterval);
+            pendingDownloadsCleanupInterval = null;
+        }
+    }, PENDING_DOWNLOAD_CLEANUP_INTERVAL_MS);
+}
+startPendingDownloadsCleanup();
 
 // --- Utility Functions ---
 // Safe timestamp parsing to prevent NaN in sorting
@@ -173,7 +208,21 @@ function applyAliasesToAttendeeReport(attendeeReport, aliases = {}) {
 }
 
 // --- Formatting Functions ---
+// Input validation for transcript array
+function validateTranscriptInput(transcript) {
+    if (!transcript) return [];
+    if (!Array.isArray(transcript)) {
+        console.warn('[validateTranscriptInput] Expected array, got:', typeof transcript);
+        return [];
+    }
+    // Filter out invalid entries
+    return transcript.filter(entry =>
+        entry && typeof entry === 'object' && (entry.Name || entry.Text)
+    );
+}
+
 function formatAsTxt(transcript, attendeeReport) {
+    const validTranscript = validateTranscriptInput(transcript);
     let content = '';
 
     console.log('[formatAsTxt] Received attendeeReport:', attendeeReport);
@@ -218,13 +267,19 @@ function formatAsTxt(transcript, attendeeReport) {
     // Fallback: If still no attendees, generate from speakers in transcript
     if (totalAttendees === 0) {
         console.log('[formatAsTxt] No attendee data found, generating from speakers');
-        const speakers = [...new Set(transcript.map(entry => entry.Name).filter(name => name && name.trim()))];
+        // Filter out attendance events before extracting speaker names
+        const speakers = [...new Set(
+            validTranscript
+                .filter(entry => entry.Type !== 'attendance')
+                .map(entry => entry.Name)
+                .filter(name => name && name.trim())
+        )];
         if (speakers.length > 0) {
             attendeeList = speakers.sort();
             totalAttendees = speakers.length;
             // Try to get meeting start from first transcript entry
-            if (transcript.length > 0 && transcript[0].timestamp) {
-                meetingStart = transcript[0].timestamp;
+            if (validTranscript.length > 0 && validTranscript[0].timestamp) {
+                meetingStart = validTranscript[0].timestamp;
             }
         }
     }
@@ -243,8 +298,13 @@ function formatAsTxt(transcript, attendeeReport) {
         content += '\n=== TRANSCRIPT ===\n';
     }
 
+    // Handle empty transcript - still allow export with just attendees
+    if (validTranscript.length === 0 && totalAttendees === 0) {
+        return content + '\n(No transcript data available)\n';
+    }
+
     // Merge transcript and attendee events chronologically
-    const combinedEvents = [...transcript];
+    const combinedEvents = [...validTranscript];
 
     // Add join/leave events to the combined array
     if (attendeeHistory && attendeeHistory.length > 0) {
@@ -286,6 +346,7 @@ function formatAsTxt(transcript, attendeeReport) {
 }
 
 function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled Meeting', recordingStartTime = null) {
+    const validTranscript = validateTranscriptInput(transcript);
     let content = '';
 
     // Add meeting title as H1
@@ -326,13 +387,19 @@ function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled M
     // Fallback: If still no attendees, generate from speakers in transcript
     if (totalAttendees === 0) {
         console.log('[formatAsMarkdown] No attendee data found, generating from speakers');
-        const speakers = [...new Set(transcript.map(entry => entry.Name).filter(name => name && name.trim()))];
+        // Filter out attendance events before extracting speaker names
+        const speakers = [...new Set(
+            validTranscript
+                .filter(entry => entry.Type !== 'attendance')
+                .map(entry => entry.Name)
+                .filter(name => name && name.trim())
+        )];
         if (speakers.length > 0) {
             attendeeList = speakers.sort();
             totalAttendees = speakers.length;
             // Try to get meeting start from first transcript entry
-            if (transcript.length > 0 && transcript[0].timestamp) {
-                meetingStart = transcript[0].timestamp;
+            if (validTranscript.length > 0 && validTranscript[0].timestamp) {
+                meetingStart = validTranscript[0].timestamp;
             }
         }
     }
@@ -427,7 +494,13 @@ function formatAsDoc(transcript, attendeeReport) {
     // Fallback: If no attendee report, generate from speakers in transcript
     if (!attendeeReport || attendeeReport.totalUniqueAttendees === 0) {
         console.log('[formatAsDoc] No attendee report, generating from speakers');
-        const speakers = [...new Set(transcript.map(entry => entry.Name).filter(name => name && name.trim()))];
+        // Filter out attendance events before extracting speaker names
+        const speakers = [...new Set(
+            transcript
+                .filter(entry => entry.Type !== 'attendance')
+                .map(entry => entry.Name)
+                .filter(name => name && name.trim())
+        )];
         if (speakers.length > 0) {
             attendeeList = speakers.sort();
             totalAttendees = speakers.length;
@@ -520,7 +593,13 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
     // Fallback: If still no attendees, generate from speakers in transcript
     if (totalAttendees === 0) {
         console.log('[formatForAi] No attendee data found, generating from speakers');
-        const speakers = [...new Set(transcript.map(entry => entry.Name).filter(name => name && name.trim()))];
+        // Filter out attendance events before extracting speaker names
+        const speakers = [...new Set(
+            transcript
+                .filter(entry => entry.Type !== 'attendance')
+                .map(entry => entry.Name)
+                .filter(name => name && name.trim())
+        )];
         if (speakers.length > 0) {
             attendeeList = speakers.sort();
             totalAttendees = speakers.length;
@@ -576,13 +655,15 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
     return finalContent;
 }
 
-// A simple HTML escaper for the .doc format
+// HTML escaper for the .doc format
 function escapeHtml(str) {
+    if (!str || typeof str !== 'string') return '';
     return str.replace(/&/g, "&amp;")
               .replace(/</g, "&lt;")
               .replace(/>/g, "&gt;")
               .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#039;");
+              .replace(/'/g, "&#039;")
+              .replace(/`/g, "&#96;");
 }
 
 // --- Core Actions ---
@@ -610,19 +691,23 @@ async function downloadFile(filename, content, mimeType, saveAs) {
         // Chrome ignores the filename parameter when saveAs is false,
         // so we need to use onDeterminingFilename to set it
         if (!saveAs && finalFilename) {
-            pendingDownloads.set('next', finalFilename);
+            // Add to queue BEFORE starting download - onDeterminingFilename will pick from queue
+            pendingFilenameQueue.push({
+                filename: finalFilename,
+                timestamp: Date.now()
+            });
+            startPendingDownloadsCleanup(); // Ensure cleanup is running
         }
 
         const downloadId = await chrome.downloads.download(downloadOptions);
 
         // Associate download ID with filename for onDeterminingFilename handler
+        // This provides a direct lookup if the event fires after we have the ID
         if (!saveAs && finalFilename) {
-            pendingDownloads.set(downloadId, finalFilename);
-            // Clean up after a delay
-            setTimeout(() => {
-                pendingDownloads.delete(downloadId);
-                pendingDownloads.delete('next');
-            }, 5000);
+            pendingDownloads.set(downloadId, {
+                filename: finalFilename,
+                timestamp: Date.now()
+            });
         }
 
         console.log(`[downloadFile] Download initiated: ${finalFilename}`);
@@ -840,21 +925,30 @@ function chunkArray(array, chunkSize) {
 // Helper function to calculate duration
 function calculateDuration(transcriptArray) {
     if (!transcriptArray || transcriptArray.length === 0) return '0 min';
-    
+
     try {
-        const firstTime = new Date(transcriptArray[0].Time);
-        const lastTime = new Date(transcriptArray[transcriptArray.length - 1].Time);
-        
+        // Use 'timestamp' field (ISO format) instead of 'Time' field (locale formatted string)
+        // This fixes issues where Time field contains formatted strings like "3:45:12 PM"
+        const firstEntry = transcriptArray[0];
+        const lastEntry = transcriptArray[transcriptArray.length - 1];
+
+        // Try timestamp field first (ISO format), fall back to Time field
+        const firstTimeStr = firstEntry.timestamp || firstEntry.Time;
+        const lastTimeStr = lastEntry.timestamp || lastEntry.Time;
+
+        const firstTime = new Date(firstTimeStr);
+        const lastTime = new Date(lastTimeStr);
+
         // Check if dates are valid
         if (isNaN(firstTime.getTime()) || isNaN(lastTime.getTime())) {
-            // Fallback: estimate based on caption count (avg 3 seconds per caption)
-            const estimatedMinutes = Math.round((transcriptArray.length * 3) / 60);
+            // Fallback: estimate based on caption count
+            const estimatedMinutes = Math.round((transcriptArray.length * AVG_CAPTION_DURATION_SEC) / 60);
             return `~${estimatedMinutes} min`;
         }
-        
+
         const durationMs = lastTime - firstTime;
         const minutes = Math.round(durationMs / 60000);
-        
+
         if (minutes < 60) {
             return `${minutes} min`;
         } else {
@@ -966,9 +1060,9 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 // Clear badge when meeting tabs are closed and end associated sessions
-chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     // Check if this tab had an active session
-    const activeSessions = sessionManager.getActiveSessions();
+    const activeSessions = await sessionManager.getActiveSessions();
     const sessionForTab = activeSessions.find(session => session.tabId === tabId);
 
     if (sessionForTab && sessionForTab.status === 'active') {
@@ -992,14 +1086,14 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
 });
 
 // Clear badge when navigating away from meeting pages and end associated sessions
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (changeInfo.url) {
         const meetingDomains = ['teams.microsoft.com', 'meet.google.com', 'zoom.us', 'app.zoom.us'];
         const isLeavingMeetingPage = !meetingDomains.some(domain => changeInfo.url.includes(domain));
 
         if (isLeavingMeetingPage) {
             // Check if this tab had an active session
-            const activeSessions = sessionManager.getActiveSessions();
+            const activeSessions = await sessionManager.getActiveSessions();
             const sessionForTab = activeSessions.find(session => session.tabId === tabId);
 
             if (sessionForTab && sessionForTab.status === 'active') {
@@ -1062,17 +1156,27 @@ async function updateRecordingBadge(count) {
 })();
 
 chrome.downloads.onDeterminingFilename?.addListener((downloadItem, suggest) => {
-    // Check if we have a pending filename for this download
-    const pendingFilename = pendingDownloads.get(downloadItem.id) || pendingDownloads.get('next');
+    let pendingFilename = null;
 
-    if (pendingFilename) {
+    // Method 1: Check if we have a pending filename for this download by ID (most reliable)
+    const pendingEntry = pendingDownloads.get(downloadItem.id);
+    if (pendingEntry && pendingEntry.filename) {
+        pendingFilename = pendingEntry.filename;
+        pendingDownloads.delete(downloadItem.id);
+    }
+
+    // Method 2: If not found by ID, take from queue (FIFO - handles race condition)
+    // This handles the case where onDeterminingFilename fires before we have the download ID
+    if (!pendingFilename && pendingFilenameQueue.length > 0) {
+        const queueEntry = pendingFilenameQueue.shift();
+        pendingFilename = queueEntry.filename;
+    }
+
+    if (pendingFilename && pendingFilename.trim()) {
         suggest({
             filename: pendingFilename,
             conflictAction: 'uniquify'
         });
-        // Clean up
-        pendingDownloads.delete(downloadItem.id);
-        pendingDownloads.delete('next');
         return true;
     }
 
@@ -1175,13 +1279,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 case 'createSession':
                     // Get the actual tab ID from the sender
                     const tabId = sender.tab ? sender.tab.id : message.tabId;
-                    const sessionId = sessionManager.createSession(tabId, message.platform, message.url);
+                    const sessionId = await sessionManager.createSession(tabId, message.platform, message.url);
                     sendResponse({ sessionId });
                     return;
-                    
+
                 case 'updateSession':
                     const updated = await sessionManager.updateSession(message.sessionId, message.data);
-                    
+
                     // If we have transcript data, save it
                     if (message.data.transcript) {
                         await sessionManager.saveSessionTranscript(
@@ -1191,12 +1295,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             message.data.chatMessages
                         );
                     }
-                    
+
                     sendResponse({ success: updated });
                     return;
-                    
+
                 case 'getActiveSessions':
-                    const sessions = sessionManager.getActiveSessions();
+                    const sessions = await sessionManager.getActiveSessions();
                     sendResponse({ sessions });
                     return;
                     
@@ -1308,75 +1412,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     console.error('Error processing Zoom meeting end:', error);
                     sendResponse({ success: false, error: error.message });
                 }
-                return true; // Will respond asynchronously
-                
+                break;
+
             case 'save_session_history':
-                // Save meeting to session history using chrome.storage directly
+                // Save meeting to session history using the saveSessionToHistory helper function
+                // Use shared helper function
                 try {
-                    // Since we can't import in service worker, implement inline
-                    const sessionId = `session_${Date.now()}`;
-                    const transcriptArray = message.transcriptArray;
-                    const meetingTitle = message.meetingTitle;
-                    const attendeeReport = message.attendeeReport;
-                    
-                    // Create session metadata
-                    const metadata = {
-                        id: sessionId,
-                        title: meetingTitle || 'Untitled Meeting',
-                        timestamp: new Date().toISOString(),
-                        date: new Date().toLocaleDateString(),
-                        time: new Date().toLocaleTimeString(),
-                        captionCount: transcriptArray.length,
-                        duration: calculateDuration(transcriptArray),
-                        speakers: [...new Set(transcriptArray.map(c => c.Name))].slice(0, 10),
-                        attendees: attendeeReport?.attendeeList?.slice(0, 20),
-                        attendeeCount: attendeeReport?.totalUniqueAttendees || 0,
-                        preview: transcriptArray.slice(0, 3).map(c => `${c.Name}: ${c.Text.substring(0, 50)}`).join(' | ')
-                    };
-                    
-                    // Save transcript in chunks to avoid size limits
-                    const chunks = chunkArray(transcriptArray, 100); // 100 items per chunk
-                    for (let i = 0; i < chunks.length; i++) {
-                        await chrome.storage.local.set({
-                            [`${sessionId}_chunk_${i}`]: chunks[i]
-                        });
-                    }
-                    metadata.chunkCount = chunks.length;
-                    
-                    // Save attendee report if exists
-                    if (attendeeReport) {
-                        await chrome.storage.local.set({
-                            [`${sessionId}_attendees`]: attendeeReport
-                        });
-                    }
-                    
-                    // Update session index
-                    const { session_index = [] } = await chrome.storage.local.get('session_index');
-                    session_index.push(metadata);
-                    
-                    // Keep only last 10 sessions
-                    if (session_index.length > 10) {
-                        const toDelete = session_index.shift();
-                        // Clean up old session data
-                        const keysToDelete = [];
-                        for (let i = 0; i < toDelete.chunkCount; i++) {
-                            keysToDelete.push(`${toDelete.id}_chunk_${i}`);
-                        }
-                        keysToDelete.push(`${toDelete.id}_attendees`);
-                        await chrome.storage.local.remove(keysToDelete);
-                    }
-                    
-                    // Sort by timestamp (newest first)
-                    session_index.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-                    
-                    await chrome.storage.local.set({ 'session_index': session_index });
-                    console.log('[Service Worker] Session saved to history:', sessionId);
-                    
+                    const result = await saveSessionToHistory(
+                        message.transcriptArray,
+                        message.meetingTitle,
+                        message.attendeeReport
+                    );
+                    sendResponse(result);
                 } catch (error) {
                     console.error('[Service Worker] Failed to save session:', error);
+                    sendResponse({ success: false, error: error.message });
                 }
                 break;
-                
+
             case 'download_captions':
                 try {
                     console.log('[Service Worker] download_captions received with:', {
@@ -1404,7 +1457,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     console.error('[Service Worker] download_captions error:', error);
                     sendResponse({ success: false, error: error.message });
                 }
-                return true; // Keep message channel open for async response
                 break;
 
             case 'save_on_leave':
@@ -1466,6 +1518,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             case 'display_captions':
                 await createViewerTab(message.transcriptArray, message.meetingTitle, message.platform, message.sessionId);
+                sendResponse({ success: true });
                 break;
             
             case 'update_badge_status':
@@ -1476,6 +1529,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     autoSaveInProgress = false;
                     console.log('New capture session started, auto-save state reset.');
                 }
+                sendResponse({ success: true });
                 break;
                 
             case 'save_recording_transcript':
@@ -1550,8 +1604,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case 'download_blob':
                 // Download a blob URL with a specific filename
                 try {
-                    // Store the filename BEFORE initiating download (using 'next' key)
-                    pendingDownloads.set('next', message.filename);
+                    // Add to queue BEFORE initiating download (handles race condition)
+                    pendingFilenameQueue.push({
+                        filename: message.filename,
+                        timestamp: Date.now()
+                    });
+                    startPendingDownloadsCleanup();
 
                     // Trigger the download
                     const downloadId = await chrome.downloads.download({
@@ -1559,8 +1617,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         saveAs: false
                     });
 
-                    // Also store with downloadId as backup
-                    pendingDownloads.set(downloadId, message.filename);
+                    // Also store with downloadId as backup (in case onDeterminingFilename fires after)
+                    pendingDownloads.set(downloadId, {
+                        filename: message.filename,
+                        timestamp: Date.now()
+                    });
 
                     console.log('[Service Worker] Recording download initiated:', downloadId, message.filename);
                     sendResponse({ success: true, downloadId: downloadId });
@@ -1574,6 +1635,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 // Central error logging - could send to analytics service
                 console.warn('[Live Caption Saver] Error logged:', message.error);
                 // Could implement error reporting here
+                sendResponse({ success: true });
+                break;
+
+            default:
+                // Unknown message type - still send response to prevent channel hanging
+                sendResponse({ success: false, error: 'Unknown message type' });
                 break;
         }
         } catch (error) {
