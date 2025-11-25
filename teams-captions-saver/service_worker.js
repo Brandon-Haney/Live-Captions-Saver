@@ -1076,7 +1076,8 @@ chrome.downloads.onDeterminingFilename?.addListener((downloadItem, suggest) => {
         return true;
     }
 
-    return false;
+    // Don't interfere with downloads from other extensions or sources
+    // By not calling suggest() and not returning true, we let Chrome/other extensions handle it
 });
 
 // Monitor download progress and handle errors
