@@ -3446,7 +3446,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                     });
                     // Use the cached meeting title, don't extract from page
                     const titleToUse = currentMeetingTitle || 'Untitled Meeting';
-                    
+
                     safeSendMessage({
                         message: "download_captions",
                         transcriptArray: getCleanTranscript(),
@@ -3454,7 +3454,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                         format: request.format,
                         recordingStartTime: recordingStartTime ? recordingStartTime.toISOString() : new Date().toISOString(),
                         attendeeReport: attendeeReport,
-                        sessionId: currentSessionId
+                        sessionId: currentSessionId,
+                        userRecordingStartTime: request.userRecordingStartTime
                     });
                 })();
             } else {

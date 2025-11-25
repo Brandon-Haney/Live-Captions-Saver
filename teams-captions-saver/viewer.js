@@ -15,6 +15,85 @@ function createPlatformBadge(platform) {
     return `<span class="platform-badge" data-platform="${platformName}">${platformName}</span>`;
 }
 
+// SRT subtitle format helper functions
+function parseSafeTimestamp(timestampValue) {
+    if (!timestampValue) return 0;
+    try {
+        const parsed = new Date(timestampValue).getTime();
+        return isNaN(parsed) ? 0 : parsed;
+    } catch (error) {
+        return 0;
+    }
+}
+
+function formatSrtTimestamp(ms) {
+    if (ms < 0) ms = 0;
+    const hours = Math.floor(ms / 3600000);
+    const minutes = Math.floor((ms % 3600000) / 60000);
+    const seconds = Math.floor((ms % 60000) / 1000);
+    const milliseconds = ms % 1000;
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')},${milliseconds.toString().padStart(3, '0')}`;
+}
+
+function formatAsSrt(captions, userRecordingStartTime) {
+    const validCaptions = captions.filter(entry => entry.Type !== 'attendance' && entry.Type !== 'chat');
+
+    if (validCaptions.length === 0) {
+        return '1\n00:00:00,000 --> 00:00:03,000\n(No captions available)\n';
+    }
+
+    const recordingStart = new Date(userRecordingStartTime).getTime();
+    if (isNaN(recordingStart)) {
+        return '1\n00:00:00,000 --> 00:00:03,000\n(Invalid recording start time)\n';
+    }
+
+    // Sort by timestamp
+    const sortedCaptions = [...validCaptions].sort((a, b) => {
+        return parseSafeTimestamp(a.timestamp) - parseSafeTimestamp(b.timestamp);
+    });
+
+    const srtEntries = [];
+
+    for (let i = 0; i < sortedCaptions.length; i++) {
+        const entry = sortedCaptions[i];
+        const captionTime = parseSafeTimestamp(entry.timestamp);
+        if (captionTime === 0) continue;
+
+        let startMs = captionTime - recordingStart;
+        if (startMs < 0) continue;
+
+        let endMs;
+        if (i < sortedCaptions.length - 1) {
+            const nextCaptionTime = parseSafeTimestamp(sortedCaptions[i + 1].timestamp);
+            endMs = nextCaptionTime - recordingStart - 100;
+            if (endMs - startMs > 7000) endMs = startMs + 7000;
+        } else {
+            const wordCount = (entry.Text || '').split(/\s+/).length;
+            endMs = startMs + Math.min(7000, Math.max(2000, wordCount * 300));
+        }
+
+        if (endMs <= startMs) endMs = startMs + 2000;
+
+        srtEntries.push({
+            index: srtEntries.length + 1,
+            startMs,
+            endMs,
+            speaker: entry.Name || 'Unknown',
+            text: entry.Text || ''
+        });
+    }
+
+    if (srtEntries.length === 0) {
+        return '1\n00:00:00,000 --> 00:00:03,000\n(No captions within recording timeframe)\n';
+    }
+
+    return srtEntries.map(entry => {
+        const startTime = formatSrtTimestamp(entry.startMs);
+        const endTime = formatSrtTimestamp(entry.endMs);
+        return `${entry.index}\n${startTime} --> ${endTime}\n[${entry.speaker}] ${entry.text}\n`;
+    }).join('\n');
+}
+
 // Cleanup function to prevent memory leaks
 function cleanupViewerIntervals() {
     if (connectionCheckInterval) {
@@ -1002,12 +1081,14 @@ document.addEventListener('DOMContentLoaded', () => {
         return visibleCaptions;
     }
     
-    function formatTranscriptForExport(captions, format = 'txt') {
+    function formatTranscriptForExport(captions, format = 'txt', userRecordingStartTime = null) {
         if (!captions || captions.length === 0) {
             return format === 'json' ? '[]' : 'No captions to export.';
         }
 
-        if (format === 'json') {
+        if (format === 'srt') {
+            return formatAsSrt(captions, userRecordingStartTime);
+        } else if (format === 'json') {
             return JSON.stringify(captions, null, 2);
         } else if (format === 'md') {
             // Build Markdown with metadata header
@@ -1151,12 +1232,20 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // Show format selection dialog
-        const format = await showFormatDialog();
-        if (!format) return; // User cancelled
+        // Get meeting start time for SRT default (from attendee report or first caption)
+        let meetingStartTime = currentAttendeeReport?.meetingStartTime;
+        if (!meetingStartTime && allCaptions.length > 0 && allCaptions[0].timestamp) {
+            meetingStartTime = allCaptions[0].timestamp;
+        }
+
+        // Show format selection dialog (returns { format, userRecordingStartTime } or null)
+        const result = await showFormatDialog(meetingStartTime);
+        if (!result) return; // User cancelled
+
+        const { format, userRecordingStartTime } = result;
 
         // Create download
-        const content = formatTranscriptForExport(visibleCaptions, format);
+        const content = formatTranscriptForExport(visibleCaptions, format, userRecordingStartTime);
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
         const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
@@ -1165,13 +1254,15 @@ document.addEventListener('DOMContentLoaded', () => {
         let cleanTitle = currentMeetingTitle || 'Meeting';
         const parts = cleanTitle.split('|');
         const meetingName = parts.length > 2 ? parts[1] : parts[0];
-        cleanTitle = meetingName.replace('Microsoft Teams', '').trim();
+        cleanTitle = meetingName.replace('Microsoft Teams', '').replace('Google Meet', '').replace('Zoom', '').trim();
         cleanTitle = cleanTitle.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+        // If title ended up empty after cleaning, use fallback
+        if (!cleanTitle || cleanTitle === '_') cleanTitle = 'Meeting';
 
         // Add filter suffix if applicable
         const filterSuffix = currentFilteredSpeaker ? `-filtered-${currentFilteredSpeaker.replace(/[^a-z0-9]/gi, '_')}` : '';
 
-        // Build filename: {date}_{title}{filterSuffix}_{time}.{format}
+        // Build filename: {date}_{title}{filterSuffix}_{time}.{extension}
         const filename = `${dateStr}_${cleanTitle}${filterSuffix}_${timeStr}.${format}`;
 
         try {
@@ -1181,6 +1272,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (format === 'md') {
                 mimeType = 'text/markdown';
             } else {
+                // txt and srt both use text/plain
                 mimeType = 'text/plain';
             }
             const blob = new Blob([content], { type: mimeType });
@@ -1212,7 +1304,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // Show format selection dialog
-    function showFormatDialog() {
+    // meetingStartTime: optional ISO string to use as SRT default
+    function showFormatDialog(meetingStartTime = null) {
         return new Promise((resolve) => {
             // Create modal
             const modal = document.createElement('div');
@@ -1250,6 +1343,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     <button data-format="md" style="padding: 12px; background: #6f42c1; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                         Markdown (Formatted)
                     </button>
+                    <button data-format="srt" style="padding: 12px; background: #fd7e14; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                        SRT (Subtitles for Video)
+                    </button>
                     <button data-format="cancel" style="padding: 12px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                         Cancel
                     </button>
@@ -1260,15 +1356,116 @@ document.addEventListener('DOMContentLoaded', () => {
             document.body.appendChild(modal);
 
             // Handle clicks
-            dialog.addEventListener('click', (e) => {
+            dialog.addEventListener('click', async (e) => {
                 if (e.target.tagName === 'BUTTON') {
                     const format = e.target.dataset.format;
                     document.body.removeChild(modal);
-                    resolve(format === 'cancel' ? null : format);
+
+                    if (format === 'cancel') {
+                        resolve(null);
+                    } else if (format === 'srt') {
+                        const srtResult = await showSrtDialog(meetingStartTime);
+                        resolve(srtResult);
+                    } else {
+                        resolve({ format, userRecordingStartTime: null });
+                    }
                 }
             });
 
             // Close on background click
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    document.body.removeChild(modal);
+                    resolve(null);
+                }
+            });
+        });
+    }
+
+    // Show SRT export dialog with recording start time input
+    // meetingStartTime: optional ISO string to use as default
+    function showSrtDialog(meetingStartTime = null) {
+        return new Promise((resolve) => {
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.5);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 10000;
+            `;
+
+            // Use meeting start time if provided, otherwise fall back to current time
+            const defaultTime = meetingStartTime ? new Date(meetingStartTime) : new Date();
+            const dateStr = defaultTime.toISOString().split('T')[0];
+            const timeStr = defaultTime.toTimeString().slice(0, 5);
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `
+                background: white;
+                padding: 24px;
+                border-radius: 8px;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+                max-width: 420px;
+                width: 90%;
+            `;
+
+            dialog.innerHTML = `
+                <h3 style="margin: 0 0 8px 0; font-size: 18px;">Export as SRT Subtitles</h3>
+                <p style="margin: 0 0 16px 0; font-size: 13px; color: #666;">
+                    Enter when you started your external recording (OBS, etc.) to sync subtitles with your video.
+                </p>
+                <div style="margin-bottom: 16px;">
+                    <label style="display: block; margin-bottom: 4px; font-weight: 500; font-size: 14px;">Recording Start Date</label>
+                    <input type="date" id="srt-date" value="${dateStr}" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box;">
+                </div>
+                <div style="margin-bottom: 16px;">
+                    <label style="display: block; margin-bottom: 4px; font-weight: 500; font-size: 14px;">Recording Start Time</label>
+                    <input type="time" id="srt-time" value="${timeStr}" step="1" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box;">
+                </div>
+                <p style="margin: 0 0 16px 0; font-size: 12px; color: #888;">
+                    Tip: You may need to adjust by a few seconds in your video editor for perfect sync.
+                </p>
+                <div style="display: flex; gap: 8px;">
+                    <button id="srt-export-btn" style="flex: 1; padding: 12px; background: #fd7e14; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500;">
+                        Export SRT
+                    </button>
+                    <button id="srt-cancel-btn" style="flex: 1; padding: 12px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                        Cancel
+                    </button>
+                </div>
+            `;
+
+            modal.appendChild(dialog);
+            document.body.appendChild(modal);
+
+            const dateInput = dialog.querySelector('#srt-date');
+            const timeInput = dialog.querySelector('#srt-time');
+            const exportBtn = dialog.querySelector('#srt-export-btn');
+            const cancelBtn = dialog.querySelector('#srt-cancel-btn');
+
+            exportBtn.addEventListener('click', () => {
+                const date = dateInput.value;
+                const time = timeInput.value;
+                if (!date || !time) {
+                    alert('Please enter both date and time');
+                    return;
+                }
+                const userRecordingStartTime = new Date(`${date}T${time}`).toISOString();
+                document.body.removeChild(modal);
+                resolve({ format: 'srt', userRecordingStartTime });
+            });
+
+            cancelBtn.addEventListener('click', () => {
+                document.body.removeChild(modal);
+                resolve(null);
+            });
+
             modal.addEventListener('click', (e) => {
                 if (e.target === modal) {
                     document.body.removeChild(modal);

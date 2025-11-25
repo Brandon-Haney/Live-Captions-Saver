@@ -568,6 +568,104 @@ function formatAsDoc(transcript, attendeeReport) {
     return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Meeting Transcript</title></head><body>${body}</body></html>`;
 }
 
+// SRT subtitle format for video synchronization
+// Requires user to input their external recording start time
+function formatAsSrt(transcript, userRecordingStartTime) {
+    const validTranscript = validateTranscriptInput(transcript)
+        .filter(entry => entry.Type !== 'attendance' && entry.Type !== 'chat');
+
+    if (validTranscript.length === 0) {
+        return '1\n00:00:00,000 --> 00:00:03,000\n(No captions available)\n';
+    }
+
+    // Parse the user's recording start time
+    const recordingStart = new Date(userRecordingStartTime).getTime();
+    if (isNaN(recordingStart)) {
+        console.error('[formatAsSrt] Invalid recording start time:', userRecordingStartTime);
+        return '1\n00:00:00,000 --> 00:00:03,000\n(Invalid recording start time)\n';
+    }
+
+    // Sort transcript by timestamp
+    const sortedTranscript = [...validTranscript].sort((a, b) => {
+        const timeA = parseSafeTimestamp(a.timestamp);
+        const timeB = parseSafeTimestamp(b.timestamp);
+        return timeA - timeB;
+    });
+
+    const srtEntries = [];
+
+    for (let i = 0; i < sortedTranscript.length; i++) {
+        const entry = sortedTranscript[i];
+        const captionTime = parseSafeTimestamp(entry.timestamp);
+
+        if (captionTime === 0) continue;
+
+        // Calculate relative start time from recording start
+        let startMs = captionTime - recordingStart;
+
+        // Skip captions that appear before the recording started
+        if (startMs < 0) {
+            console.log(`[formatAsSrt] Skipping caption before recording start: ${startMs}ms`);
+            continue;
+        }
+
+        // Calculate end time
+        let endMs;
+        if (i < sortedTranscript.length - 1) {
+            // End when next caption starts (minus small gap for readability)
+            const nextCaptionTime = parseSafeTimestamp(sortedTranscript[i + 1].timestamp);
+            endMs = nextCaptionTime - recordingStart - 100; // 100ms gap
+
+            // Cap duration at 7 seconds max (subtitles shouldn't linger)
+            const duration = endMs - startMs;
+            if (duration > 7000) {
+                endMs = startMs + 7000;
+            }
+        } else {
+            // Last caption: estimate based on text length
+            const wordCount = (entry.Text || '').split(/\s+/).length;
+            const estimatedDuration = Math.min(7000, Math.max(2000, wordCount * 300));
+            endMs = startMs + estimatedDuration;
+        }
+
+        // Ensure end is after start
+        if (endMs <= startMs) {
+            endMs = startMs + 2000;
+        }
+
+        srtEntries.push({
+            index: srtEntries.length + 1,
+            startMs,
+            endMs,
+            speaker: entry.Name || 'Unknown',
+            text: entry.Text || ''
+        });
+    }
+
+    if (srtEntries.length === 0) {
+        return '1\n00:00:00,000 --> 00:00:03,000\n(No captions within recording timeframe)\n';
+    }
+
+    // Format as SRT
+    return srtEntries.map(entry => {
+        const startTime = formatSrtTimestamp(entry.startMs);
+        const endTime = formatSrtTimestamp(entry.endMs);
+        return `${entry.index}\n${startTime} --> ${endTime}\n[${entry.speaker}] ${entry.text}\n`;
+    }).join('\n');
+}
+
+// Format milliseconds as SRT timestamp: HH:MM:SS,mmm
+function formatSrtTimestamp(ms) {
+    if (ms < 0) ms = 0;
+
+    const hours = Math.floor(ms / 3600000);
+    const minutes = Math.floor((ms % 3600000) / 60000);
+    const seconds = Math.floor((ms % 60000) / 1000);
+    const milliseconds = ms % 1000;
+
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')},${milliseconds.toString().padStart(3, '0')}`;
+}
+
 async function formatForAi(transcript, meetingTitle, recordingStartTime, attendeeReport) {
     let aiInstructions = '';
     try {
@@ -783,7 +881,7 @@ async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
     }
 }
 
-async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt, attendeeReport = null) {
+async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt, attendeeReport = null, userRecordingStartTime = null) {
     // Validate and fix meeting title
     if (!meetingTitle || meetingTitle.trim() === '') {
         console.log('[saveTranscript] Meeting title was empty, using "Untitled Meeting"');
@@ -842,6 +940,15 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
         case 'ai':
             content = await formatForAi(processedTranscript, meetingTitle, recordingStartTime, processedAttendeeReport);
             extension = 'txt';
+            mimeType = 'text/plain';
+            break;
+        case 'srt':
+            if (!userRecordingStartTime) {
+                console.error('[saveTranscript] SRT format requires userRecordingStartTime');
+                throw new Error('SRT export requires a recording start time');
+            }
+            content = formatAsSrt(processedTranscript, userRecordingStartTime);
+            extension = 'srt';
             mimeType = 'text/plain';
             break;
         case 'txt':
@@ -1325,24 +1432,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case 'save_from_session':
                 // Handle save from session data (multi-meeting support)
                 console.log('Saving transcript from session');
-                const { transcriptArray, meetingTitle, format, recordingStartTime, attendeeReport } = message;
-                
+                const { transcriptArray, meetingTitle, format, recordingStartTime, attendeeReport, userRecordingStartTime } = message;
+
                 if (transcriptArray && transcriptArray.length > 0) {
                     // Get session-specific aliases if they exist
                     const sessionAliasKey = `aliases_${message.sessionId || 'default'}`;
                     const aliasData = await chrome.storage.local.get(sessionAliasKey);
                     const speakerAliases = aliasData[sessionAliasKey] || {};
-                    
+
                     await saveTranscript(
-                        meetingTitle || 'Meeting', 
-                        transcriptArray, 
-                        speakerAliases, 
-                        format || 'txt', 
-                        recordingStartTime || new Date().toISOString(), 
-                        false, 
-                        attendeeReport
+                        meetingTitle || 'Meeting',
+                        transcriptArray,
+                        speakerAliases,
+                        format || 'txt',
+                        recordingStartTime || new Date().toISOString(),
+                        false,
+                        attendeeReport,
+                        userRecordingStartTime
                     );
-                    
+
                     sendResponse({ success: true });
                 } else {
                     sendResponse({ success: false, error: 'No transcript data' });
@@ -1437,7 +1545,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         transcriptCount: message.transcriptArray?.length,
                         format: message.format,
                         sessionId: message.sessionId,
-                        hasAttendeeReport: !!message.attendeeReport
+                        hasAttendeeReport: !!message.attendeeReport,
+                        userRecordingStartTime: message.userRecordingStartTime
                     });
 
                     // Get session-specific aliases if they exist
@@ -1450,7 +1559,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     console.log('[Service Worker] Saving with title:', titleToSave);
 
                     // Use auto-download (saveAs: false) to provide filename automatically
-                    await saveTranscript(titleToSave, message.transcriptArray, downloadAliases, message.format, message.recordingStartTime, false, message.attendeeReport);
+                    await saveTranscript(titleToSave, message.transcriptArray, downloadAliases, message.format, message.recordingStartTime, false, message.attendeeReport, message.userRecordingStartTime);
 
                     sendResponse({ success: true });
                 } catch (error) {
