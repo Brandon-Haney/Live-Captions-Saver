@@ -2634,14 +2634,13 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
     
     // Only log and clear when transitioning from meeting to not-in-meeting
     if (!nowInMeeting && wasInMeeting) {
-        console.log('[Caption Saver] Meeting ended - clearing metadata');
+        console.log('[Caption Saver] Meeting ended - stopping capture but preserving title for export');
         stopCaptureSession();
         stopAttendeeTracking();
 
-        // Reset meeting metadata now that meeting has definitely ended
-        // This ensures next meeting starts fresh
-        currentMeetingTitle = '';
-        recordingStartTime = null;
+        // Note: We intentionally preserve currentMeetingTitle and recordingStartTime
+        // so that exports after meeting ends still have the correct title.
+        // These will be reset when a new meeting starts.
     } else if (!nowInMeeting) {
         // Still not in meeting, but already cleaned up - no need to log
         stopCaptureSession();
