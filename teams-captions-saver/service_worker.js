@@ -1274,11 +1274,15 @@ chrome.downloads.onDeterminingFilename?.addListener((downloadItem, suggest) => {
         pendingDownloads.delete(downloadItem.id);
     }
 
-    // Method 2: If not found by ID, take from queue (FIFO - handles race condition)
-    // This handles the case where onDeterminingFilename fires before we have the download ID
+    // Method 2: If not found by ID, check queue BUT only for blob URLs (which we create)
+    // This handles the race condition where onDeterminingFilename fires before we get the download ID
+    // IMPORTANT: Only apply queue filenames to blob: URLs to avoid interfering with other extensions
     if (!pendingFilename && pendingFilenameQueue.length > 0) {
-        const queueEntry = pendingFilenameQueue.shift();
-        pendingFilename = queueEntry.filename;
+        const isBlobUrl = downloadItem.url && downloadItem.url.startsWith('blob:');
+        if (isBlobUrl) {
+            const queueEntry = pendingFilenameQueue.shift();
+            pendingFilename = queueEntry.filename;
+        }
     }
 
     if (pendingFilename && pendingFilename.trim()) {
