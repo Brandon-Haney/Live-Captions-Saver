@@ -52,6 +52,7 @@ const UI_ELEMENTS = {
     customTemplatesGroup: document.getElementById('customTemplatesGroup'),
     aiInstructions: document.getElementById('aiInstructions'),
     promptButtons: document.querySelectorAll('.prompt-btn'),
+    m365KeepAliveToggle: document.getElementById('m365KeepAliveToggle'),
     // Multi-Session Elements
     sessionSelector: document.getElementById('session-selector'),
     refreshSessions: document.getElementById('refresh-sessions'),
@@ -59,7 +60,8 @@ const UI_ELEMENTS = {
     sessionPlatform: document.getElementById('session-platform'),
     sessionDuration: document.getElementById('session-duration'),
     sessionCaptions: document.getElementById('session-captions'),
-    sessionAttendees: document.getElementById('session-attendees')
+    sessionAttendees: document.getElementById('session-attendees'),
+    configureKeywordsBtn: document.getElementById('configureKeywordsBtn')
 };
 
 // --- Multi-Session State ---
@@ -168,8 +170,8 @@ async function loadActiveSessions() {
                     action: 'endSession',
                     sessionId: staleSession.sessionId
                 }, (response) => {
-                    // Check for Chrome runtime errors
-                    if (chrome.runtime.lastError) {
+                    // Silently ignore benign errors
+                    if (chrome.runtime.lastError && !chrome.runtime.lastError.message?.includes('message port closed')) {
                         console.warn('[Popup] Error ending stale session:', chrome.runtime.lastError.message);
                     }
                 });
@@ -512,7 +514,7 @@ async function loadSettings() {
     const settings = await chrome.storage.sync.get([
         'autoEnableCaptions', 'autoSaveOnEnd', 'aiInstructions', 'defaultSaveFormat',
         'trackCaptions', 'trackAttendees', 'timestampFormat',
-        'filenamePattern', 'chatCapture'
+        'filenamePattern', 'chatCapture', 'm365KeepAlive'
     ]);
 
     UI_ELEMENTS.autoEnableCaptionsToggle.checked = !!settings.autoEnableCaptions;
@@ -523,6 +525,7 @@ async function loadSettings() {
     UI_ELEMENTS.timestampFormat.value = settings.timestampFormat || '12hr';
     UI_ELEMENTS.filenamePattern.value = settings.filenamePattern || '{date}_{title}_{format}';
     UI_ELEMENTS.aiInstructions.value = settings.aiInstructions || '';
+    UI_ELEMENTS.m365KeepAliveToggle.checked = !!settings.m365KeepAlive;
 
     currentDefaultFormat = settings.defaultSaveFormat || 'txt';
     UI_ELEMENTS.defaultSaveFormatSelect.value = currentDefaultFormat;
@@ -569,8 +572,8 @@ function setupEventListeners() {
                     message: "toggle_chat_capture",
                     enabled: e.target.checked
                 }, (response) => {
-                    // Check for Chrome runtime errors
-                    if (chrome.runtime.lastError) {
+                    // Silently ignore benign errors
+                    if (chrome.runtime.lastError && !chrome.runtime.lastError.message?.includes('message port closed')) {
                         console.warn('[Popup] Error toggling chat capture:', chrome.runtime.lastError.message);
                     }
                 });
@@ -596,6 +599,10 @@ function setupEventListeners() {
             e.target.style.borderColor = 'red';
             console.warn('[Popup] Invalid filename pattern, not saving:', error.message);
         }
+    });
+
+    UI_ELEMENTS.m365KeepAliveToggle.addEventListener('change', (e) => {
+        chrome.storage.sync.set({ m365KeepAlive: e.target.checked });
     });
 
     UI_ELEMENTS.meetingType.addEventListener('change', async (e) => {
@@ -673,7 +680,8 @@ function setupEventListeners() {
         const tab = await getActiveMeetingTab();
         if (tab) {
             chrome.tabs.sendMessage(tab.id, { message: "return_transcript", format: currentDefaultFormat }, (response) => {
-                if (chrome.runtime.lastError) {
+                // Silently ignore benign errors
+                if (chrome.runtime.lastError && !chrome.runtime.lastError.message?.includes('message port closed')) {
                     console.warn('[Popup] Error saving transcript:', chrome.runtime.lastError.message);
                 }
             });
@@ -685,7 +693,8 @@ function setupEventListeners() {
             const session = activeSessions.find(s => s.sessionId === selectedSessionId);
             if (session) {
                 chrome.tabs.sendMessage(session.tabId, { message: "get_captions_for_viewing" }, (response) => {
-                    if (chrome.runtime.lastError) {
+                    // Silently ignore "message port closed" - expected when tab/content script is busy
+                    if (chrome.runtime.lastError && !chrome.runtime.lastError.message?.includes('message port closed')) {
                         console.warn('[Popup] Error getting captions for viewing:', chrome.runtime.lastError.message);
                     }
                 });
@@ -694,7 +703,8 @@ function setupEventListeners() {
             const tab = await getActiveMeetingTab();
             if (tab) {
                 chrome.tabs.sendMessage(tab.id, { message: "get_captions_for_viewing" }, (response) => {
-                    if (chrome.runtime.lastError) {
+                    // Silently ignore "message port closed" - expected when tab/content script is busy
+                    if (chrome.runtime.lastError && !chrome.runtime.lastError.message?.includes('message port closed')) {
                         console.warn('[Popup] Error getting captions for viewing:', chrome.runtime.lastError.message);
                     }
                 });
@@ -730,6 +740,11 @@ function setupEventListeners() {
 
     setupDropdown(UI_ELEMENTS.copyButton, UI_ELEMENTS.copyDropdownButton, UI_ELEMENTS.copyOptions, handleCopy);
     setupDropdown(null, UI_ELEMENTS.saveDropdownButton, UI_ELEMENTS.saveOptions, handleSave);
+
+    // Configure Keywords button - opens viewer with keyword modal
+    UI_ELEMENTS.configureKeywordsBtn?.addEventListener('click', () => {
+        chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html?openKeywords=true') });
+    });
 
     // AI Prompt Buttons
     UI_ELEMENTS.promptButtons.forEach(button => {
@@ -1806,7 +1821,8 @@ async function handleRecordingDelete(e) {
             message: 'update_recording_badge',
             count: filtered.length
         }, (response) => {
-            if (chrome.runtime.lastError) {
+            // Silently ignore benign errors
+            if (chrome.runtime.lastError && !chrome.runtime.lastError.message?.includes('message port closed')) {
                 console.warn('[Popup] Error updating badge:', chrome.runtime.lastError.message);
             }
         });
