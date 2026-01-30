@@ -231,6 +231,20 @@ document.addEventListener('DOMContentLoaded', () => {
     let isNearBottom = true;  // Track if user is near bottom of scroll
     let captionElementsCache = [];  // Performance: Cache caption elements to avoid repeated DOM queries
 
+    // Hot Keyword Detection state
+    let hotKeywords = {};           // Global keywords (from chrome.storage.sync)
+    let sessionKeywords = {};       // Session keywords (in-memory only, cleared on close)
+    let hotKeywordSettings = {      // Default settings
+        enabled: true,
+        flashEnabled: true,
+        contextLineCount: 5,
+        consolidationWindowMs: 5000
+    };
+    let lastKeywordAlerts = {};     // Map: keywordId -> timestamp (for consolidation)
+    let keywordAlertDismissTimer = null;  // Timer for auto-dismiss
+    let captionKeywordDebounceTimers = {};  // Map: captionKey -> timer (debounce keyword checks on updates)
+    const KEYWORD_CHECK_DEBOUNCE_MS = 800;  // Wait for caption to settle before checking keywords
+
     // Clear stale cache entries when switching sessions or clearing view
     function clearCaptionCache() {
         captionElementsCache = [];
@@ -247,7 +261,672 @@ document.addEventListener('DOMContentLoaded', () => {
         p.textContent = str;
         return p.innerHTML;
     }
-    
+
+    // --- Hot Keyword Detection Functions ---
+
+    // Load global keywords from storage
+    async function loadHotKeywords() {
+        try {
+            const result = await chrome.storage.sync.get(['hotKeywords', 'hotKeywordSettings']);
+            hotKeywords = result.hotKeywords || {};
+            if (result.hotKeywordSettings) {
+                hotKeywordSettings = { ...hotKeywordSettings, ...result.hotKeywordSettings };
+            }
+            debug.log('[Keywords] Loaded', Object.keys(hotKeywords).length, 'global keywords');
+            updateKeywordBadge();
+        } catch (error) {
+            console.error('[Keywords] Failed to load:', error);
+        }
+    }
+
+    // Save global keywords to storage
+    async function saveHotKeywords() {
+        try {
+            await chrome.storage.sync.set({ hotKeywords });
+            debug.log('[Keywords] Saved', Object.keys(hotKeywords).length, 'global keywords');
+            updateKeywordBadge();
+        } catch (error) {
+            console.error('[Keywords] Failed to save:', error);
+            if (error.message?.includes('quota')) {
+                showNotification('Too many keywords. Please remove some.', 'error');
+            }
+        }
+    }
+
+    // Save keyword settings
+    async function saveHotKeywordSettings() {
+        try {
+            await chrome.storage.sync.set({ hotKeywordSettings });
+        } catch (error) {
+            console.error('[Keywords] Failed to save settings:', error);
+        }
+    }
+
+    // Get all active keywords (global + session)
+    function getAllActiveKeywords() {
+        const active = [];
+
+        // Add enabled global keywords
+        for (const [id, data] of Object.entries(hotKeywords)) {
+            if (data.enabled) {
+                active.push({ id, keyword: data.keyword, isSession: false });
+            }
+        }
+
+        // Add enabled session keywords
+        for (const [id, data] of Object.entries(sessionKeywords)) {
+            if (data.enabled) {
+                active.push({ id, keyword: data.keyword, isSession: true });
+            }
+        }
+
+        return active;
+    }
+
+    // Check if caption matches any keywords
+    function checkForKeywordMatch(caption) {
+        if (!hotKeywordSettings.enabled) {
+            console.log('[Keywords] Detection disabled - skipping check');
+            return null;
+        }
+
+        // Only check the caption text content, not the speaker name
+        // This prevents false alerts when YOU speak (your name appears as speaker)
+        const text = (caption.Text || '').toLowerCase();
+        const activeKeywords = getAllActiveKeywords();
+
+        console.log('[Keywords] Checking caption:', {
+            speaker: caption.Name,
+            text: text.substring(0, 50) + (text.length > 50 ? '...' : ''),
+            activeKeywordCount: activeKeywords.length,
+            keywords: activeKeywords.map(k => k.keyword)
+        });
+
+        for (const { id, keyword, isSession } of activeKeywords) {
+            const keywordLower = keyword.toLowerCase();
+            if (text.includes(keywordLower)) {
+                console.log('[Keywords] MATCH FOUND:', { keyword, in: text.substring(0, 100) });
+                return { id, keyword, isSession };
+            }
+        }
+        console.log('[Keywords] No match found');
+        return null;
+    }
+
+    // Check if alert should be consolidated (same keyword within window)
+    function shouldConsolidateAlert(keywordId) {
+        const now = Date.now();
+        const lastAlert = lastKeywordAlerts[keywordId];
+        const windowMs = hotKeywordSettings.consolidationWindowMs || 5000;
+        const timeSinceLastAlert = lastAlert ? (now - lastAlert) : Infinity;
+
+        console.log('[Keywords] Consolidation check:', {
+            keywordId,
+            lastAlert,
+            now,
+            timeSinceLastAlert: timeSinceLastAlert + 'ms',
+            windowMs: windowMs + 'ms',
+            willConsolidate: lastAlert && timeSinceLastAlert < windowMs
+        });
+
+        if (lastAlert && timeSinceLastAlert < windowMs) {
+            console.log('[Keywords] Consolidating alert - within window');
+            return true;
+        }
+
+        lastKeywordAlerts[keywordId] = now;
+        console.log('[Keywords] Showing full alert - outside window or first time');
+        return false;
+    }
+
+    // Get context lines before the matched caption
+    function getContextLines(captionIndex, lineCount = 5) {
+        // Filter to only caption/chat entries (not attendance events)
+        const relevantCaptions = allCaptions.filter(c => c.Type !== 'attendance');
+
+        // Find the index in filtered array
+        const matchedCaption = allCaptions[captionIndex];
+        const filteredIndex = relevantCaptions.findIndex(c => c.key === matchedCaption.key);
+
+        if (filteredIndex === -1) {
+            return [{ name: matchedCaption.Name, text: matchedCaption.Text, time: matchedCaption.Time, isMatch: true }];
+        }
+
+        const startIndex = Math.max(0, filteredIndex - lineCount + 1);
+        const contextCaptions = relevantCaptions.slice(startIndex, filteredIndex + 1);
+
+        return contextCaptions.map((cap, idx) => ({
+            name: speakerAliases[cap.Name] || cap.Name,
+            text: cap.Text,
+            time: cap.Time,
+            isMatch: idx === contextCaptions.length - 1
+        }));
+    }
+
+    // Trigger keyword alert
+    function triggerKeywordAlert(caption, match, captionIndex) {
+        // Check consolidation
+        if (shouldConsolidateAlert(match.id)) {
+            // Still highlight the caption but don't show full alert
+            highlightKeywordCaption(captionIndex, match.keyword);
+            return;
+        }
+
+        // Page flash effect
+        if (hotKeywordSettings.flashEnabled) {
+            document.body.classList.add('page-flash');
+            setTimeout(() => document.body.classList.remove('page-flash'), 300);
+        }
+
+        // Highlight the caption
+        highlightKeywordCaption(captionIndex, match.keyword);
+
+        // Show alert overlay with context
+        showKeywordAlertOverlay(caption, match, captionIndex);
+    }
+
+    // Highlight a caption that contains a keyword match
+    function highlightKeywordCaption(captionIndex, keyword) {
+        const captionElement = captionsContainer.querySelector(`[data-index="${captionIndex}"]`);
+        if (!captionElement) return;
+
+        captionElement.classList.add('keyword-highlight');
+
+        // Highlight the actual keyword in the text
+        const textElement = captionElement.querySelector('.text');
+        if (textElement) {
+            const text = textElement.textContent;
+            const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`(${escapedKeyword})`, 'gi');
+
+            // Clear and rebuild with highlights
+            textElement.textContent = '';
+            let lastIndex = 0;
+            let matchResult;
+            const tempText = text;
+
+            // Reset regex state
+            regex.lastIndex = 0;
+
+            while ((matchResult = regex.exec(tempText)) !== null) {
+                if (matchResult.index > lastIndex) {
+                    textElement.appendChild(document.createTextNode(tempText.substring(lastIndex, matchResult.index)));
+                }
+                const mark = document.createElement('mark');
+                mark.className = 'keyword-match';
+                mark.textContent = matchResult[0];
+                textElement.appendChild(mark);
+                lastIndex = matchResult.index + matchResult[0].length;
+            }
+
+            if (lastIndex < tempText.length) {
+                textElement.appendChild(document.createTextNode(tempText.substring(lastIndex)));
+            }
+        }
+
+        // Auto-remove highlight after 30 seconds
+        setTimeout(() => {
+            captionElement.classList.remove('keyword-highlight');
+        }, 30000);
+    }
+
+    // Show the keyword alert overlay
+    function showKeywordAlertOverlay(caption, match, captionIndex) {
+        const overlay = document.getElementById('keywordAlertOverlay');
+        const contextContainer = document.getElementById('keywordAlertContext');
+        const keywordLabel = document.getElementById('keywordAlertKeyword');
+
+        if (!overlay || !contextContainer) return;
+
+        // Update keyword label
+        if (keywordLabel) {
+            keywordLabel.textContent = `"${match.keyword}"`;
+        }
+
+        // Build context HTML
+        const contextLines = getContextLines(captionIndex, hotKeywordSettings.contextLineCount);
+        const escapedKeyword = match.keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const keywordRegex = new RegExp(`(${escapedKeyword})`, 'gi');
+
+        contextContainer.innerHTML = contextLines.map(line => {
+            const highlightedText = escapeHtml(line.text).replace(keywordRegex, '<span class="keyword-match">$1</span>');
+            const lineClass = line.isMatch ? 'context-line highlight' : 'context-line';
+            return `
+                <div class="${lineClass}">
+                    <span class="context-time">${escapeHtml(line.time)}</span>
+                    <span class="context-speaker">${escapeHtml(line.name)}:</span> ${highlightedText}
+                </div>
+            `;
+        }).join('');
+
+        // Store current caption index for scroll action
+        overlay.dataset.captionIndex = captionIndex;
+
+        // If overlay is already visible, add a pulse animation to indicate new alert
+        const wasAlreadyVisible = overlay.classList.contains('active');
+
+        // Show overlay
+        overlay.classList.add('active');
+
+        // Flash the overlay if it was already visible (new keyword while popup open)
+        if (wasAlreadyVisible) {
+            overlay.style.animation = 'none';
+            overlay.offsetHeight; // Trigger reflow
+            overlay.style.animation = 'alertPulse 0.3s ease-out';
+        }
+
+        // Clear existing timer and set new auto-dismiss
+        if (keywordAlertDismissTimer) {
+            clearTimeout(keywordAlertDismissTimer);
+        }
+        keywordAlertDismissTimer = setTimeout(() => {
+            overlay.classList.remove('active');
+        }, 120000);  // 2 minutes - gives time to catch up on missed context
+    }
+
+    // Scroll to a keyword-highlighted caption
+    function scrollToKeywordCaption(captionIndex) {
+        const captionElement = captionsContainer.querySelector(`[data-index="${captionIndex}"]`);
+        if (captionElement) {
+            captionElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Re-pulse the highlight
+            captionElement.style.animation = 'none';
+            captionElement.offsetHeight; // Trigger reflow
+            captionElement.style.animation = '';
+        }
+    }
+
+    // Update the keyword count badge (header button)
+    function updateKeywordBadge() {
+        const badge = document.getElementById('keyword-count-badge');
+        if (!badge) return;
+
+        const totalCount = Object.keys(hotKeywords).length + Object.keys(sessionKeywords).length;
+
+        if (totalCount > 0) {
+            badge.textContent = totalCount;
+            badge.style.display = 'inline';
+        } else {
+            badge.style.display = 'none';
+        }
+    }
+
+    // Update the count badges in the modal
+    function updateKeywordCountBadges() {
+        const globalCount = document.getElementById('globalKeywordCount');
+        const sessionCount = document.getElementById('sessionKeywordCount');
+
+        const globalLen = Object.keys(hotKeywords).length;
+        const sessionLen = Object.keys(sessionKeywords).length;
+
+        if (globalCount) {
+            globalCount.textContent = globalLen;
+            globalCount.classList.toggle('has-items', globalLen > 0);
+        }
+        if (sessionCount) {
+            sessionCount.textContent = sessionLen;
+            sessionCount.classList.toggle('has-items', sessionLen > 0);
+        }
+    }
+
+    // Render the global keyword list in the modal
+    function renderGlobalKeywordList() {
+        const listContainer = document.getElementById('globalKeywordList');
+        if (!listContainer) return;
+
+        const keywords = Object.entries(hotKeywords);
+
+        if (keywords.length === 0) {
+            listContainer.innerHTML = `
+                <div class="empty-keywords">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+                    </svg>
+                    <p>No global keywords yet</p>
+                </div>`;
+            updateKeywordCountBadges();
+            return;
+        }
+
+        listContainer.innerHTML = keywords.map(([id, data]) => `
+            <div class="keyword-tag ${data.enabled ? '' : 'disabled'}" data-id="${id}" data-scope="global">
+                <span class="keyword-text">${escapeHtml(data.keyword)}</span>
+                <div class="tag-actions">
+                    <label class="toggle-switch tag-toggle" title="Enable/disable">
+                        <input type="checkbox" class="keyword-toggle" data-id="${id}" data-scope="global" ${data.enabled ? 'checked' : ''}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <button class="delete-btn" data-id="${id}" data-scope="global" title="Remove">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        `).join('');
+
+        updateKeywordCountBadges();
+    }
+
+    // Render the session keyword list in the modal
+    function renderSessionKeywordList() {
+        const listContainer = document.getElementById('sessionKeywordList');
+        if (!listContainer) return;
+
+        const keywords = Object.entries(sessionKeywords);
+
+        if (keywords.length === 0) {
+            listContainer.innerHTML = `
+                <div class="empty-keywords">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+                    </svg>
+                    <p>No session keywords yet</p>
+                </div>`;
+            updateKeywordCountBadges();
+            return;
+        }
+
+        listContainer.innerHTML = keywords.map(([id, data]) => `
+            <div class="keyword-tag ${data.enabled ? '' : 'disabled'}" data-id="${id}" data-scope="session">
+                <span class="keyword-text">${escapeHtml(data.keyword)}</span>
+                <div class="tag-actions">
+                    <label class="toggle-switch tag-toggle" title="Enable/disable">
+                        <input type="checkbox" class="keyword-toggle" data-id="${id}" data-scope="session" ${data.enabled ? 'checked' : ''}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <button class="delete-btn" data-id="${id}" data-scope="session" title="Remove">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        `).join('');
+
+        updateKeywordCountBadges();
+    }
+
+    // Add a global keyword
+    async function addGlobalKeyword(keyword) {
+        const trimmed = keyword.trim();
+        if (!trimmed) {
+            showNotification('Please enter a keyword', 'warning');
+            return false;
+        }
+
+        if (trimmed.length > 100) {
+            showNotification('Keyword too long (max 100 characters)', 'warning');
+            return false;
+        }
+
+        // Check for duplicates in global keywords
+        const exists = Object.values(hotKeywords).some(
+            k => k.keyword.toLowerCase() === trimmed.toLowerCase()
+        );
+
+        if (exists) {
+            showNotification('This global keyword already exists', 'warning');
+            return false;
+        }
+
+        // Check limit
+        if (Object.keys(hotKeywords).length >= 20) {
+            showNotification('Maximum 20 global keywords allowed', 'warning');
+            return false;
+        }
+
+        const id = Date.now().toString();
+        hotKeywords[id] = {
+            keyword: trimmed,
+            enabled: true,
+            createdAt: new Date().toISOString()
+        };
+
+        await saveHotKeywords();
+        renderGlobalKeywordList();
+        showNotification(`Added global keyword: "${trimmed}"`, 'success');
+        return true;
+    }
+
+    // Add a session keyword
+    function addSessionKeyword(keyword) {
+        const trimmed = keyword.trim();
+        if (!trimmed) {
+            showNotification('Please enter a keyword', 'warning');
+            return false;
+        }
+
+        if (trimmed.length > 100) {
+            showNotification('Keyword too long (max 100 characters)', 'warning');
+            return false;
+        }
+
+        // Check for duplicates in session keywords
+        const exists = Object.values(sessionKeywords).some(
+            k => k.keyword.toLowerCase() === trimmed.toLowerCase()
+        );
+
+        if (exists) {
+            showNotification('This session keyword already exists', 'warning');
+            return false;
+        }
+
+        // Check limit
+        if (Object.keys(sessionKeywords).length >= 10) {
+            showNotification('Maximum 10 session keywords allowed', 'warning');
+            return false;
+        }
+
+        const id = 'session_' + Date.now().toString();
+        sessionKeywords[id] = {
+            keyword: trimmed,
+            enabled: true
+        };
+
+        renderSessionKeywordList();
+        updateKeywordBadge();
+        showNotification(`Added session keyword: "${trimmed}"`, 'success');
+        return true;
+    }
+
+    // Delete a keyword
+    async function deleteKeyword(id, isSession) {
+        if (isSession) {
+            const keyword = sessionKeywords[id]?.keyword;
+            delete sessionKeywords[id];
+            renderSessionKeywordList();
+            updateKeywordBadge();
+            if (keyword) showNotification(`Removed session keyword: "${keyword}"`, 'info');
+        } else {
+            const keyword = hotKeywords[id]?.keyword;
+            delete hotKeywords[id];
+            delete lastKeywordAlerts[id];
+            await saveHotKeywords();
+            renderGlobalKeywordList();
+            if (keyword) showNotification(`Removed global keyword: "${keyword}"`, 'info');
+        }
+    }
+
+    // Toggle a keyword's enabled state
+    async function toggleKeyword(id, enabled, isSession) {
+        if (isSession) {
+            if (sessionKeywords[id]) {
+                sessionKeywords[id].enabled = enabled;
+            }
+        } else {
+            if (hotKeywords[id]) {
+                hotKeywords[id].enabled = enabled;
+                await saveHotKeywords();
+            }
+        }
+
+        // Update the tag's visual state
+        const scope = isSession ? 'session' : 'global';
+        const tag = document.querySelector(`.keyword-tag[data-id="${id}"][data-scope="${scope}"]`);
+        if (tag) {
+            tag.classList.toggle('disabled', !enabled);
+        }
+    }
+
+    // Set up keyword modal event handlers
+    function setupKeywordModalEvents() {
+        const keywordsBtn = document.getElementById('keywords-btn');
+        const keywordModal = document.getElementById('keywordModal');
+        const closeBtn = keywordModal?.querySelector('.close-keyword-modal');
+        const masterToggle = document.getElementById('keywordMasterToggle');
+        const flashToggle = document.getElementById('keywordFlashToggle');
+        const contextSelect = document.getElementById('keywordContextLines');
+        const globalInput = document.getElementById('globalKeywordInput');
+        const addGlobalBtn = document.getElementById('addGlobalKeywordBtn');
+        const sessionInput = document.getElementById('sessionKeywordInput');
+        const addSessionBtn = document.getElementById('addSessionKeywordBtn');
+        const globalList = document.getElementById('globalKeywordList');
+        const sessionList = document.getElementById('sessionKeywordList');
+
+        // Open modal
+        keywordsBtn?.addEventListener('click', async () => {
+            await loadHotKeywords();
+
+            // Update UI state
+            if (masterToggle) masterToggle.checked = hotKeywordSettings.enabled;
+            if (flashToggle) flashToggle.checked = hotKeywordSettings.flashEnabled;
+            if (contextSelect) contextSelect.value = hotKeywordSettings.contextLineCount.toString();
+
+            const optionsDiv = document.getElementById('keywordOptions');
+            if (optionsDiv) {
+                optionsDiv.style.opacity = hotKeywordSettings.enabled ? '1' : '0.5';
+                optionsDiv.style.pointerEvents = hotKeywordSettings.enabled ? 'auto' : 'none';
+            }
+
+            renderGlobalKeywordList();
+            renderSessionKeywordList();
+            keywordModal.style.display = 'block';
+        });
+
+        // Close modal
+        closeBtn?.addEventListener('click', () => {
+            keywordModal.style.display = 'none';
+        });
+
+        window.addEventListener('click', (e) => {
+            if (e.target === keywordModal) {
+                keywordModal.style.display = 'none';
+            }
+        });
+
+        // Master toggle
+        masterToggle?.addEventListener('change', async () => {
+            hotKeywordSettings.enabled = masterToggle.checked;
+            await saveHotKeywordSettings();
+
+            const optionsDiv = document.getElementById('keywordOptions');
+            if (optionsDiv) {
+                optionsDiv.style.opacity = masterToggle.checked ? '1' : '0.5';
+                optionsDiv.style.pointerEvents = masterToggle.checked ? 'auto' : 'none';
+            }
+        });
+
+        // Flash toggle
+        flashToggle?.addEventListener('change', async () => {
+            hotKeywordSettings.flashEnabled = flashToggle.checked;
+            await saveHotKeywordSettings();
+        });
+
+        // Context lines select
+        contextSelect?.addEventListener('change', async () => {
+            hotKeywordSettings.contextLineCount = parseInt(contextSelect.value, 10);
+            await saveHotKeywordSettings();
+        });
+
+        // Add global keyword
+        addGlobalBtn?.addEventListener('click', async () => {
+            const success = await addGlobalKeyword(globalInput.value);
+            if (success) globalInput.value = '';
+        });
+
+        globalInput?.addEventListener('keypress', async (e) => {
+            if (e.key === 'Enter') {
+                const success = await addGlobalKeyword(globalInput.value);
+                if (success) globalInput.value = '';
+            }
+        });
+
+        // Add session keyword
+        addSessionBtn?.addEventListener('click', () => {
+            const success = addSessionKeyword(sessionInput.value);
+            if (success) sessionInput.value = '';
+        });
+
+        sessionInput?.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                const success = addSessionKeyword(sessionInput.value);
+                if (success) sessionInput.value = '';
+            }
+        });
+
+        // Global keyword list event delegation (toggle + delete)
+        globalList?.addEventListener('click', async (e) => {
+            const deleteBtn = e.target.closest('.delete-btn');
+            if (deleteBtn && deleteBtn.dataset.scope === 'global') {
+                await deleteKeyword(deleteBtn.dataset.id, false);
+            }
+        });
+
+        globalList?.addEventListener('change', async (e) => {
+            if (e.target.classList.contains('keyword-toggle') && e.target.dataset.scope === 'global') {
+                await toggleKeyword(e.target.dataset.id, e.target.checked, false);
+            }
+        });
+
+        // Session keyword list event delegation (toggle + delete)
+        sessionList?.addEventListener('click', (e) => {
+            const deleteBtn = e.target.closest('.delete-btn');
+            if (deleteBtn && deleteBtn.dataset.scope === 'session') {
+                deleteKeyword(deleteBtn.dataset.id, true);
+            }
+        });
+
+        sessionList?.addEventListener('change', (e) => {
+            if (e.target.classList.contains('keyword-toggle') && e.target.dataset.scope === 'session') {
+                toggleKeyword(e.target.dataset.id, e.target.checked, true);
+            }
+        });
+
+        // Alert overlay events
+        const alertOverlay = document.getElementById('keywordAlertOverlay');
+        const alertClose = alertOverlay?.querySelector('.keyword-alert-close');
+        const alertScrollTo = document.getElementById('keywordAlertScrollTo');
+        const alertDismiss = document.getElementById('keywordAlertDismiss');
+
+        alertClose?.addEventListener('click', () => {
+            alertOverlay.classList.remove('active');
+            if (keywordAlertDismissTimer) clearTimeout(keywordAlertDismissTimer);
+        });
+
+        alertDismiss?.addEventListener('click', () => {
+            alertOverlay.classList.remove('active');
+            if (keywordAlertDismissTimer) clearTimeout(keywordAlertDismissTimer);
+        });
+
+        alertScrollTo?.addEventListener('click', () => {
+            const captionIndex = parseInt(alertOverlay.dataset.captionIndex, 10);
+            if (!isNaN(captionIndex)) {
+                scrollToKeywordCaption(captionIndex);
+            }
+            alertOverlay.classList.remove('active');
+            if (keywordAlertDismissTimer) clearTimeout(keywordAlertDismissTimer);
+        });
+
+        // Escape key to dismiss alert
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && alertOverlay?.classList.contains('active')) {
+                alertOverlay.classList.remove('active');
+                if (keywordAlertDismissTimer) clearTimeout(keywordAlertDismissTimer);
+            }
+        });
+    }
+
     // --- Smart Scroll Functions ---
     function checkIfNearBottom() {
         // Check the actual scrollable container (body or document element)
@@ -594,7 +1273,13 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Update analytics
         updateAnalyticsIncremental(caption);
-        
+
+        // Check for keyword matches (hot keyword detection)
+        const keywordMatch = checkForKeywordMatch(caption);
+        if (keywordMatch) {
+            triggerKeywordAlert(caption, keywordMatch, allCaptions.length - 1);
+        }
+
         // Update export button states
         updateExportButtonStates();
         
@@ -624,6 +1309,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (index !== -1) {
+            // Store old text BEFORE first update (for keyword detection)
+            // We track per-caption to know what text existed before any updates started
+            const captionKey = caption.key || `idx_${index}`;
+            if (!captionKeywordDebounceTimers[captionKey]) {
+                // First update - store the original text
+                captionKeywordDebounceTimers[captionKey] = {
+                    timer: null,
+                    originalText: (allCaptions[index].Text || '').toLowerCase()
+                };
+            }
+
             // Update in data array
             allCaptions[index] = { ...allCaptions[index], ...caption };
 
@@ -640,6 +1336,30 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 debug.log('[Viewer] Caption element not found at index:', index);
             }
+
+            // Debounced keyword check - wait for caption to settle before checking
+            const debounceData = captionKeywordDebounceTimers[captionKey];
+            if (debounceData.timer) {
+                clearTimeout(debounceData.timer);
+            }
+
+            debounceData.timer = setTimeout(() => {
+                // Caption has settled - now check for keywords
+                const currentCaption = allCaptions[index];
+                const keywordMatch = checkForKeywordMatch(currentCaption);
+                if (keywordMatch) {
+                    // Only trigger if keyword is NEW (wasn't in original text before updates started)
+                    const keywordLower = keywordMatch.keyword.toLowerCase();
+                    if (!debounceData.originalText.includes(keywordLower)) {
+                        console.log('[Keywords] Keyword found in caption UPDATE (debounced):', keywordMatch.keyword);
+                        triggerKeywordAlert(currentCaption, keywordMatch, index);
+                    } else {
+                        console.log('[Keywords] Keyword already existed in original caption, skipping');
+                    }
+                }
+                // Clean up debounce data
+                delete captionKeywordDebounceTimers[captionKey];
+            }, KEYWORD_CHECK_DEBOUNCE_MS);
         } else if (!fromAppend) {
             // Only add as new if not already called from appendNewCaption (prevent infinite recursion)
             debug.log('[Viewer] Caption not found for update, adding as new');
@@ -723,10 +1443,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
             </svg>`;
         
+        // Microphone icon for spoken captions
         const captionIconSVG = `
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="11" width="18" height="10" rx="2" ry="2"></rect>
-                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                <line x1="12" y1="19" x2="12" y2="23"></line>
+                <line x1="8" y1="23" x2="16" y2="23"></line>
             </svg>`;
         
         // Handle attendance events differently
@@ -1536,9 +2259,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (notification.parentNode) {
                     notification.remove();
                 }
-                if (style.parentNode) {
-                    style.remove();
-                }
             }, 300);
         }, 3000);
     }
@@ -1593,6 +2313,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 sessionModal.style.display = 'none';
             }
         });
+
+        // Hot keyword detection modal handlers
+        setupKeywordModalEvents();
+
+        // Check URL parameter to auto-open keyword modal (from popup settings link)
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('openKeywords') === 'true') {
+            // Trigger the keywords button click to open modal
+            setTimeout(() => {
+                document.getElementById('keywords-btn')?.click();
+            }, 100);
+        }
     }
     
     // --- Session History Functions ---
@@ -1843,6 +2575,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Load session-specific aliases before rendering
                 await loadSessionAliases();
 
+                // Load hot keyword settings
+                await loadHotKeywords();
+
                 // Merge attendance events with transcript if available
                 if (viewerData?.attendeeData?.attendeeHistory) {
                     transcript = mergeAttendanceEvents(transcript, viewerData.attendeeData.attendeeHistory);
@@ -1880,6 +2615,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         h1.innerHTML = `${createPlatformBadge(platform)}Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span>${meetingTitle ? `<span class="meeting-title">${escapeHtml(meetingTitle)}</span>` : ''}`;
                     }
                 }
+
+                // Load hot keyword settings
+                await loadHotKeywords();
 
                 // Always setup event listeners and live streaming
                 setupEventListeners();

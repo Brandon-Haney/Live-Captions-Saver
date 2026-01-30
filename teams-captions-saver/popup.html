@@ -291,6 +291,20 @@
             transform: translateY(-1px);
         }
 
+        .small-btn {
+            padding: 4px 12px;
+            font-size: 12px;
+            background: #f0f0f0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .small-btn:hover {
+            background: #e0e0e0;
+        }
+
         .btn-group {
             display: flex;
             gap: 8px;
@@ -885,6 +899,16 @@
                 </div>
             </div>
 
+            <!-- Alerts -->
+            <div class="settings-group">
+                <div class="settings-group-header">Alerts</div>
+                <div class="setting-row">
+                    <span class="setting-label">Keyword Alerts</span>
+                    <button id="configureKeywordsBtn" class="small-btn">Configure</button>
+                </div>
+                <div class="input-hint" style="margin-top: 4px;">Get notified when specific words appear in captions</div>
+            </div>
+
             <!-- Export Settings -->
             <div class="settings-group">
                 <div class="settings-group-header">Export</div>
@@ -917,6 +941,21 @@
                     <label for="filenamePattern">Filename Pattern</label>
                     <input type="text" id="filenamePattern" value="{date}_{title}_{format}" placeholder="{date}_{title}_{format}">
                     <div class="input-hint">{date}, {time}, {title}, {format}, {attendees}</div>
+                </div>
+            </div>
+
+            <!-- Utilities -->
+            <div class="settings-group">
+                <div class="settings-group-header">Utilities</div>
+                <div class="setting-row">
+                    <span class="setting-label">M365 Session Keep-Alive</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="m365KeepAliveToggle">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="input-hint" style="margin-top: 4px; padding-left: 0;">
+                    Prevents Outlook, SharePoint, and other M365 web apps from timing out due to inactivity.
                 </div>
             </div>
         </div>

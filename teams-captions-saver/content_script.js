@@ -602,16 +602,22 @@ class ErrorHandler {
      */
     static log(error, context = '', silent = false) {
         const timestamp = new Date().toISOString();
+        const errorMessage = error?.message || String(error);
+
+        // Silently ignore "Extension context invalidated" - this is expected when extension reloads
+        if (errorMessage.includes('Extension context invalidated')) {
+            return null;
+        }
+
         const errorInfo = {
             timestamp,
             context,
-            message: error?.message || String(error),
+            message: errorMessage,
             stack: error?.stack,
             url: window.location.href
         };
 
-        // Always log to console for debugging
-        const errorMessage = errorInfo.message || 'Unknown error';
+        // Log to console for debugging
         if (errorInfo.stack) {
             console.error(`[Live Caption Saver] ${context}: ${errorMessage}\nStack:`, errorInfo.stack);
         } else {
@@ -625,7 +631,7 @@ class ErrorHandler {
                 error: errorInfo
             });
         }
-        
+
         return errorInfo;
     }
     
@@ -910,7 +916,10 @@ const HealthCheck = (function() {
     function recordSelectorFailure(selector) {
         state.selectorFailureCount++;
         state.consecutiveFailures++;
-        Logger.warn(Logger.Category.SELECTOR, `Selector failure: ${selector} (consecutive: ${state.consecutiveFailures})`);
+        // Only warn after 5+ consecutive failures to reduce noise
+        if (state.consecutiveFailures >= 5) {
+            Logger.warn(Logger.Category.SELECTOR, `Selector failure: ${selector} (consecutive: ${state.consecutiveFailures})`);
+        }
     }
 
     // Reset selector failure count (call when selector succeeds)
@@ -919,6 +928,16 @@ const HealthCheck = (function() {
             Logger.debug(Logger.Category.SELECTOR, `Selector recovered after ${state.consecutiveFailures} failures`);
             state.consecutiveFailures = 0;
         }
+    }
+
+    // Reset health check state (call when meeting starts/ends)
+    function resetState() {
+        state.lastCaptionTime = null;
+        state.captionStuckWarningShown = false;
+        state.consecutiveFailures = 0;
+        state.isHealthy = true;
+        state.issues = [];
+        Logger.debug(Logger.Category.GENERAL, 'Health check state reset');
     }
 
     // Check if caption capture is stuck
@@ -1020,6 +1039,7 @@ const HealthCheck = (function() {
         recordCaptionCapture,
         recordSelectorFailure,
         resetSelectorFailures,
+        resetState,
         runHealthCheck,
         getHealthStatus,
         startHealthMonitoring
@@ -2268,6 +2288,9 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         lastMeetingId = null;
         captionRetryInProgress = false; // Reset retry flag
 
+        // Reset health check state for new meeting
+        HealthCheck.resetState();
+
         // Only create a new session if we don't already have one
         if (!currentSessionId) {
             console.log(`Creating new session for meeting ${isMainFrame ? '(Main Frame)' : '(Iframe)'}`);
@@ -2637,6 +2660,9 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
         console.log('[Caption Saver] Meeting ended - stopping capture but preserving title for export');
         stopCaptureSession();
         stopAttendeeTracking();
+
+        // Reset health check state so next meeting starts fresh
+        HealthCheck.resetState();
 
         // Note: We intentionally preserve currentMeetingTitle and recordingStartTime
         // so that exports after meeting ends still have the correct title.
