@@ -43,6 +43,10 @@
     "service_worker": "service_worker.js"
   },
 
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+
   "content_scripts": [
     {
       "matches": [
@@ -76,7 +80,7 @@
       "all_frames": true
     }
   ],
-  
+
   "web_accessible_resources": [
     {
       "resources": [
@@ -86,7 +90,12 @@
         "transcript_interceptor.js"
       ],
       "matches": [
-        "<all_urls>"
+        "https://teams.microsoft.com/*",
+        "https://teams.live.com/*",
+        "https://teams.cloud.microsoft/*",
+        "https://meet.google.com/*",
+        "https://web.zoom.us/*",
+        "https://app.zoom.us/*"
       ]
     }
   ]
