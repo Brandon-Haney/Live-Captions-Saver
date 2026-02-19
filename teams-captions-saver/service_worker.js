@@ -775,8 +775,10 @@ async function downloadFile(filename, content, mimeType, saveAs) {
     try {
         const url = `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`;
 
-        // Ensure filename is relative to Downloads directory (no leading slashes)
-        let finalFilename = filename.replace(/^[\/\\]+/, '');
+        // Safety-net sanitization: strip any characters Windows forbids in filenames.
+        // getSanitizedMeetingName already handles this for meeting titles, but this
+        // catches anything that slips through (custom patterns, edge cases, etc.)
+        let finalFilename = filename.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_');
 
         const downloadOptions = {
             url: url,
@@ -1274,12 +1276,12 @@ chrome.downloads.onDeterminingFilename?.addListener((downloadItem, suggest) => {
         pendingDownloads.delete(downloadItem.id);
     }
 
-    // Method 2: If not found by ID, check queue BUT only for blob URLs (which we create)
+    // Method 2: If not found by ID, check queue for URLs we created (blob: and data:)
     // This handles the race condition where onDeterminingFilename fires before we get the download ID
-    // IMPORTANT: Only apply queue filenames to blob: URLs to avoid interfering with other extensions
+    // Only apply queue filenames to blob: or data: URLs to avoid interfering with other extensions
     if (!pendingFilename && pendingFilenameQueue.length > 0) {
-        const isBlobUrl = downloadItem.url && downloadItem.url.startsWith('blob:');
-        if (isBlobUrl) {
+        const isOurUrl = downloadItem.url && (downloadItem.url.startsWith('blob:') || downloadItem.url.startsWith('data:'));
+        if (isOurUrl) {
             const queueEntry = pendingFilenameQueue.shift();
             pendingFilename = queueEntry.filename;
         }
