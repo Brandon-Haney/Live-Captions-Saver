@@ -973,13 +973,17 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
 let lastAutoSaveId = null;
 let autoSaveInProgress = false;
 
-async function createViewerTab(transcriptArray, meetingTitle, platform, sessionId) {
-    await chrome.storage.local.set({
+async function createViewerTab(transcriptArray, meetingTitle, platform, sessionId, scrollToIndex) {
+    const data = {
         captionsToView: transcriptArray,
         meetingTitle: meetingTitle,
         platform: platform,  // Store platform for display
         viewerSessionId: sessionId  // Store session ID for filtering live updates
-    });
+    };
+    if (scrollToIndex != null) {
+        data.scrollToIndex = scrollToIndex;
+    }
+    await chrome.storage.local.set(data);
     chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') });
 }
 
@@ -1634,7 +1638,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case 'display_captions':
-                await createViewerTab(message.transcriptArray, message.meetingTitle, message.platform, message.sessionId);
+                await createViewerTab(message.transcriptArray, message.meetingTitle, message.platform, message.sessionId, message.scrollToIndex);
                 sendResponse({ success: true });
                 break;
             

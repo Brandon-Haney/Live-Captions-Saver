@@ -61,7 +61,9 @@ const UI_ELEMENTS = {
     sessionDuration: document.getElementById('session-duration'),
     sessionCaptions: document.getElementById('session-captions'),
     sessionAttendees: document.getElementById('session-attendees'),
-    configureKeywordsBtn: document.getElementById('configureKeywordsBtn')
+    configureKeywordsBtn: document.getElementById('configureKeywordsBtn'),
+    toastEnabledToggle: document.getElementById('toastEnabledToggle'),
+    toastDismissSelect: document.getElementById('toastDismissSelect')
 };
 
 // --- Multi-Session State ---
@@ -527,6 +529,12 @@ async function loadSettings() {
     UI_ELEMENTS.aiInstructions.value = settings.aiInstructions || '';
     UI_ELEMENTS.m365KeepAliveToggle.checked = !!settings.m365KeepAlive;
 
+    // Load toast settings from hotKeywordSettings
+    const kwData = await chrome.storage.sync.get('hotKeywordSettings');
+    const kwSettings = kwData.hotKeywordSettings || {};
+    UI_ELEMENTS.toastEnabledToggle.checked = kwSettings.toastEnabled !== false;
+    UI_ELEMENTS.toastDismissSelect.value = String(kwSettings.toastDismissSeconds || 45);
+
     currentDefaultFormat = settings.defaultSaveFormat || 'txt';
     UI_ELEMENTS.defaultSaveFormatSelect.value = currentDefaultFormat;
     updateSaveButtonText(currentDefaultFormat);
@@ -603,6 +611,20 @@ function setupEventListeners() {
 
     UI_ELEMENTS.m365KeepAliveToggle.addEventListener('change', (e) => {
         chrome.storage.sync.set({ m365KeepAlive: e.target.checked });
+    });
+
+    UI_ELEMENTS.toastEnabledToggle.addEventListener('change', async (e) => {
+        const data = await chrome.storage.sync.get('hotKeywordSettings');
+        const current = data.hotKeywordSettings || {};
+        current.toastEnabled = e.target.checked;
+        await chrome.storage.sync.set({ hotKeywordSettings: current });
+    });
+
+    UI_ELEMENTS.toastDismissSelect.addEventListener('change', async (e) => {
+        const data = await chrome.storage.sync.get('hotKeywordSettings');
+        const current = data.hotKeywordSettings || {};
+        current.toastDismissSeconds = parseInt(e.target.value, 10);
+        await chrome.storage.sync.set({ hotKeywordSettings: current });
     });
 
     UI_ELEMENTS.meetingType.addEventListener('change', async (e) => {
@@ -709,31 +731,8 @@ function setupEventListeners() {
                     }
                 });
             } else {
-                // No active meeting - check if we have previous sessions
-                if (typeof SessionManager !== 'undefined') {
-                    const sessionManager = new SessionManager();
-                    const sessions = await sessionManager.getAllSessions();
-                    if (sessions && sessions.length > 0) {
-                        // Auto-expand the folder and scroll to it
-                        const listEl = document.getElementById('sessions-list');
-                        const folderIcon = document.getElementById('folder-icon');
-                        const section = document.getElementById('previous-sessions-section');
-
-                        if (listEl && folderIcon) {
-                            listEl.style.display = 'block';
-                            folderIcon.classList.add('open');
-
-                            // Scroll to the section
-                            section?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                        }
-
-                        UI_ELEMENTS.statusMessage.textContent = 'Select a session below to view';
-                        UI_ELEMENTS.statusMessage.style.color = '#0078d4';
-                    } else {
-                        UI_ELEMENTS.statusMessage.textContent = 'No sessions available to view';
-                        UI_ELEMENTS.statusMessage.style.color = '#dc3545';
-                    }
-                }
+                // No active meeting - open viewer directly (user can load history from there)
+                chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') });
             }
         }
     });

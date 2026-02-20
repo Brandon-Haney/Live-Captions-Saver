@@ -267,11 +267,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load global keywords from storage
     async function loadHotKeywords() {
         try {
-            const result = await chrome.storage.sync.get(['hotKeywords', 'hotKeywordSettings']);
-            hotKeywords = result.hotKeywords || {};
-            if (result.hotKeywordSettings) {
-                hotKeywordSettings = { ...hotKeywordSettings, ...result.hotKeywordSettings };
-            }
+            const loaded = await KeywordEngine.loadFromStorage();
+            hotKeywords = loaded.keywords;
+            hotKeywordSettings = { ...hotKeywordSettings, ...loaded.settings };
             debug.log('[Keywords] Loaded', Object.keys(hotKeywords).length, 'global keywords');
             updateKeywordBadge();
         } catch (error) {
@@ -304,23 +302,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Get all active keywords (global + session)
     function getAllActiveKeywords() {
-        const active = [];
-
-        // Add enabled global keywords
-        for (const [id, data] of Object.entries(hotKeywords)) {
-            if (data.enabled) {
-                active.push({ id, keyword: data.keyword, isSession: false });
-            }
-        }
-
-        // Add enabled session keywords
-        for (const [id, data] of Object.entries(sessionKeywords)) {
-            if (data.enabled) {
-                active.push({ id, keyword: data.keyword, isSession: true });
-            }
-        }
-
-        return active;
+        return KeywordEngine.getActiveKeywords(hotKeywords, sessionKeywords);
     }
 
     // Check if caption matches any keywords
@@ -330,53 +312,28 @@ document.addEventListener('DOMContentLoaded', () => {
             return null;
         }
 
-        // Only check the caption text content, not the speaker name
-        // This prevents false alerts when YOU speak (your name appears as speaker)
-        const text = (caption.Text || '').toLowerCase();
         const activeKeywords = getAllActiveKeywords();
 
         console.log('[Keywords] Checking caption:', {
             speaker: caption.Name,
-            text: text.substring(0, 50) + (text.length > 50 ? '...' : ''),
+            text: (caption.Text || '').substring(0, 50),
             activeKeywordCount: activeKeywords.length,
             keywords: activeKeywords.map(k => k.keyword)
         });
 
-        for (const { id, keyword, isSession } of activeKeywords) {
-            const keywordLower = keyword.toLowerCase();
-            if (text.includes(keywordLower)) {
-                console.log('[Keywords] MATCH FOUND:', { keyword, in: text.substring(0, 100) });
-                return { id, keyword, isSession };
-            }
+        const match = KeywordEngine.checkForMatch(caption, activeKeywords);
+        if (match) {
+            console.log('[Keywords] MATCH FOUND:', { keyword: match.keyword, in: (caption.Text || '').substring(0, 100) });
+        } else {
+            console.log('[Keywords] No match found');
         }
-        console.log('[Keywords] No match found');
-        return null;
+        return match;
     }
 
     // Check if alert should be consolidated (same keyword within window)
     function shouldConsolidateAlert(keywordId) {
-        const now = Date.now();
-        const lastAlert = lastKeywordAlerts[keywordId];
         const windowMs = hotKeywordSettings.consolidationWindowMs || 5000;
-        const timeSinceLastAlert = lastAlert ? (now - lastAlert) : Infinity;
-
-        console.log('[Keywords] Consolidation check:', {
-            keywordId,
-            lastAlert,
-            now,
-            timeSinceLastAlert: timeSinceLastAlert + 'ms',
-            windowMs: windowMs + 'ms',
-            willConsolidate: lastAlert && timeSinceLastAlert < windowMs
-        });
-
-        if (lastAlert && timeSinceLastAlert < windowMs) {
-            console.log('[Keywords] Consolidating alert - within window');
-            return true;
-        }
-
-        lastKeywordAlerts[keywordId] = now;
-        console.log('[Keywords] Showing full alert - outside window or first time');
-        return false;
+        return KeywordEngine.shouldConsolidate(keywordId, lastKeywordAlerts, windowMs);
     }
 
     // Get context lines before the matched caption
@@ -421,8 +378,10 @@ document.addEventListener('DOMContentLoaded', () => {
         // Highlight the caption
         highlightKeywordCaption(captionIndex, match.keyword);
 
-        // Show alert overlay with context
-        showKeywordAlertOverlay(caption, match, captionIndex);
+        // Show alert overlay with context (if enabled)
+        if (hotKeywordSettings.overlayEnabled !== false) {
+            showKeywordAlertOverlay(caption, match, captionIndex);
+        }
     }
 
     // Highlight a caption that contains a keyword match
@@ -519,9 +478,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (keywordAlertDismissTimer) {
             clearTimeout(keywordAlertDismissTimer);
         }
+        const dismissMs = (hotKeywordSettings.toastDismissSeconds || 45) * 1000;
         keywordAlertDismissTimer = setTimeout(() => {
             overlay.classList.remove('active');
-        }, 120000);  // 2 minutes - gives time to catch up on missed context
+        }, dismissMs);
     }
 
     // Scroll to a keyword-highlighted caption
@@ -777,6 +737,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const masterToggle = document.getElementById('keywordMasterToggle');
         const flashToggle = document.getElementById('keywordFlashToggle');
         const contextSelect = document.getElementById('keywordContextLines');
+        const overlayToggle = document.getElementById('keywordOverlayToggle');
+        const overlayDurationSelect = document.getElementById('keywordOverlayDuration');
         const globalInput = document.getElementById('globalKeywordInput');
         const addGlobalBtn = document.getElementById('addGlobalKeywordBtn');
         const sessionInput = document.getElementById('sessionKeywordInput');
@@ -792,6 +754,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (masterToggle) masterToggle.checked = hotKeywordSettings.enabled;
             if (flashToggle) flashToggle.checked = hotKeywordSettings.flashEnabled;
             if (contextSelect) contextSelect.value = hotKeywordSettings.contextLineCount.toString();
+            if (overlayToggle) overlayToggle.checked = hotKeywordSettings.overlayEnabled !== false;
+            if (overlayDurationSelect) overlayDurationSelect.value = String(hotKeywordSettings.toastDismissSeconds || 45);
 
             const optionsDiv = document.getElementById('keywordOptions');
             if (optionsDiv) {
@@ -836,6 +800,18 @@ document.addEventListener('DOMContentLoaded', () => {
         // Context lines select
         contextSelect?.addEventListener('change', async () => {
             hotKeywordSettings.contextLineCount = parseInt(contextSelect.value, 10);
+            await saveHotKeywordSettings();
+        });
+
+        // Overlay toggle
+        overlayToggle?.addEventListener('change', async () => {
+            hotKeywordSettings.overlayEnabled = overlayToggle.checked;
+            await saveHotKeywordSettings();
+        });
+
+        // Overlay duration select (reuses toastDismissSeconds)
+        overlayDurationSelect?.addEventListener('change', async () => {
+            hotKeywordSettings.toastDismissSeconds = parseInt(overlayDurationSelect.value, 10);
             await saveHotKeywordSettings();
         });
 
@@ -2510,7 +2486,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } else {
                 // Fallback to old method (for live sessions or backwards compatibility)
-                result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId', 'meetingTitle', 'platform']);
+                result = await chrome.storage.local.get(['captionsToView', 'viewerData', 'viewerSessionId', 'meetingTitle', 'platform', 'scrollToIndex']);
 
                 if (!result) {
                     throw new Error('Failed to load data from storage');
@@ -2586,7 +2562,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderCaptions(transcript);
                 populateSpeakerFilters(transcript);
                 setupEventListeners();
-                
+
+                // If opened from a keyword toast, scroll to the target caption
+                const scrollIdx = result?.scrollToIndex ?? viewerData?.scrollToIndex;
+                if (scrollIdx != null && scrollIdx >= 0) {
+                    // Small delay to let the DOM settle after render
+                    setTimeout(() => {
+                        const el = captionsContainer.querySelector(`[data-index="${scrollIdx}"]`);
+                        if (el) {
+                            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            el.classList.add('keyword-highlight');
+                        }
+                    }, 300);
+                    // Clean up so it doesn't re-trigger
+                    chrome.storage.local.remove('scrollToIndex').catch(() => {});
+                }
+
                 // Setup live streaming after initial load
                 setupLiveStreaming();
                 
@@ -2612,7 +2603,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const platform = result?.platform || viewerData?.platform || '';
                     if (meetingTitle || platform) {
                         const h1 = document.querySelector('h1');
-                        h1.innerHTML = `${createPlatformBadge(platform)}Live Transcript<span class="live-indicator active"><span class="live-dot"></span>LIVE</span>${meetingTitle ? `<span class="meeting-title">${escapeHtml(meetingTitle)}</span>` : ''}`;
+                        h1.innerHTML = `${createPlatformBadge(platform)}Live Transcript<span class="live-indicator"><span class="live-dot"></span>LIVE</span>${meetingTitle ? `<span class="meeting-title">${escapeHtml(meetingTitle)}</span>` : ''}`;
                     }
                 }
 
@@ -2628,11 +2619,9 @@ document.addEventListener('DOMContentLoaded', () => {
             captionsContainer.innerHTML = `<p class="status-message">Unable to load captions: ${error.message}<br><br>Please try opening the extension popup again.</p>`;
             captionElementsCache = []; // Clear cache on error
         } finally {
-            // Clean up storage to prevent re-displaying on next open
-            // But keep viewerSessionId for filtering live updates
+            // Clean up storage to prevent stale data on next open
             try {
-                await chrome.storage.local.remove(['captionsToView', 'viewerData']);
-                // Note: viewerSessionId is kept for the duration of this viewer session
+                await chrome.storage.local.remove(['captionsToView', 'viewerData', 'scrollToIndex', 'meetingTitle', 'platform', 'viewerSessionId']);
             } catch (cleanupError) {
                 console.error('[Viewer] Failed to cleanup storage:', cleanupError);
                 // Non-critical error, continue
@@ -2811,7 +2800,15 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log("Initial connection attempt failed (this is normal):", error.message);
             // This is OK - we'll receive broadcasts anyway when content script sends updates
         }
-        
+
+        // If no live stream found, update the placeholder message
+        if (!isLiveStreaming) {
+            const statusMsg = captionsContainer.querySelector('.status-message');
+            if (statusMsg && statusMsg.textContent === 'Waiting for live captions...') {
+                statusMsg.innerHTML = 'No active meeting found.<br><br>Join a meeting and enable captions, then use "View Transcript" to see the live feed.';
+            }
+        }
+
         // Setup auto-scroll toggle
         setupAutoScrollToggle();
         

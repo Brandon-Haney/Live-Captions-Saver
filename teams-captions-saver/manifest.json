@@ -59,6 +59,7 @@
       ],
       "js": [
         "platformConfig.js",
+        "keywordEngine.js",
         "content_script.js"
       ],
       "all_frames": true
@@ -86,6 +87,7 @@
       "resources": [
         "viewer.html",
         "viewer.js",
+        "keywordEngine.js",
         "sessionManager.js",
         "transcript_interceptor.js"
       ],

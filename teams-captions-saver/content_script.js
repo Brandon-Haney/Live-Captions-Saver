@@ -272,6 +272,8 @@ async function createNewMeetingSession() {
 
         // Clear transcript and attendee data for the new meeting
         transcriptArray.length = 0;
+        kwLastAlerts = {};
+        dismissAllKeywordToasts();
         attendeeData = {
             allAttendees: new Set(),
             currentAttendees: new Map(),
@@ -364,6 +366,317 @@ let lastMeetingId = null;
 let captionRetryInProgress = false;
 // Store current user's name for Google Meet
 window.currentUserName = null;
+
+// --- Keyword Alert State ---
+let kwGlobalKeywords = {};
+let kwSettings = { enabled: true, consolidationWindowMs: 5000 };
+let kwLastAlerts = {};
+
+// Initial load of keywords from storage
+if (typeof KeywordEngine !== 'undefined') {
+    KeywordEngine.loadFromStorage().then(loaded => {
+        kwGlobalKeywords = loaded.keywords;
+        kwSettings = loaded.settings;
+    }).catch(() => {});
+}
+
+// --- Keyword Alert Helpers & Toast UI ---
+
+function checkKeywordAndNotify(caption) {
+    if (typeof KeywordEngine === 'undefined') return;
+    if (!kwSettings.enabled) return;
+    if (kwSettings.toastEnabled === false) return;
+    if (caption.Type === 'attendance') return;
+
+    const active = KeywordEngine.getActiveKeywords(kwGlobalKeywords);
+    if (active.length === 0) return;
+
+    const match = KeywordEngine.checkForMatch(caption, active);
+    if (!match) return;
+
+    const windowMs = kwSettings.consolidationWindowMs || 5000;
+    if (KeywordEngine.shouldConsolidate(match.id, kwLastAlerts, windowMs)) return;
+
+    const captionIndex = transcriptArray.findIndex(c => c.key === caption.key);
+    const contextLines = getToastContextLines(captionIndex);
+    showKeywordToast(match.keyword, contextLines, captionIndex);
+}
+
+function debouncedKeywordCheck(caption) {
+    if (typeof KeywordEngine === 'undefined') return;
+    if (!kwSettings.enabled) return;
+    if (kwSettings.toastEnabled === false) return;
+    if (caption.Type === 'attendance') return;
+
+    // Check immediately — no debounce so keyword alerts appear instantly
+    const originalText = caption._kwCheckedText || '';
+
+    const active = KeywordEngine.getActiveKeywords(kwGlobalKeywords);
+    if (active.length === 0) return;
+
+    const match = KeywordEngine.checkForMatch(caption, active);
+    if (!match) return;
+
+    // Only fire if the keyword is new (wasn't in the previously-checked text)
+    if (originalText.toLowerCase().includes(match.keyword.toLowerCase())) return;
+
+    const windowMs = kwSettings.consolidationWindowMs || 5000;
+    if (KeywordEngine.shouldConsolidate(match.id, kwLastAlerts, windowMs)) return;
+
+    const captionIndex = transcriptArray.findIndex(c => c.key === caption.key);
+    const contextLines = getToastContextLines(captionIndex);
+    showKeywordToast(match.keyword, contextLines, captionIndex);
+
+    // Record what we've checked so we only alert on NEW keyword appearances
+    caption._kwCheckedText = caption.Text || '';
+}
+
+// Get context lines around a matched caption (before + after)
+function getToastContextLines(captionIndex, lineCount = 5, followingCount = 1) {
+    const relevantCaptions = transcriptArray.filter(c => c.Type !== 'attendance');
+    const matchedCaption = transcriptArray[captionIndex];
+    if (!matchedCaption) return [];
+    const filteredIndex = relevantCaptions.findIndex(c => c.key === matchedCaption.key);
+    if (filteredIndex === -1) {
+        return [{ name: matchedCaption.Name, text: matchedCaption.Text, time: matchedCaption.Time, isMatch: true }];
+    }
+    const startIndex = Math.max(0, filteredIndex - lineCount + 1);
+    const endIndex = Math.min(relevantCaptions.length, filteredIndex + 1 + followingCount);
+    return relevantCaptions.slice(startIndex, endIndex).map((cap, idx) => ({
+        name: cap.Name,
+        text: cap.Text,
+        time: cap.Time,
+        isMatch: (startIndex + idx) === filteredIndex
+    }));
+}
+
+// Open viewer scrolled to a specific caption index
+function openViewerAtCaption(captionIndex) {
+    safeSendMessage({
+        message: "display_captions",
+        transcriptArray: getCleanTranscript(),
+        meetingTitle: currentMeetingTitle,
+        platform: platformConfig?.name || 'Unknown',
+        sessionId: currentSessionId,
+        scrollToIndex: captionIndex
+    });
+}
+
+// HTML-escape helper (shared across toast functions)
+function _kwEsc(str) {
+    const d = document.createElement('div');
+    d.textContent = str || '';
+    return d.innerHTML;
+}
+
+// Highlight keyword in escaped text
+function _kwHighlight(escapedText, kw) {
+    const escapedKw = _kwEsc(kw);
+    const regex = new RegExp(`(${escapedKw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+    return escapedText.replace(regex, '<span style="color:#fff;background:#e65100;padding:1px 4px;border-radius:3px;font-weight:600;">$1</span>');
+}
+
+// Build context lines HTML for a toast
+function buildToastContextHTML(contextLines, keyword) {
+    let html = '';
+    for (const line of (contextLines || [])) {
+        const textContent = _kwEsc(line.text || '');
+        const displayText = line.isMatch ? _kwHighlight(textContent, keyword) : textContent;
+
+        if (line.isMatch) {
+            html += `
+                <div style="background:rgba(255,152,0,0.15);border-left:3px solid #ff9800;padding:4px 8px;margin:4px 0 2px 0;border-radius:0 4px 4px 0;">
+                    <div style="font-size:10px;color:#999;margin-bottom:1px;">${_kwEsc(line.time || '')}</div>
+                    <div><span style="color:#ff9800;font-weight:600;">${_kwEsc(line.name || 'Unknown')}:</span> <span style="color:#eee;">${displayText}</span></div>
+                </div>`;
+        } else {
+            html += `
+                <div style="padding:2px 8px 2px 11px;margin-bottom:1px;">
+                    <div style="font-size:10px;color:#777;">${_kwEsc(line.time || '')}</div>
+                    <div style="color:#aaa;font-size:12px;"><span style="color:#bbb;font-weight:500;">${_kwEsc(line.name || 'Unknown')}:</span> ${displayText}</div>
+                </div>`;
+        }
+    }
+    return html;
+}
+
+// Start (or restart) the live-update interval on a toast
+function startToastLiveUpdates(toast, keyword) {
+    // Clear any existing live interval/timeout
+    if (toast._kwLiveInterval) clearInterval(toast._kwLiveInterval);
+    if (toast._kwLiveTimeout) clearTimeout(toast._kwLiveTimeout);
+
+    let lastRenderedHTML = '';
+    const liveInterval = setInterval(() => {
+        const idx = parseInt(toast.dataset.captionIndex, 10);
+        const updated = getToastContextLines(idx, 5, 1);
+        const updatedHTML = buildToastContextHTML(updated, keyword);
+        if (updatedHTML !== lastRenderedHTML) {
+            const contextArea = toast.querySelector('.kw-toast-context');
+            if (contextArea) contextArea.innerHTML = updatedHTML;
+            lastRenderedHTML = updatedHTML;
+        }
+    }, 300);
+    toast._kwLiveInterval = liveInterval;
+
+    // Stop live updates after 30 seconds
+    toast._kwLiveTimeout = setTimeout(() => {
+        clearInterval(liveInterval);
+        toast._kwLiveInterval = null;
+    }, 30000);
+}
+
+// Toast dismiss time is now driven by kwSettings.toastDismissSeconds (default 45)
+
+function showKeywordToast(keyword, contextLines, captionIndex) {
+    // Only run in top frame to avoid duplicate toasts from iframes
+    if (window.top !== window.self) return;
+
+    // Ensure toast container exists
+    let container = document.getElementById('kw-toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'kw-toast-container';
+        container.style.cssText = `
+            position: fixed; bottom: 80px; right: 20px; z-index: 999998;
+            display: flex; flex-direction: column-reverse; gap: 8px;
+            pointer-events: none; max-width: 420px;
+        `;
+        document.body.appendChild(container);
+    }
+
+    // If a toast already exists for the same keyword, update it in-place (no flicker)
+    const kwId = keyword.toLowerCase();
+    const existing = container.querySelector(`[data-keyword-id="${CSS.escape(kwId)}"]`);
+    if (existing) {
+        // Update caption index and context content — no animation, no dismiss timer reset
+        existing.dataset.captionIndex = String(captionIndex);
+        const contextArea = existing.querySelector('.kw-toast-context');
+        if (contextArea) {
+            contextArea.innerHTML = buildToastContextHTML(contextLines, keyword);
+        }
+        // Restart live updates so it tracks the new caption index
+        startToastLiveUpdates(existing, keyword);
+        return;
+    }
+
+    // Cap at 3 visible toasts — remove oldest
+    while (container.children.length >= 3) {
+        const oldest = container.firstChild;
+        cleanupToastTimers(oldest);
+        oldest.remove();
+    }
+
+    const toast = document.createElement('div');
+    toast.dataset.keywordId = kwId;
+    toast.dataset.captionIndex = String(captionIndex);
+    toast.style.cssText = `
+        background: rgba(28, 28, 30, 0.96); color: #eee;
+        border-left: 4px solid #ff9800; border-radius: 8px;
+        padding: 0; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-size: 13px; line-height: 1.4; pointer-events: auto; cursor: pointer;
+        opacity: 0; transform: translateX(100%);
+        transition: opacity 0.3s ease, transform 0.3s ease;
+        max-width: 420px; word-break: break-word; overflow: hidden;
+    `;
+
+    const contextHTML = buildToastContextHTML(contextLines, keyword);
+
+    toast.innerHTML = `
+        <div style="background:linear-gradient(135deg,#ff9800,#f57c00);padding:8px 14px;display:flex;align-items:center;">
+            <span style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#fff;flex:1;">
+                Keyword Alert
+            </span>
+            <span style="font-size:11px;color:rgba(255,255,255,0.8);font-weight:600;margin-right:8px;">
+                "${_kwEsc(keyword)}"
+            </span>
+            <button class="kw-toast-close-btn" title="Dismiss" style="
+                background:none; border:none; color:rgba(255,255,255,0.7); cursor:pointer;
+                font-size:16px; line-height:1; padding:0 2px; font-family:inherit;
+                transition:color 0.15s;
+            ">&times;</button>
+        </div>
+        <div class="kw-toast-context" style="padding:8px 6px 4px 6px;">${contextHTML}</div>
+        <div style="padding:4px 14px 10px;text-align:right;border-top:1px solid rgba(255,255,255,0.08);">
+            <button class="kw-toast-view-btn" style="
+                background:none; border:1px solid rgba(255,152,0,0.5); color:#ff9800;
+                border-radius:4px; padding:3px 10px; font-size:11px; cursor:pointer;
+                font-family:inherit; transition:background 0.2s, color 0.2s;
+            ">View in Transcript</button>
+        </div>
+    `;
+
+    // X close button
+    const closeBtn = toast.querySelector('.kw-toast-close-btn');
+    closeBtn.addEventListener('mouseenter', () => { closeBtn.style.color = '#fff'; });
+    closeBtn.addEventListener('mouseleave', () => { closeBtn.style.color = 'rgba(255,255,255,0.7)'; });
+    closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeToast(toast);
+    });
+
+    // "View in Transcript" button
+    const viewBtn = toast.querySelector('.kw-toast-view-btn');
+    viewBtn.addEventListener('mouseenter', () => { viewBtn.style.background = 'rgba(255,152,0,0.15)'; viewBtn.style.color = '#ffb74d'; });
+    viewBtn.addEventListener('mouseleave', () => { viewBtn.style.background = 'none'; viewBtn.style.color = '#ff9800'; });
+    viewBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openViewerAtCaption(captionIndex);
+        removeToast(toast);
+    });
+
+    container.appendChild(toast);
+
+    // Slide in
+    requestAnimationFrame(() => {
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateX(0)';
+    });
+
+    // Start live content updates (300ms refresh for 30 seconds)
+    startToastLiveUpdates(toast, keyword);
+
+    // --- Auto-dismiss after 30 seconds; hover pauses ---
+    function startDismissTimer() {
+        toast._kwDismissTimer = setTimeout(() => removeToast(toast), (kwSettings.toastDismissSeconds || 45) * 1000);
+    }
+    startDismissTimer();
+
+    toast.addEventListener('mouseenter', () => {
+        clearTimeout(toast._kwDismissTimer);
+    });
+    toast.addEventListener('mouseleave', () => {
+        startDismissTimer();
+    });
+
+    // Click body to dismiss (but not on buttons)
+    toast.addEventListener('click', () => removeToast(toast));
+}
+
+// Clean up all timers on a toast element
+function cleanupToastTimers(toast) {
+    if (toast._kwDismissTimer) clearTimeout(toast._kwDismissTimer);
+    if (toast._kwLiveInterval) clearInterval(toast._kwLiveInterval);
+    if (toast._kwLiveTimeout) clearTimeout(toast._kwLiveTimeout);
+}
+
+function removeToast(toast) {
+    cleanupToastTimers(toast);
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateX(100%)';
+    setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+}
+
+// Dismiss all keyword toasts (called on meeting end)
+function dismissAllKeywordToasts() {
+    const container = document.getElementById('kw-toast-container');
+    if (!container) return;
+    while (container.firstChild) {
+        cleanupToastTimers(container.firstChild);
+        container.firstChild.remove();
+    }
+}
 
 // --- Duplicate Caption Detection (Time-Windowed) ---
 // Map to track recent captions: key = hash(speaker+text), value = timestamp
@@ -704,10 +1017,18 @@ chrome.storage.sync.get('timestampFormat').then(result => {
     console.warn('[Caption Saver] Could not load timestamp format, using default:', error.message);
 });
 
-// Listen for changes to timestamp format
+// Listen for changes to timestamp format and keyword settings
 chrome.storage.onChanged.addListener((changes, namespace) => {
-    if (namespace === 'sync' && changes.timestampFormat) {
-        timestampFormat = changes.timestampFormat.newValue;
+    if (namespace === 'sync') {
+        if (changes.timestampFormat) {
+            timestampFormat = changes.timestampFormat.newValue;
+        }
+        if (changes.hotKeywords) {
+            kwGlobalKeywords = changes.hotKeywords.newValue || {};
+        }
+        if (changes.hotKeywordSettings) {
+            kwSettings = { ...kwSettings, ...(changes.hotKeywordSettings.newValue || {}) };
+        }
     }
 });
 
@@ -1272,6 +1593,7 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                             timestamp: new Date().toISOString() // Add timestamp
                         };
                         transcriptArray.push(newCaption);
+                        checkKeywordAndNotify(newCaption);
 
                         // Log if capturing while hidden (helps diagnose lock screen behavior)
                         if (document.hidden) {
@@ -1294,7 +1616,8 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                         if (existingEntry.Text !== text) {
                             existingEntry.Text = text;
                             existingEntry.Time = time;
-                            
+                            debouncedKeywordCheck(existingEntry);
+
                             // Broadcast update to viewer
                             broadcastCaptionUpdate({
                                 type: 'update',
@@ -1307,6 +1630,7 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                     if (existingEntry.Text !== text) {
                         existingEntry.Text = text;
                         existingEntry.Time = time;
+                        debouncedKeywordCheck(existingEntry);
                         // Broadcast update to viewer
                         broadcastCaptionUpdate({
                             type: 'update',
@@ -1325,6 +1649,7 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                     timestamp: new Date().toISOString() // Add timestamp for Zoom tracking
                 };
                 transcriptArray.push(newCaption);
+                checkKeywordAndNotify(newCaption);
 
                 // Log if capturing while hidden (helps diagnose lock screen behavior)
                 if (document.hidden) {
@@ -1935,6 +2260,7 @@ function captureChatMessages(skipInitialMessages = false) {
 
         // Add to transcript array in chronological position
         transcriptArray.push(chatMessage);
+        checkKeywordAndNotify(chatMessage);
         chatCaptureState.capturedMessageIds.add(messageData.id);
         newCount++;
 
@@ -2806,7 +3132,9 @@ async function startCaptureSession() {
 
     console.log("New caption session detected. Starting capture.");
     transcriptArray.length = 0;
-    
+    kwLastAlerts = {};
+    dismissAllKeywordToasts();
+
     // Note: Speaker aliases are now managed per-session in the viewer
     // No need to clear global aliases here
 
@@ -2975,6 +3303,9 @@ async function stopCaptureSession() {
         observer = null;
     }
     observedElement = null;
+
+    // Dismiss any lingering keyword alert toasts
+    dismissAllKeywordToasts();
 
     // Stop chat capture if it's running
     if (chatCaptureState.enabled) {
