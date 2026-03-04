@@ -1652,7 +1652,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 sendResponse({ success: true });
                 break;
-                
+
+
             case 'save_recording_transcript':
                 // Store recording transcript from network interceptor
                 try {

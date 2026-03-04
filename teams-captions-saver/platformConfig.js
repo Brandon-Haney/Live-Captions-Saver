@@ -103,21 +103,25 @@ const PLATFORM_CONFIGS = {
                 const chatButton = document.querySelector('[data-inp="chat-button"]');
                 if (chatButton) {
                     chatButton.click();
-                    await new Promise(resolve => setTimeout(resolve, 500));
                     return true;
                 }
                 return false;
             },
-            
+
+            // Selector to confirm chat panel is visible after clicking
+            chatPanelSelector: '#chat-pane-list, [data-tid="message-pane-list-viewport"]',
+
             openPeoplePanel: async () => {
                 const peopleButton = document.querySelector('[data-tid="calling-roster-button"], button[aria-label*="People"]');
                 if (peopleButton) {
                     peopleButton.click();
-                    await new Promise(resolve => setTimeout(resolve, 500));
                     return true;
                 }
                 return false;
             },
+
+            // Selector to confirm people panel is visible after clicking
+            peoplePanelSelector: '[data-tid="calling-roster"], .fui-FlatTree[role="tree"][aria-label="Attendees"]',
             
             isUserTyping: () => {
                 const chatInput = document.querySelector(
@@ -157,7 +161,8 @@ const PLATFORM_CONFIGS = {
                 // Look for images in Teams messages using the correct selectors
                 // Teams now uses file-attachment-grid structure for shared photos
                 const images = msgElement.querySelectorAll('img[data-tid="rich-file-preview-image"], .fui-Image, img[data-tid*="lazy-image"], img[itemtype="http://schema.skype.com/AMSImage"]');
-                console.log(`[Teams Chat] Found ${images.length} images in message ${messageId}`);
+                // Only log when images are actually found to avoid spam on meetings with chat history
+                if (images.length > 0) console.log(`[Teams Chat] Found ${images.length} images in message ${messageId}`);
                 images.forEach(img => {
                     // Skip avatars, emojis, and icons
                     if (img.src &&
@@ -723,11 +728,13 @@ const PLATFORM_CONFIGS = {
                 const chatButton = document.querySelector('button[aria-label*="Chat"][data-panel-id="2"]');
                 if (chatButton && chatButton.getAttribute('aria-expanded') !== 'true') {
                     chatButton.click();
-                    await new Promise(resolve => setTimeout(resolve, 500));
                     return true;
                 }
                 return false;
             },
+
+            // Selector to confirm chat panel is visible after clicking
+            chatPanelSelector: '.RLrADb[data-message-id], .Ss4fHf, button[aria-label*="Chat"][data-panel-id="2"][aria-expanded="true"]',
 
             openPeoplePanel: async () => {
                 // Use queryWithSelectorArray for peopleButton
@@ -735,11 +742,13 @@ const PLATFORM_CONFIGS = {
                 const peopleButton = queryWithSelectorArray(meetConfig?.selectors?.peopleButton);
                 if (peopleButton && peopleButton.getAttribute('aria-expanded') !== 'true') {
                     peopleButton.click();
-                    await new Promise(resolve => setTimeout(resolve, 500));
                     return true;
                 }
                 return false;
             },
+
+            // Selector to confirm people panel is visible after clicking
+            peoplePanelSelector: '.m3Uzve.RJRKn, .m3Uzve.LkEdie',
             
             isUserTyping: () => {
                 // Check for active chat input in Google Meet
@@ -1516,21 +1525,25 @@ const PLATFORM_CONFIGS = {
                 const chatButton = document.querySelector('#chat button[aria-label*="open the chat"]');
                 if (chatButton) {
                     chatButton.click();
-                    await new Promise(resolve => setTimeout(resolve, 500));
                     return true;
                 }
                 return false;
             },
-            
+
+            // Selector to confirm chat panel is visible after clicking
+            chatPanelSelector: '.chat-container, .chat-virtualized-list',
+
             openPeoplePanel: async () => {
                 const peopleButton = document.querySelector('#participant button[aria-label*="manage participants"]');
                 if (peopleButton && !document.querySelector('.participants-section-container')) {
                     peopleButton.click();
-                    await new Promise(resolve => setTimeout(resolve, 500));
                     return true;
                 }
                 return false;
             },
+
+            // Selector to confirm people panel is visible after clicking
+            peoplePanelSelector: '.participants-section-container',
             
             isUserTyping: () => {
                 // Check for active chat input in Zoom
