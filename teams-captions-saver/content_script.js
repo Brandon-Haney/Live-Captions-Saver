@@ -360,6 +360,44 @@ let captionsObserver = null;
 let cachedElements = new Map();
 let autoEnableInProgress = false;
 let autoEnableLastAttempt = 0;
+
+// --- Silent AudioContext for Background Tab Throttle Prevention ---
+// Chrome applies intensive throttling to background tabs after 5 minutes,
+// but exempts tabs that are playing audio. This silent AudioContext keeps
+// the tab in Chrome's "minimal throttling" tier so MutationObserver-based
+// caption capture continues working when the tab is hidden.
+let antiThrottleAudioCtx = null;
+let antiThrottleOscillator = null;
+
+function startAntiThrottle() {
+    if (antiThrottleAudioCtx) return; // Already running
+    try {
+        antiThrottleAudioCtx = new AudioContext();
+        antiThrottleOscillator = antiThrottleAudioCtx.createOscillator();
+        const gain = antiThrottleAudioCtx.createGain();
+        // Inaudible: 1Hz frequency at near-zero volume
+        antiThrottleOscillator.frequency.setValueAtTime(1, antiThrottleAudioCtx.currentTime);
+        gain.gain.setValueAtTime(0.0001, antiThrottleAudioCtx.currentTime);
+        antiThrottleOscillator.connect(gain);
+        gain.connect(antiThrottleAudioCtx.destination);
+        antiThrottleOscillator.start();
+        Logger.info('[Caption Saver] Anti-throttle audio started (background tab protection)');
+    } catch (e) {
+        Logger.warn('[Caption Saver] Failed to start anti-throttle audio:', e.message);
+    }
+}
+
+function stopAntiThrottle() {
+    if (antiThrottleOscillator) {
+        try { antiThrottleOscillator.stop(); } catch (e) { /* already stopped */ }
+        antiThrottleOscillator = null;
+    }
+    if (antiThrottleAudioCtx) {
+        try { antiThrottleAudioCtx.close(); } catch (e) { /* already closed */ }
+        antiThrottleAudioCtx = null;
+    }
+    Logger.info('[Caption Saver] Anti-throttle audio stopped');
+}
 let autoEnableDebounceTimer = null;
 let autoSaveTriggered = false;
 let lastMeetingId = null;
@@ -988,6 +1026,42 @@ class RetryHandler {
 
 // --- Utility Functions ---
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Reactively wait for a DOM element to appear using MutationObserver.
+ * Returns immediately if the element already exists.
+ * @param {string} selector - CSS selector to wait for
+ * @param {Element|Document} context - Parent element to observe (default: document)
+ * @param {number} timeout - Max wait time in ms (default: 5000)
+ * @returns {Promise<Element>} The found element
+ */
+function waitForElement(selector, context = document, timeout = 5000) {
+    return new Promise((resolve, reject) => {
+        const existing = (context === document ? document : context).querySelector(selector);
+        if (existing) return resolve(existing);
+
+        const observeTarget = context === document ? document.body : context;
+        const obs = new MutationObserver(() => {
+            const el = (context === document ? document : context).querySelector(selector);
+            if (el) {
+                obs.disconnect();
+                clearTimeout(timer);
+                resolve(el);
+            }
+        });
+
+        obs.observe(observeTarget, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+        });
+
+        const timer = setTimeout(() => {
+            obs.disconnect();
+            reject(new Error(`waitForElement timeout: ${selector}`));
+        }, timeout);
+    });
+}
 
 // Create shallow copy before mapping to prevent issues from concurrent mutation
 const getCleanTranscript = () => [...transcriptArray].map(({ key, ...rest }) => rest);
@@ -2191,26 +2265,40 @@ function captureChatMessages(skipInitialMessages = false) {
     let newCount = 0;
     let skippedCount = 0;
 
+    const YEAR_2000_MS = 946684800000;
+    const sessionStartMs = chatCaptureState.sessionStartTime ? chatCaptureState.sessionStartTime.getTime() : null;
+    const bufferMs = 30000; // 30 second buffer
+
     messages.forEach(msgElement => {
+        // Early rejection: check message ID/timestamp BEFORE expensive getChatMessageData()
+        const rawId = msgElement.getAttribute?.('data-mid') || msgElement.getAttribute?.('data-message-id') || msgElement.getAttribute?.('data-id');
+        if (rawId && chatCaptureState.capturedMessageIds.has(rawId)) {
+            return;
+        }
+
+        // Early rejection: skip old messages by timestamp before processing DOM
+        if (rawId && !isNaN(rawId) && sessionStartMs) {
+            const msgTimestamp = parseInt(rawId, 10);
+            if (msgTimestamp > YEAR_2000_MS && msgTimestamp < (sessionStartMs - bufferMs)) {
+                chatCaptureState.capturedMessageIds.add(rawId);
+                skippedCount++;
+                return;
+            }
+        }
+
         const messageData = platformConfig.chatCapture.getChatMessageData(msgElement);
         if (!messageData || !messageData.id) return;
 
-        // Skip if already captured or marked as pre-existing
+        // Skip if already captured (handles IDs that differ from raw attribute)
         if (chatCaptureState.capturedMessageIds.has(messageData.id)) {
             return;
         }
 
-        // Filter out messages that are older than session start time
-        // This prevents capturing old messages from recurring meetings
-        if (messageData.timestamp && chatCaptureState.sessionStartTime) {
-            const sessionStartMs = chatCaptureState.sessionStartTime.getTime();
-            // Allow 30 second buffer before session start (for timing variations)
-            const bufferMs = 30000;
+        // Filter out old messages using parsed timestamp as fallback
+        if (messageData.timestamp && sessionStartMs) {
             if (messageData.timestamp < (sessionStartMs - bufferMs)) {
-                // This is an old message from before we joined - skip it
                 chatCaptureState.capturedMessageIds.add(messageData.id);
                 skippedCount++;
-                console.log(`[Chat Capture] Skipping old message from ${new Date(messageData.timestamp).toLocaleString()} (before session start ${chatCaptureState.sessionStartTime.toLocaleString()})`);
                 return;
             }
         }
@@ -2288,15 +2376,41 @@ function captureChatMessages(skipInitialMessages = false) {
 async function openChatPanel() {
     if (!platformConfig?.chatCapture?.isSupported()) return false;
     if (platformConfig.chatCapture.detectCurrentPanel() === 'chat') return true;
-    
-    return await platformConfig.chatCapture.openChatPanel();
+
+    const clicked = await platformConfig.chatCapture.openChatPanel();
+    if (!clicked) return false;
+
+    // Wait reactively for the chat panel to appear
+    const selector = platformConfig.chatCapture.chatPanelSelector;
+    if (selector) {
+        try {
+            await waitForElement(selector, document, 3000);
+        } catch {
+            // Fallback: short delay if selector not found
+            await delay(300);
+        }
+    }
+    return true;
 }
 
 async function openPeoplePanel() {
     if (!platformConfig?.chatCapture?.isSupported()) return false;
     if (platformConfig.chatCapture.detectCurrentPanel() === 'people') return true;
-    
-    return await platformConfig.chatCapture.openPeoplePanel();
+
+    const clicked = await platformConfig.chatCapture.openPeoplePanel();
+    if (!clicked) return false;
+
+    // Wait reactively for the people panel to appear
+    const selector = platformConfig.chatCapture.peoplePanelSelector;
+    if (selector) {
+        try {
+            await waitForElement(selector, document, 3000);
+        } catch {
+            // Fallback: short delay if selector not found
+            await delay(300);
+        }
+    }
+    return true;
 }
 
 // Track typing postponement to prevent infinite recursion
@@ -2333,13 +2447,12 @@ async function performHybridRotation() {
     try {
         const currentPanel = detectCurrentPanel();
         
-        // Quick attendee check
+        // Quick attendee check (openPeoplePanel now waits reactively)
         if (await openPeoplePanel()) {
             updateAttendeeList();
-            await new Promise(resolve => setTimeout(resolve, 500));
         }
-        
-        // Return to chat (our primary panel)
+
+        // Return to chat (openChatPanel now waits reactively)
         if (await openChatPanel()) {
             captureChatMessages(false);  // Normal capture, not initial scan
         }
@@ -2376,11 +2489,9 @@ async function startChatCapture() {
         // Google Meet: Simpler approach since panels can coexist
         // console.log('[Chat Capture] Google Meet mode - monitoring chat continuously');
         
-        // Open chat panel initially if not already open
+        // Open chat panel initially if not already open (waits reactively)
         const chatOpened = await openChatPanel();
         if (chatOpened) {
-            // console.log('[Chat Capture] Opened chat panel for monitoring');
-            await delay(1000);
             // Mark all existing messages as "already seen" on first capture
             captureChatMessages(true);  // Skip initial messages
             chatCaptureState.initialScanComplete = true;
@@ -2394,22 +2505,16 @@ async function startChatCapture() {
         
     } else {
         // Teams and other platforms: Use hybrid rotation
-        // console.log('[Chat Capture] Step 1: Checking People panel for initial attendees');
+        // openPeoplePanel now waits reactively for panel to appear
         await openPeoplePanel();
-        await delay(1500); // Give time for panel to fully load
-        
+
         // Capture initial attendees
         const peoplePanel = document.querySelector('.fui-FlatTree[role="tree"][aria-label="Attendees"], .ts-calling-participants-grid-container');
         if (peoplePanel) {
-            // console.log('[Chat Capture] Capturing initial attendee list');
-            updateAttendeeList(); // Use existing attendee capture function
+            updateAttendeeList();
         }
-        
-        // Then switch to chat panel for ongoing capture
-        // console.log('[Chat Capture] Step 2: Switching to Chat panel for message capture');
-        await delay(500);
-        
-        // Start on chat panel
+
+        // Switch to chat panel (waits reactively)
         openChatPanel().then(() => {
             // Initial scan - mark existing messages as seen but don't capture
             captureChatMessages(true);  // Skip initial messages
@@ -3142,6 +3247,9 @@ async function startCaptureSession() {
     wasInMeeting = true; // Ensure we know we're in a meeting when capturing starts
     currentMeetingTitle = extractMeetingTitle();
     recordingStartTime = new Date();
+
+    // Start silent audio to prevent Chrome from throttling this tab in the background
+    startAntiThrottle();
     
     console.log(`Capture started. Title: "${currentMeetingTitle}", Time: ${recordingStartTime.toLocaleString()}`);
     
@@ -3298,6 +3406,7 @@ async function stopCaptureSession() {
 
     console.log("Captions turned off or meeting ended. Capture stopped. Data preserved.");
     capturing = false;
+    stopAntiThrottle();
     if (observer) {
         observer.disconnect();
         observer = null;
@@ -3430,38 +3539,45 @@ async function attemptAutoEnableCaptions() {
                 console.error("Auto-enable FAILED: Could not find 'More' button.");
                 return;
             }
-            
+
             // Check if More menu is already expanded
             const expandedMoreButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
             if (!expandedMoreButton) {
                 console.log("Clicking More button...");
                 moreButton.click();
-                await delay(TIMING.BUTTON_CLICK_DELAY);
+                // Wait reactively for the menu to expand
+                try {
+                    await waitForElement(SELECTORS.MORE_BUTTON_EXPANDED);
+                } catch {
+                    console.error("Auto-enable FAILED: More menu did not expand.");
+                    return;
+                }
             } else {
                 console.log("More menu already expanded, proceeding...");
             }
 
-            const langAndSpeechButton = getCachedElement(SELECTORS.LANGUAGE_SPEECH_BUTTON);
-            if (!langAndSpeechButton) {
+            // Wait reactively for Language and speech menu item
+            let langAndSpeechButton;
+            try {
+                langAndSpeechButton = await waitForElement(SELECTORS.LANGUAGE_SPEECH_BUTTON);
+            } catch {
                 console.error("Auto-enable FAILED: Could not find 'Language and speech' menu item.");
-                // Close the More menu if we opened it
                 const currentExpandedButton = getCachedElement(SELECTORS.MORE_BUTTON_EXPANDED);
                 if (currentExpandedButton) {
                     currentExpandedButton.click();
                 }
                 return;
             }
-            
+
             console.log("Clicking Language and speech...");
             langAndSpeechButton.click();
-            await delay(TIMING.BUTTON_CLICK_DELAY);
 
-            const turnOnCaptionsButton = getCachedElement(SELECTORS.TURN_ON_CAPTIONS_BUTTON);
-            if (turnOnCaptionsButton) {
+            // Wait reactively for Turn on captions button
+            try {
+                const turnOnCaptionsButton = await waitForElement(SELECTORS.TURN_ON_CAPTIONS_BUTTON);
                 console.log("Clicking Turn on live captions...");
                 turnOnCaptionsButton.click();
-                await delay(TIMING.BUTTON_CLICK_DELAY);
-            } else {
+            } catch {
                 console.error("Auto-enable FAILED: Could not find 'Turn on live captions' button.");
             }
 
@@ -3491,7 +3607,7 @@ function debouncedAutoEnableCaptions() {
 
     autoEnableDebounceTimer = setTimeout(() => {
         attemptAutoEnableCaptions();
-    }, 2000); // 2 second debounce to prevent rapid firing
+    }, 500); // 500ms debounce to prevent rapid firing
 }
 
 // Debounced badge update to prevent excessive messages
@@ -3988,6 +4104,7 @@ window.addEventListener('message', (event) => {
             console.error('[Recording Transcript] Failed to send to service worker:', err);
         });
     }
+
 });
 
 // Live Caption Saver content script is running
