@@ -19,16 +19,51 @@
         DEBUG: true  // Set to false after testing
     };
 
-    // Selectors for the "Stay signed in" dialog
+    // Selectors for the "Stay signed in" dialog.
+    // IMPORTANT: keep these narrow. Broad matches like `button.ms-Button--primary`
+    // previously matched unrelated primary buttons (e.g. the "Join" button on the
+    // Teams calendar iframe embedded from outlook.office.com) and caused the
+    // extension to auto-join the first meeting of the day. All matches are also
+    // gated by `isInSignInContext()` below as a second line of defense.
     const DIALOG_SELECTORS = [
         'button[data-automationid="keep-signed-in"]',
-        'input[value="Yes"]',
-        'button:contains("Stay signed in")',
         '[aria-label="Stay signed in"]',
-        'button.ms-Button--primary',
-        '#idSIButton9', // Common Microsoft "Yes" button ID
+        '#idSIButton9', // Common Microsoft "Yes" button ID on login.microsoftonline.com
         'input#idSIButton9'
     ];
+
+    // Hosts where a "Stay signed in" style dialog can legitimately appear.
+    // On other hosts we rely entirely on dialog/modal context + text matching.
+    const SIGN_IN_HOSTS = [
+        'login.microsoftonline.com',
+        'login.live.com',
+        'login.microsoft.com'
+    ];
+
+    /**
+     * Returns true if the given element is inside a sign-in / keep-signed-in
+     * context. Used to avoid clicking unrelated primary buttons on pages like
+     * the Teams calendar (embedded via outlook.office.com) where a generic
+     * "primary" button might be the meeting "Join" action.
+     */
+    function isInSignInContext(el) {
+        if (!el) return false;
+
+        // On the dedicated login hosts, the whole page is the sign-in context.
+        if (SIGN_IN_HOSTS.includes(window.location.hostname)) {
+            return true;
+        }
+
+        // Otherwise the button must live inside an actual modal/dialog.
+        const dialog = el.closest('[role="dialog"], [role="alertdialog"], .ms-Dialog, .ms-Modal');
+        if (!dialog) return false;
+
+        // And the dialog text should mention the specific sign-in prompt.
+        const dialogText = (dialog.textContent || '').toLowerCase();
+        return dialogText.includes('stay signed in') ||
+               dialogText.includes('keep me signed in') ||
+               dialogText.includes('keep you signed in');
+    }
 
     let keepAliveTimer = null;
     let dialogCheckTimer = null;
@@ -174,27 +209,10 @@
         // Look for common timeout dialog elements
         for (const selector of DIALOG_SELECTORS) {
             try {
-                let button = null;
-
-                // Handle :contains pseudo-selector manually
-                if (selector.includes(':contains(')) {
-                    const match = selector.match(/:contains\("([^"]+)"\)/);
-                    if (match) {
-                        const text = match[1];
-                        const baseSelector = selector.replace(/:contains\("[^"]+"\)/, '');
-                        const elements = document.querySelectorAll(baseSelector || 'button');
-                        for (const el of elements) {
-                            if (el.textContent.includes(text)) {
-                                button = el;
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    button = document.querySelector(selector);
-                }
-
-                if (button && button.offsetParent !== null) { // Check if visible
+                const button = document.querySelector(selector);
+                if (button &&
+                    button.offsetParent !== null && // visible
+                    isInSignInContext(button)) {
                     clickButtonWithDelay(button, selector);
                     return true;
                 }
@@ -203,19 +221,21 @@
             }
         }
 
-        // Also look for dialogs by text content
+        // Also look for dialogs by text content. All three branches now
+        // require the button to be inside an actual sign-in dialog — the
+        // previous `||`/`&&` precedence bug let "stay signed in" match
+        // anywhere on the page.
         const allButtons = document.querySelectorAll('button, input[type="button"], input[type="submit"]');
         for (const btn of allButtons) {
-            const text = (btn.textContent || btn.value || '').toLowerCase();
-            if (text.includes('stay signed in') ||
-                text.includes('keep me signed in') ||
-                text.includes('yes') && btn.closest('[role="dialog"]')) {
+            const text = (btn.textContent || btn.value || '').toLowerCase().trim();
+            const textMatches =
+                text === 'yes' ||
+                text.includes('stay signed in') ||
+                text.includes('keep me signed in');
 
-                // Make sure it's visible
-                if (btn.offsetParent !== null) {
-                    clickButtonWithDelay(btn, `text: "${text}"`);
-                    return true;
-                }
+            if (textMatches && btn.offsetParent !== null && isInSignInContext(btn)) {
+                clickButtonWithDelay(btn, `text: "${text}"`);
+                return true;
             }
         }
 
