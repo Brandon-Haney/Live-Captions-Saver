@@ -2,6 +2,15 @@
 
 All notable changes to the Live Captions Saver extension will be documented in this file.
 
+## [5.3.4] - 2026-04-07
+
+### Fixed
+- **M365 Keep-Alive auto-joining Teams meetings**: The keep-alive dialog detector was clicking unrelated primary buttons, causing the Teams calendar to auto-open the pre-join screen for the first meeting of the day
+  - Root cause: `button.ms-Button--primary` in `DIALOG_SELECTORS` matched any Fluent primary button. Because `m365_keepalive.js` runs inside the `outlook.office.com` iframe embedded in Teams v2 calendar (with `all_frames: true`), it was finding and clicking the calendar's "Join" button
+  - Removed the overly-broad `button.ms-Button--primary` selector and the unreliable `:contains()` / `input[value="Yes"]` entries
+  - Added `isInSignInContext()` gate: on non-login hosts, candidate buttons must live inside an actual `[role="dialog"]` / `.ms-Dialog` whose text mentions "stay signed in" or "keep me signed in" before the script will click them
+  - Fixed an operator precedence bug in the text-based fallback where `text.includes('stay signed in') || text.includes('keep me signed in') || text.includes('yes') && btn.closest('[role="dialog"]')` let the first two branches match anywhere on the page; all three branches now require sign-in dialog context
+
 ## [5.3.3] - 2026-02-20
 
 ### Enhanced
