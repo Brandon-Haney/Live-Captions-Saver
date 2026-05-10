@@ -1,5 +1,6 @@
 teams-captions-saver.pem
-teams-captions-saver/.vscode/settings.json
+.vscode/
+.claude/settings.local.json
 /teams-captions-saver/.claude
 CLAUDE.md
 /CLAUDE.md
