@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Teams Transcript Viewer</title>
+    <title>Live Transcript Viewer</title>
     <style>
         :root {
             --primary-color: #0078d4;
@@ -39,8 +39,53 @@
             margin-top: 0;
             margin-bottom: 24px;
             position: relative;
+            font-size: 24px;
+            color: var(--primary-text-color);
         }
-        
+
+        /* Meeting title styling */
+        .meeting-title {
+            display: block;
+            font-size: 18px;
+            color: var(--secondary-text-color);
+            font-weight: normal;
+            margin-top: 8px;
+            padding: 8px 16px;
+            background-color: #f8f9fa;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+        }
+
+        /* Platform badge styling */
+        .platform-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            margin: 0 10px;
+            letter-spacing: 0.5px;
+            vertical-align: middle;
+            position: relative;
+            top: -1px;
+            text-transform: uppercase;
+        }
+
+        /* Platform-specific colors */
+        .platform-badge[data-platform="TEAMS"] {
+            background: linear-gradient(135deg, #5059c9, #7b68ee);
+        }
+
+        .platform-badge[data-platform="MEET"] {
+            background: linear-gradient(135deg, #0f9d58, #34a853);
+        }
+
+        .platform-badge[data-platform="ZOOM"] {
+            background: linear-gradient(135deg, #2d8cff, #0b5cff);
+        }
+
         /* Live Indicator Styles */
         .live-indicator {
             display: inline-flex;
@@ -203,6 +248,102 @@
             border-bottom: 1px solid #f0f0f0;
             position: relative;
         }
+        
+        /* Chat message styling */
+        .chat-message {
+            background-color: #f0f7ff;
+            border-left: 3px solid #0078d4;
+            padding-left: 12px;
+            margin: 4px 0;
+        }
+        
+        .chat-message:hover {
+            background-color: #e6f3ff;
+        }
+        
+        /* Caption message styling */
+        .caption-message {
+            background-color: transparent;
+        }
+
+        .caption-message:hover {
+            background-color: #f8f9fa;
+        }
+
+        /* Attendance event styling */
+        .attendance-event {
+            background-color: #f8f9fa;
+            border-left: 3px solid #9ca3af;
+            padding: 8px 12px;
+            margin: 8px 0;
+            text-align: center;
+            font-style: italic;
+            color: #6b7280;
+            border-radius: 4px;
+        }
+
+        .attendance-event:hover {
+            background-color: #f0f1f3;
+        }
+
+        .attendance-event .attendance-icon {
+            display: inline-block;
+            margin-right: 6px;
+            font-style: normal;
+        }
+
+        .attendance-event.joined {
+            border-left-color: #10b981;
+            background-color: #f0fdf4;
+            color: #065f46;
+        }
+
+        .attendance-event.joined:hover {
+            background-color: #dcfce7;
+        }
+
+        .attendance-event.left {
+            border-left-color: #ef4444;
+            background-color: #fef2f2;
+            color: #991b1b;
+        }
+
+        .attendance-event.left:hover {
+            background-color: #fee2e2;
+        }
+
+        .attendance-event .name {
+            font-weight: 600;
+            font-style: normal;
+        }
+
+        .attendance-event .time {
+            font-size: 0.85em;
+            opacity: 0.8;
+            margin-left: 8px;
+        }
+
+        /* Message type icon */
+        .message-type {
+            display: inline-flex;
+            align-items: center;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        .message-type svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        .chat-message .message-type svg {
+            stroke: #0078d4;
+        }
+        
+        .caption-message .message-type svg {
+            stroke: #666;
+        }
+        
         .caption:last-child {
             border-bottom: none;
         }
@@ -211,22 +352,31 @@
             opacity: 1;
         }
 
+        .caption-content {
+            display: block;
+            overflow: visible; /* Allow image hover effects to scale without clipping */
+        }
         .caption-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: baseline;
-            margin-bottom: 6px;
+            display: inline;
+            margin-right: 6px;
         }
         .name {
             font-weight: bold;
             color: var(--primary-color);
         }
+        .name::after {
+            content: ":";
+            margin-right: 6px;
+        }
         .time {
             font-size: 0.85em;
             color: var(--secondary-text-color);
+            float: right;
+            margin-left: 10px;
         }
         .text {
             color: var(--primary-text-color);
+            display: inline;
         }
 
         .copy-btn {
@@ -375,13 +525,833 @@
             font-size: 13px;
             color: #6c757d;
         }
+        
+        /* Speaker Alias Styles */
+        .editable-speaker {
+            cursor: pointer;
+            padding: 2px 4px;
+            border-radius: 3px;
+            transition: background-color 0.2s;
+            display: inline-block;
+        }
+        
+        .editable-speaker:hover {
+            background-color: rgba(0, 120, 212, 0.1);
+        }
+        
+        .editable-speaker.has-alias {
+            font-style: italic;
+            color: #0078d4;
+        }
+        
+        .speaker-alias-input {
+            padding: 2px 4px;
+            border: 2px solid #0078d4;
+            border-radius: 3px;
+            font-size: inherit;
+            font-family: inherit;
+            outline: none;
+        }
+        
+        /* New Caption Indicator */
+        .new-caption-indicator {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+            display: none;
+        }
+        
+        .new-caption-indicator button {
+            padding: 10px 20px;
+            background: #0078d4;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            box-shadow: 0 4px 12px rgba(0, 120, 212, 0.3);
+            animation: pulse 2s infinite;
+        }
+        
+        .new-caption-indicator button:hover {
+            background: #106ebe;
+        }
+        
+        /* Viewer Controls */
+        #viewer-controls {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        
+        #viewer-controls input[type="checkbox"] {
+            margin-right: 5px;
+        }
+        
+        #scroll-to-bottom-btn:hover {
+            background: #106ebe !important;
+        }
+        
+        /* Speaker Filter Button Styles */
+        .speaker-filter-btn {
+            position: relative;
+            padding: 6px 24px 6px 12px;
+            margin-right: 5px;
+            border: 1px solid #ccc;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .speaker-filter-btn:hover {
+            background: #f0f0f0;
+        }
+        
+        .speaker-filter-btn.active {
+            background: #0078d4;
+            color: white;
+            border-color: #0078d4;
+        }
+        
+        .speaker-filter-btn .speaker-edit-icon {
+            position: absolute;
+            top: 2px;
+            right: 4px;
+            font-size: 10px;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+        }
+        
+        .speaker-filter-btn:hover .speaker-edit-icon {
+            opacity: 1;
+        }
+        
+        .speaker-filter-btn.active .speaker-edit-icon {
+            opacity: 0.8;
+        }
+        
+        /* Keep has-alias style for captions */
+        .name.has-alias {
+            font-style: italic;
+            color: #0078d4;
+        }
+
+        /* Image Attachment Styles */
+        .attachment-container {
+            margin-top: 10px;
+            display: block; /* Changed from flex to block for better natural flow */
+            width: 100%;
+            overflow: visible; /* Allow child thumbnails to scale on hover without clipping */
+        }
+
+        .attachment-container > .attachment-thumbnail {
+            margin: 10px 0; /* Space between images */
+        }
+
+        .attachment-thumbnail {
+            position: relative;
+            cursor: pointer;
+            border-radius: 8px;
+            overflow: visible; /* Allow images to show at full size */
+            display: inline-block;
+            border: 2px solid #374151;
+            transition: all 0.3s ease;
+            background: #1a1a1a;
+            max-width: calc(100vw - 150px); /* Prevent horizontal overflow, account for padding/margins */
+        }
+
+        .attachment-thumbnail:hover {
+            transform: scale(1.02);
+            border-color: #60A5FA;
+            box-shadow: 0 4px 12px rgba(96, 165, 250, 0.3);
+            z-index: 10; /* Ensure hover effect appears above other content */
+        }
+
+        .attachment-thumbnail img {
+            display: block;
+            width: auto;
+            height: auto;
+            max-width: 100%;
+            max-height: 70vh; /* Only limit height to prevent excessive scrolling */
+            object-fit: scale-down; /* Show at original size if it fits, scale down if too large */
+            border-radius: 6px;
+        }
+
+        .attachment-filename {
+            position: absolute;
+            bottom: 2px; /* Slight offset from border */
+            left: 2px;
+            right: 2px;
+            background: linear-gradient(to top, rgba(0, 0, 0, 0.9), rgba(0, 0, 0, 0.7));
+            color: white;
+            padding: 8px 10px;
+            font-size: 12px;
+            border-radius: 0 0 4px 4px;
+            backdrop-filter: blur(5px);
+            pointer-events: none; /* Don't interfere with image click */
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Image Modal */
+        .image-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 10000;
+            justify-content: center;
+            align-items: center;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .image-modal.active {
+            display: flex;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .image-modal-content {
+            max-width: 90%;
+            max-height: 90%;
+            position: relative;
+            animation: zoomIn 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        @keyframes zoomIn {
+            from { transform: scale(0.8); }
+            to { transform: scale(1); }
+        }
+
+        .image-modal img {
+            max-width: 90vw;
+            max-height: 85vh;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        .image-modal-close {
+            position: absolute;
+            top: -40px;
+            right: -40px;
+            color: white;
+            font-size: 36px;
+            font-weight: bold;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 10px;
+            transition: transform 0.3s ease;
+        }
+
+        .image-modal-close:hover {
+            transform: scale(1.2);
+        }
+
+        .image-modal-caption {
+            position: absolute;
+            bottom: -40px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            color: white;
+            font-size: 14px;
+            padding: 10px;
+        }
+
+        .attachment-icon {
+            display: inline-block;
+            margin-left: 5px;
+            opacity: 0.7;
+        }
+
+        /* ========================================
+           HOT KEYWORD DETECTION STYLES
+           ======================================== */
+
+        /* Keywords button badge */
+        .keyword-badge {
+            background: #ff6b00;
+            color: white;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 10px;
+            margin-left: 4px;
+            font-weight: 600;
+        }
+
+        /* Keyword Settings Modal */
+        #keywordModal .modal-content {
+            max-width: 520px;
+        }
+
+        /* Toggle switch */
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+            flex-shrink: 0;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: 0.3s;
+            border-radius: 24px;
+        }
+
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: 0.3s;
+            border-radius: 50%;
+        }
+
+        input:checked + .toggle-slider {
+            background-color: #28a745;
+        }
+
+        input:checked + .toggle-slider:before {
+            transform: translateX(20px);
+        }
+
+        /* Keyword modal info banner */
+        .keyword-info-banner {
+            background: linear-gradient(135deg, #e8f4fd 0%, #f0f7ff 100%);
+            border: 1px solid #b8daff;
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        .keyword-info-banner svg {
+            flex-shrink: 0;
+            color: #0078d4;
+            margin-top: 1px;
+        }
+
+        .keyword-info-banner p {
+            margin: 0;
+            font-size: 13px;
+            color: #1a5a96;
+            line-height: 1.4;
+        }
+
+        /* Keyword section cards */
+        .keyword-section-card {
+            background: #fff;
+            border: 1px solid #e5e5e5;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 12px;
+        }
+
+        .keyword-section-card:last-of-type {
+            margin-bottom: 0;
+        }
+
+        .keyword-section-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 14px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .keyword-section-header svg {
+            color: #666;
+            flex-shrink: 0;
+        }
+
+        .keyword-section-header .section-title {
+            font-weight: 600;
+            font-size: 14px;
+            color: #333;
+        }
+
+        .keyword-section-header .section-subtitle {
+            font-size: 12px;
+            color: #888;
+            margin-left: 4px;
+        }
+
+        .keyword-section-header .keyword-count {
+            margin-left: auto;
+            background: #e9ecef;
+            color: #666;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        .keyword-section-header .keyword-count.has-items {
+            background: #d4edda;
+            color: #28a745;
+        }
+
+        /* Keyword input section */
+        .keyword-input-section {
+            margin-bottom: 12px;
+        }
+
+        .keyword-input-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        .keyword-input-row input {
+            flex: 1;
+            padding: 10px 14px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .keyword-input-row input:focus {
+            outline: none;
+            border-color: #28a745;
+            box-shadow: 0 0 0 3px rgba(40, 167, 69, 0.15);
+        }
+
+        .keyword-input-row .btn-add {
+            padding: 10px 18px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+
+        .keyword-input-row .btn-add:hover {
+            background: #218838;
+        }
+
+        .keyword-input-row .btn-add:active {
+            transform: scale(0.98);
+        }
+
+        .keyword-input-hint {
+            font-size: 11px;
+            color: #888;
+            margin-top: 6px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .keyword-input-hint kbd {
+            background: #e9ecef;
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-family: inherit;
+            font-size: 10px;
+        }
+
+        /* Keyword tags/chips */
+        .keyword-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            max-height: 120px;
+            overflow-y: auto;
+            padding: 4px 0;
+        }
+
+        .keyword-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: linear-gradient(135deg, #f8f9fa 0%, #fff 100%);
+            border: 1px solid #e0e0e0;
+            border-radius: 20px;
+            padding: 6px 10px 6px 14px;
+            font-size: 13px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .keyword-tag:hover {
+            border-color: #ccc;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .keyword-tag .keyword-text {
+            font-weight: 500;
+            color: #333;
+        }
+
+        .keyword-tag .tag-actions {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .keyword-tag .tag-toggle {
+            width: 32px;
+            height: 18px;
+        }
+
+        .keyword-tag .tag-toggle .toggle-slider {
+            border-radius: 18px;
+        }
+
+        .keyword-tag .tag-toggle .toggle-slider:before {
+            height: 14px;
+            width: 14px;
+            left: 2px;
+            bottom: 2px;
+        }
+
+        .keyword-tag .tag-toggle input:checked + .toggle-slider:before {
+            transform: translateX(14px);
+        }
+
+        .keyword-tag .delete-btn {
+            background: none;
+            border: none;
+            color: #999;
+            cursor: pointer;
+            padding: 2px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s, background 0.2s;
+        }
+
+        .keyword-tag .delete-btn:hover {
+            color: #dc3545;
+            background: #fee2e6;
+        }
+
+        .keyword-tag.disabled {
+            opacity: 0.5;
+        }
+
+        .keyword-tag.disabled .keyword-text {
+            text-decoration: line-through;
+        }
+
+        /* Empty state */
+        .empty-keywords {
+            text-align: center;
+            padding: 20px 16px;
+            color: #999;
+        }
+
+        .empty-keywords svg {
+            color: #ddd;
+            margin-bottom: 8px;
+        }
+
+        .empty-keywords p {
+            margin: 0;
+            font-size: 13px;
+        }
+
+        /* Settings card */
+        .keyword-settings-card {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 14px 16px;
+            margin-bottom: 16px;
+        }
+
+        .keyword-settings-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+        }
+
+        .keyword-settings-row:first-child {
+            padding-top: 0;
+        }
+
+        .keyword-settings-row:last-child {
+            padding-bottom: 0;
+        }
+
+        .keyword-settings-row .setting-label {
+            font-size: 13px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .keyword-settings-row .setting-label svg {
+            color: #666;
+        }
+
+        .keyword-settings-row.sub-setting {
+            padding-left: 28px;
+        }
+
+        .keyword-settings-row.sub-setting .setting-label {
+            color: #666;
+            font-size: 12px;
+        }
+
+        .keyword-context-select {
+            padding: 5px 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 12px;
+            background: white;
+        }
+
+        /* Caption keyword highlight */
+        .caption.keyword-highlight {
+            background-color: #fff3cd !important;
+            border-left: 4px solid #ff6b00 !important;
+            animation: keywordPulse 0.5s ease-out;
+        }
+
+        @keyframes keywordPulse {
+            0% { background-color: #ff6b00; }
+            100% { background-color: #fff3cd; }
+        }
+
+        .keyword-match {
+            background: #ff6b00;
+            color: white;
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-weight: 500;
+        }
+
+        /* Page flash effect */
+        .page-flash {
+            animation: pageFlash 0.3s ease-out;
+        }
+
+        @keyframes pageFlash {
+            0% { filter: brightness(1); }
+            50% { filter: brightness(1.3); }
+            100% { filter: brightness(1); }
+        }
+
+        /* Keyword Alert Overlay */
+        .keyword-alert-overlay {
+            display: none;
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            max-width: 420px;
+            animation: slideInFromRight 0.3s ease-out;
+        }
+
+        .keyword-alert-overlay.active {
+            display: block;
+        }
+
+        @keyframes slideInFromRight {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        @keyframes alertPulse {
+            0% { transform: scale(1); box-shadow: 0 4px 20px rgba(230, 126, 34, 0.3); }
+            50% { transform: scale(1.02); box-shadow: 0 4px 30px rgba(230, 126, 34, 0.6); }
+            100% { transform: scale(1); box-shadow: 0 4px 20px rgba(230, 126, 34, 0.3); }
+        }
+
+        .keyword-alert-content {
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+            border-left: 4px solid #ff6b00;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .keyword-alert-header {
+            background: linear-gradient(135deg, #ff6b00 0%, #ff9500 100%);
+            color: white;
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .keyword-alert-icon {
+            background: white;
+            color: #ff6b00;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .keyword-alert-title {
+            font-weight: 600;
+            font-size: 15px;
+        }
+
+        .keyword-alert-keyword {
+            font-size: 12px;
+            opacity: 0.9;
+            margin-left: auto;
+            margin-right: 28px;  /* Make room for close button */
+            background: rgba(255,255,255,0.2);
+            padding: 2px 8px;
+            border-radius: 10px;
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .keyword-alert-close {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: none;
+            border: none;
+            color: white;
+            font-size: 20px;
+            cursor: pointer;
+            opacity: 0.8;
+            padding: 4px;
+            line-height: 1;
+        }
+
+        .keyword-alert-close:hover {
+            opacity: 1;
+        }
+
+        .keyword-alert-context {
+            padding: 16px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 13px;
+            line-height: 1.5;
+            background: #f8f9fa;
+        }
+
+        .keyword-alert-context .context-line {
+            padding: 6px 0;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .keyword-alert-context .context-line:last-child {
+            border-bottom: none;
+        }
+
+        .keyword-alert-context .context-line.highlight {
+            background: #fff3cd;
+            padding: 8px 10px;
+            margin: 4px -10px;
+            border-radius: 4px;
+            font-weight: 500;
+            border-bottom: none;
+        }
+
+        .keyword-alert-context .context-speaker {
+            color: var(--primary-color);
+            font-weight: 600;
+        }
+
+        .keyword-alert-context .context-time {
+            float: right;
+            font-size: 11px;
+            color: #999;
+        }
+
+        .keyword-alert-actions {
+            padding: 12px 16px;
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            border-top: 1px solid #e9ecef;
+            background: white;
+        }
+
+        .keyword-alert-actions button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .keyword-alert-actions .btn-primary {
+            background: var(--primary-color);
+            color: white;
+            border: none;
+        }
+
+        .keyword-alert-actions .btn-primary:hover {
+            background: #005a9e;
+        }
+
+        .keyword-alert-actions .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+            border: 1px solid #ddd;
+        }
+
+        .keyword-alert-actions .btn-secondary:hover {
+            background: #e0e0e0;
+        }
     </style>
+    <script src="keywordEngine.js"></script>
+    <script src="sessionManager.js"></script>
     <script src="viewer.js" defer></script>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Teams Transcript</h1>
+            <h1>Live Transcript</h1>
             <div class="controls">
                 <input type="search" id="search-box" placeholder="Search transcript..." aria-label="Search transcript">
                 <div id="speaker-filters" class="speaker-filters">
@@ -406,6 +1376,13 @@
                         </svg>
                         History
                     </button>
+                    <button id="keywords-btn" class="export-btn" title="Configure keyword alerts">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                        </svg>
+                        Keywords
+                        <span id="keyword-count-badge" class="keyword-badge" style="display: none;">0</span>
+                    </button>
                 </div>
             </div>
         </header>
@@ -423,6 +1400,182 @@
             </div>
             <div id="sessionListModal">
                 <div style="text-align: center; color: #999;">Loading sessions...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Image Modal -->
+    <div class="image-modal" id="imageModal">
+        <div class="image-modal-content">
+            <button class="image-modal-close" id="imageModalClose">&times;</button>
+            <img id="modalImage" src="" alt="">
+            <div class="image-modal-caption" id="modalCaption"></div>
+        </div>
+    </div>
+
+    <!-- Hot Keyword Settings Modal -->
+    <div id="keywordModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Hot Keyword Alerts</h2>
+                <span class="close-modal close-keyword-modal">&times;</span>
+            </div>
+
+            <!-- Info Banner -->
+            <div class="keyword-info-banner">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                </svg>
+                <p>Get notified when specific words appear in the transcript. Perfect for catching when your name is mentioned or tracking key topics.</p>
+            </div>
+
+            <!-- Settings Card -->
+            <div class="keyword-settings-card">
+                <div class="keyword-settings-row">
+                    <span class="setting-label">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/>
+                        </svg>
+                        Enable keyword alerts
+                    </span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="keywordMasterToggle" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div id="keywordOptions">
+                    <div class="keyword-settings-row sub-setting">
+                        <span class="setting-label">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M7 2v11h3v9l7-12h-4l4-8z"/>
+                            </svg>
+                            Flash page on detection
+                        </span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="keywordFlashToggle" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="keyword-settings-row sub-setting">
+                        <span class="setting-label">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/>
+                            </svg>
+                            Context lines
+                        </span>
+                        <select id="keywordContextLines" class="keyword-context-select">
+                            <option value="3">3 lines</option>
+                            <option value="5" selected>5 lines</option>
+                            <option value="7">7 lines</option>
+                            <option value="10">10 lines</option>
+                        </select>
+                    </div>
+                    <div class="keyword-settings-row sub-setting">
+                        <span class="setting-label">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/>
+                            </svg>
+                            Alert overlay
+                        </span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="keywordOverlayToggle" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="keyword-settings-row sub-setting">
+                        <span class="setting-label">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/>
+                            </svg>
+                            Overlay duration
+                        </span>
+                        <select id="keywordOverlayDuration" class="keyword-context-select">
+                            <option value="15">15s</option>
+                            <option value="30">30s</option>
+                            <option value="45" selected>45s</option>
+                            <option value="60">60s</option>
+                            <option value="90">90s</option>
+                            <option value="120">120s</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Global Keywords Section -->
+            <div class="keyword-section-card">
+                <div class="keyword-section-header">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                    </svg>
+                    <span class="section-title">Global Keywords</span>
+                    <span class="section-subtitle">saved across sessions</span>
+                    <span id="globalKeywordCount" class="keyword-count">0</span>
+                </div>
+                <div class="keyword-input-section">
+                    <div class="keyword-input-row">
+                        <input type="text" id="globalKeywordInput" placeholder="Enter keyword (e.g., your name)" maxlength="100">
+                        <button id="addGlobalKeywordBtn" class="btn-add">Add</button>
+                    </div>
+                    <div class="keyword-input-hint">
+                        Press <kbd>Enter</kbd> to add quickly
+                    </div>
+                </div>
+                <div id="globalKeywordList" class="keyword-list">
+                    <div class="empty-keywords">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+                        </svg>
+                        <p>No global keywords yet</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Session Keywords Section -->
+            <div class="keyword-section-card">
+                <div class="keyword-section-header">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/>
+                    </svg>
+                    <span class="section-title">Session Keywords</span>
+                    <span class="section-subtitle">cleared when viewer closes</span>
+                    <span id="sessionKeywordCount" class="keyword-count">0</span>
+                </div>
+                <div class="keyword-input-section">
+                    <div class="keyword-input-row">
+                        <input type="text" id="sessionKeywordInput" placeholder="Add keyword for this meeting only" maxlength="100">
+                        <button id="addSessionKeywordBtn" class="btn-add">Add</button>
+                    </div>
+                    <div class="keyword-input-hint">
+                        Press <kbd>Enter</kbd> to add quickly
+                    </div>
+                </div>
+                <div id="sessionKeywordList" class="keyword-list">
+                    <div class="empty-keywords">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+                        </svg>
+                        <p>No session keywords yet</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Keyword Alert Overlay -->
+    <div id="keywordAlertOverlay" class="keyword-alert-overlay">
+        <div class="keyword-alert-content">
+            <button class="keyword-alert-close">&times;</button>
+            <div class="keyword-alert-header">
+                <span class="keyword-alert-icon">!</span>
+                <span class="keyword-alert-title">Keyword Detected</span>
+                <span id="keywordAlertKeyword" class="keyword-alert-keyword"></span>
+            </div>
+            <div id="keywordAlertContext" class="keyword-alert-context">
+                <!-- Context lines populated dynamically -->
+            </div>
+            <div class="keyword-alert-actions">
+                <button id="keywordAlertDismiss" class="btn-secondary">Dismiss</button>
+                <button id="keywordAlertScrollTo" class="btn-primary">Scroll to Caption</button>
             </div>
         </div>
     </div>

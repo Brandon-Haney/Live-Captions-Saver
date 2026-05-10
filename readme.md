@@ -1,8 +1,8 @@
 ![](IMG/logo.png)
 
-# MS Teams Live Captions Saver Browser Extension v4.5
+# Live Captions Saver Browser Extension v5.2
 
-The MS Teams Live Captions Saver is a powerful Chrome extension that captures, saves, and analyzes live captions from Microsoft Teams meetings. With advanced features like AI-powered summaries, speaker tracking, attendee monitoring, and automated exports, it's the perfect tool for meeting documentation and accessibility.
+The Live Captions Saver is a powerful Chrome extension that captures, saves, and exports live captions from Microsoft Teams, Google Meet, and Zoom meetings. With advanced features like AI-ready formatting with custom prompts, speaker tracking, attendee monitoring, and automated exports, it's the perfect tool for meeting documentation and accessibility across all major video conferencing platforms.
 
 ## Key Features
 
@@ -11,25 +11,36 @@ The MS Teams Live Captions Saver is a powerful Chrome extension that captures, s
 - **Multiple Export Formats** - Save as TXT, Markdown, JSON, YAML, DOC, or AI-optimized formats
 - **Speaker Identification & Aliasing** - Track who said what with customizable speaker names
 - **Attendee Tracking** - Monitor meeting participants with join/leave timestamps
+- **Smart Attendee Fallback** - Automatically generates attendee lists from speakers when tracking is disabled
 - **Auto-Save on Meeting End** - Never lose your transcripts with automatic saving
 
 ### Advanced Features
-- **AI-Powered Templates** - 9 built-in meeting templates (Standup, Retrospective, Planning, etc.)
-- **Custom AI Instructions** - Create and save your own AI analysis templates
+- **AI-Ready Export Format** - Prepend custom instructions/prompts to transcripts for use with ChatGPT, Claude, or other AI tools
+- **9 Built-in AI Templates** - Pre-written prompts for common meeting types (Standup, Retrospective, Planning, etc.)
+- **Custom AI Instructions** - Create and save your own reusable AI analysis prompts
 - **Meeting Analytics Dashboard** - View speaker participation, word counts, and statistics
 - **Live Transcript Viewer** - Search and filter transcripts in real-time
+- **Recording Transcript Downloader** - Automatically captures Teams recording transcripts when they become available
+- **Format Selection Dialogs** - Choose export format (TXT/JSON/Markdown/AI) for all save methods
+- **Enhanced Markdown Exports** - Comprehensive metadata headers with meeting info and speaker grouping
 - **Customizable Filename Patterns** - Use variables like {date}, {time}, {title}, {attendees}
 - **Multiple Timestamp Formats** - Choose between 12-hour, 24-hour, or relative timestamps
 
 ## Install from the Chrome Store
 
-[MS Teams Live Captions Saver - Chrome Web Store](https://chromewebstore.google.com/detail/ms-teams-live-captions-sa/ffjfmokaelmhincapcajcnaoelgmpoih)
+[Live Captions Saver - Chrome Web Store](https://chromewebstore.google.com/detail/ms-teams-live-captions-sa/ffjfmokaelmhincapcajcnaoelgmpoih)
+
+## Supported Platforms
+
+- **Microsoft Teams** - https://teams.microsoft.com
+- **Google Meet** - https://meet.google.com
+- **Zoom** - https://zoom.us (web client)
 
 ## Quick Start
 
 ### Using the Extension
 
-1. **Navigate to Microsoft Teams** in your browser: https://teams.microsoft.com
+1. **Navigate to your meeting platform** (Teams, Meet, or Zoom)
 2. **Join a meeting**
 3. **The extension will automatically enable live captions** (if auto-start is enabled)
 4. **Capture is automatic** - The extension starts recording once captions appear
@@ -77,8 +88,8 @@ Click "View Transcript" to open the interactive viewer with:
 - **Timestamp Format Options** - Customize time display format
 - **Filename Pattern Variables** - Create dynamic file names
 
-### AI Customization
-- **9 Built-in Templates**:
+### AI Export Preparation
+- **9 Built-in Prompt Templates**:
   - Executive Summary
   - Daily Standup
   - Sprint Retrospective
@@ -88,8 +99,9 @@ Click "View Transcript" to open the interactive viewer with:
   - All Hands Meeting
   - One-on-One
   - Brainstorming Session
-- **Custom Templates** - Save your own AI prompts for reuse
-- **Quick Template Buttons** - One-click access to common analyses
+- **Custom Templates** - Create and save your own AI prompts for reuse
+- **Quick Template Buttons** - One-click access to common prompt templates
+- **Note**: Extension prepares transcript with instructions - you paste into your preferred AI tool (ChatGPT, Claude, etc.)
 
 ## Standalone Console Script
 
@@ -114,20 +126,59 @@ For environments where browser extensions cannot be installed:
 
 ## Export Formats
 
+All export methods (Previous Sessions, Live Viewer, Recording Transcripts) now offer consistent format selection dialogs.
+
 ### Standard Formats
-- **TXT** - Plain text with timestamps
-- **Markdown** - Formatted with speaker sections
-- **JSON** - Structured data with metadata
+- **TXT** - Plain text with attendee section and timestamps
+- **Markdown** - Enhanced with comprehensive metadata headers, meeting title, platform info, speaker grouping with H3 headings, and blockquote formatting
+- **JSON** - Structured data array with proper 2-space indentation
 - **YAML** - Human-readable structured format
-- **DOC** - Microsoft Word document
+- **DOC** - Microsoft Word document with HTML formatting
 
 ### AI-Optimized Format
-Includes special formatting and instructions for AI analysis:
-- Meeting context and metadata
-- Structured transcript for LLM processing
-- Template-specific prompts
-- Action item extraction
-- Decision tracking
+Prepares transcript for pasting into AI tools (ChatGPT, Claude, etc.):
+- Meeting context and metadata header
+- Attendee list (tracked or auto-generated from speakers)
+- Structured transcript with compact spacing optimized for LLM context windows
+- Template-specific prompts prepended to transcript (e.g., "Extract action items...", "Summarize key decisions...")
+- User copies entire file content and pastes into their AI tool of choice
+- Files include `-AI` suffix for easy identification
+- **Note**: Extension does NOT perform AI analysis - it only formats the transcript with instructions for you to use
+
+## Consistent File Structure
+
+All exported files follow a consistent structure across all platforms (Teams, Meet, Zoom):
+
+### Standard File Structure
+```
+=== MEETING ATTENDEES ===
+Total Attendees: [number]
+Meeting Start: [date/time]
+
+Attendee List:
+- [Attendee Name 1]
+- [Attendee Name 2]
+...
+
+=== TRANSCRIPT ===
+[timestamp] Speaker Name: Caption text
+[CHAT] [timestamp] Speaker Name: Chat message
+...
+```
+
+### Features Consistent Across Platforms
+- **Attendee Tracking** - Lists all participants with join/leave history, or auto-generates from speakers if tracking disabled
+- **Caption Capture** - Real-time transcription with speaker identification
+- **Chat Integration** - Chat messages marked with [CHAT] prefix
+- **Timestamp Formats** - Respects user's chosen format (12hr/24hr/relative)
+- **Speaker Aliases** - Custom names applied consistently
+- **Export Formats** - All formats available for all platforms with consistent format selection dialogs
+- **Filename Sanitization** - Consistent naming across all save/export methods
+
+### Platform-Specific Notes
+- **Teams**: Full feature support with robust attendee tracking
+- **Google Meet**: Speaker detection from captions and participant list
+- **Zoom**: Requires web client; attendee tracking via participant panel
 
 ## Manual Installation (Developer Mode)
 
@@ -201,6 +252,7 @@ This extension captures and saves live captions from meetings, which may include
 - Enable "Track Attendees" in settings
 - Ensure roster panel is accessible
 - Note: Only shows current participants
+- Even if tracking is disabled, attendee section will be auto-generated from speakers
 
 ## License
 
@@ -221,6 +273,25 @@ For issues, feature requests, or questions:
 
 ---
 
-**Version:** 4.5  
-**Last Updated:** August 2025  
+**Version:** 5.2
+**Last Updated:** November 2025
 **Compatibility:** Chrome/Edge/Brave with Manifest V3
+
+## What's New in v5.2
+
+### Enhanced Export Experience
+- **Format Selection Dialogs** - All export methods (Previous Sessions, Live Viewer, Recording Transcripts) now prompt you to choose your preferred format
+- **Enhanced Markdown Format** - Comprehensive metadata headers with meeting title, platform, attendee count, timestamps, and beautifully formatted speaker sections with blockquotes
+- **Smart Attendee Fallback** - Even if attendee tracking is disabled, exports automatically generate attendee lists from unique speakers in the transcript
+
+### Recording Transcript Downloader
+- **Automatic Capture** - Intercepts Teams recording transcripts when you play recordings
+- **Multiple Formats** - Download as JSON, TXT, or Markdown with one click
+- **Badge Notifications** - See at-a-glance how many transcripts are available
+- **24-Hour Storage** - Captured transcripts stored temporarily with automatic cleanup
+
+### Quality Improvements
+- **Consistent Filenames** - Standardized filename generation across all export methods with proper sanitization
+- **AI Format Enhancement** - Compact output with `-AI` suffix for easy identification
+- **Reduced Console Noise** - Minimized repetitive logging when browsing Teams outside of meetings
+- **Better Error Handling** - Fixed async message channel errors for more reliable exports
