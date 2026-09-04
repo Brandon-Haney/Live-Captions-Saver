@@ -423,6 +423,76 @@
             transform: rotate(15deg);
         }
 
+        /* ===== STORAGE ===== */
+        .storage-section {
+            margin-top: 15px;
+            padding: 10px 12px;
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+        }
+
+        .storage-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+
+        .storage-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #666;
+        }
+
+        .storage-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: #666;
+            margin-top: 6px;
+        }
+
+        .storage-row .storage-value {
+            color: #333;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .storage-bar {
+            position: relative;
+            height: 8px;
+            background: #eceff3;
+            border-radius: 4px;
+            margin-top: 4px;
+            overflow: hidden;
+        }
+
+        .storage-bar-fill {
+            height: 100%;
+            width: 0;
+            background: #28a745;
+            border-radius: 4px;
+            transition: width 0.3s ease, background 0.3s ease;
+        }
+
+        .storage-bar-fill.warn { background: #ffc107; }
+        .storage-bar-fill.danger { background: #dc3545; }
+
+        .storage-bar-mark {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: rgba(0, 0, 0, 0.25);
+        }
+
+        .storage-hint {
+            font-size: 10px;
+            color: #999;
+            margin-top: 6px;
+            line-height: 1.4;
+        }
+
         .session-item {
             background: white;
             border: 1px solid #e0e0e0;
@@ -836,6 +906,26 @@
                     <!-- Sessions dynamically added here -->
                 </div>
             </div>
+
+            <!-- Storage -->
+            <div class="storage-section" id="storage-section">
+                <div class="storage-header">
+                    <span class="storage-title">💾 Storage</span>
+                    <button id="freeUpSpaceBtn" class="small-btn" title="Remove orphaned data and meetings beyond the retention limit">Free up space</button>
+                </div>
+                <div class="storage-row">
+                    <span id="storage-total-label">Meetings</span>
+                    <span class="storage-value" id="storage-total-text">…</span>
+                </div>
+                <div class="storage-bar" id="storage-bar" title="Transcripts and images against your storage budget (Settings > Storage)">
+                    <div class="storage-bar-fill" id="storage-total-fill"></div>
+                </div>
+                <div class="storage-row">
+                    <span>Transcripts · Images</span>
+                    <span class="storage-value" id="storage-breakdown-text">…</span>
+                </div>
+                <div class="storage-hint" id="storage-hint"></div>
+            </div>
         </div>
 
         <!-- SETTINGS TAB -->
@@ -958,6 +1048,16 @@
                     </select>
                 </div>
                 <div class="setting-row">
+                    <div>
+                        <span class="setting-label">Include Images with Exports</span>
+                        <div style="font-size: 10px; color: #888; margin-top: 1px;">TXT, Markdown, JSON and AI exports become a .zip with a slides/ folder that the transcript references by path. HTML always embeds images</div>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="exportImagesToggle">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="setting-row">
                     <span class="setting-label">Timestamp Format</span>
                     <select id="timestampFormat">
                         <option value="12hr">12-hour</option>
@@ -969,6 +1069,25 @@
                     <label for="filenamePattern">Filename Pattern</label>
                     <input type="text" id="filenamePattern" value="{date}_{title}_{format}" placeholder="{date}_{title}_{format}">
                     <div class="input-hint">{date}, {time}, {title}, {format}, {attendees}</div>
+                </div>
+            </div>
+
+            <!-- Storage Settings -->
+            <div class="settings-group">
+                <div class="settings-group-header">Storage</div>
+                <div class="setting-row">
+                    <div>
+                        <span class="setting-label">Storage Budget</span>
+                        <div style="font-size: 10px; color: #888; margin-top: 1px;">Transcripts and images together. When exceeded, the oldest ended meetings are deleted first. Active meetings are never removed</div>
+                    </div>
+                    <select id="storageBudgetSelect" style="width: auto;">
+                        <option value="50">50 MB</option>
+                        <option value="100" selected>100 MB</option>
+                        <option value="250">250 MB</option>
+                        <option value="500">500 MB</option>
+                        <option value="1024">1 GB</option>
+                        <option value="0">Unlimited</option>
+                    </select>
                 </div>
             </div>
 

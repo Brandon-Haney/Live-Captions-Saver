@@ -150,6 +150,34 @@
         return usage;
     }
 
+    /**
+     * Byte total and count per session in one pass, plus the overall total.
+     * Returns { total: { count, bytes }, bySession: { [sessionId]: { count, bytes } } }.
+     */
+    async function usageBySession() {
+        const result = { total: { count: 0, bytes: 0 }, bySession: {} };
+        const db = await openDb();
+        const store = db.transaction(STORE).objectStore(STORE);
+        await new Promise((resolve, reject) => {
+            const cursorReq = store.openCursor();
+            cursorReq.onsuccess = () => {
+                const cursor = cursorReq.result;
+                if (!cursor) { resolve(); return; }
+                const rec = cursor.value;
+                const bytes = rec.bytes || 0;
+                const key = rec.sessionId || 'unknown';
+                if (!result.bySession[key]) result.bySession[key] = { count: 0, bytes: 0 };
+                result.bySession[key].count++;
+                result.bySession[key].bytes += bytes;
+                result.total.count++;
+                result.total.bytes += bytes;
+                cursor.continue();
+            };
+            cursorReq.onerror = () => reject(cursorReq.error);
+        });
+        return result;
+    }
+
     /** Delete one image. */
     async function remove(id) {
         if (!id) return;
@@ -223,6 +251,7 @@
         listBySession,
         findByHash,
         sessionUsage,
+        usageBySession,
         remove,
         deleteBySession,
         pruneOrphans,

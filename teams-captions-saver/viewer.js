@@ -1763,7 +1763,17 @@ document.addEventListener('DOMContentLoaded', () => {
         return visibleCaptions;
     }
     
-    function formatTranscriptForExport(captions, format = 'txt', userRecordingStartTime = null) {
+    // Relative paths of packaged image files for an entry (zip export), "" when none
+    function imageRefsFor(entry, imagePaths) {
+        if (!imagePaths) return '';
+        const refs = [];
+        if (entry.Type === 'slide' && entry.imageId && imagePaths[entry.imageId]) refs.push(imagePaths[entry.imageId]);
+        (entry.attachments || []).forEach(att => { if (att && att.imageId && imagePaths[att.imageId]) refs.push(imagePaths[att.imageId]); });
+        return refs.length ? ` -> ${refs.join(', ')}` : '';
+    }
+
+    // imagePaths: imageId -> relative file path inside the zip (only when images are packaged)
+    function formatTranscriptForExport(captions, format = 'txt', userRecordingStartTime = null, imagePaths = {}) {
         if (!captions || captions.length === 0) {
             return format === 'json' ? '[]' : 'No captions to export.';
         }
@@ -1771,7 +1781,17 @@ document.addEventListener('DOMContentLoaded', () => {
         if (format === 'srt') {
             return formatAsSrt(captions, userRecordingStartTime);
         } else if (format === 'json') {
-            return JSON.stringify(captions, null, 2);
+            const hasPaths = imagePaths && Object.keys(imagePaths).length > 0;
+            const data = !hasPaths ? captions : captions.map(entry => {
+                const copy = { ...entry };
+                if (entry.imageId && imagePaths[entry.imageId]) copy.imageFile = imagePaths[entry.imageId];
+                if (Array.isArray(entry.attachments)) {
+                    copy.attachments = entry.attachments.map(att => (att && att.imageId && imagePaths[att.imageId])
+                        ? { ...att, imageFile: imagePaths[att.imageId] } : att);
+                }
+                return copy;
+            });
+            return JSON.stringify(data, null, 2);
         } else if (format === 'md') {
             // Build Markdown with metadata header
             let content = '';
@@ -1809,6 +1829,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     content += `\n### ${typeIndicator}${entry.Name}\n\n`;
                 }
                 content += `> **[${entry.Time}]** ${entry.Text}\n\n`;
+                // Packaged images (zip export) as Markdown images
+                if (entry.Type === 'slide' && entry.imageId && imagePaths[entry.imageId]) {
+                    content += `![Slide ${entry.slideNumber || ''}](${imagePaths[entry.imageId]})\n\n`;
+                }
+                (entry.attachments || []).forEach(att => {
+                    if (att && att.imageId && imagePaths[att.imageId]) {
+                        content += `![${att.filename || 'attachment'}](${imagePaths[att.imageId]})\n\n`;
+                    }
+                });
             });
 
             return content;
@@ -1877,9 +1906,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (entry.Type === 'attendance') {
                     return `[${entry.Time}] ● ${entry.Name} ${entry.Text}`;
                 } else if (entry.Type === 'chat') {
-                    return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+                    return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}${imageRefsFor(entry, imagePaths)}`;
                 } else if (entry.Type === 'slide') {
-                    return `[SLIDE] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+                    return `[SLIDE] [${entry.Time}] ${entry.Name}: ${entry.Text}${imageRefsFor(entry, imagePaths)}`;
                 } else {
                     return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
                 }
@@ -1929,6 +1958,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const { format, userRecordingStartTime } = result;
 
+        // "Include images with exports": package text formats with their images as a zip
+        let imageFiles = [];
+        let imagePaths = {};
+        if (typeof ExportPackage !== 'undefined' && ExportPackage.TEXT_FORMATS.includes(format) && ExportPackage.hasImages(visibleCaptions)) {
+            try {
+                const { exportImages } = await chrome.storage.sync.get('exportImages');
+                if (exportImages) {
+                    await hydrateImages(visibleCaptions);
+                    const images = {};
+                    TranscriptRenderer.collectImageIds(visibleCaptions).forEach(id => { if (imageCache[id]) images[id] = imageCache[id]; });
+                    ({ files: imageFiles, paths: imagePaths } = await ExportPackage.collectImageFiles(visibleCaptions, images));
+                }
+            } catch (err) {
+                console.warn('[Viewer] Could not prepare images for export, saving text only:', err);
+                imageFiles = [];
+                imagePaths = {};
+            }
+        }
+
         // Create download
         let content;
         if (format === 'html') {
@@ -1946,7 +1994,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 includeAttendance: false // visible list already contains merged join/leave rows
             });
         } else {
-            content = formatTranscriptForExport(visibleCaptions, format, userRecordingStartTime);
+            content = formatTranscriptForExport(visibleCaptions, format, userRecordingStartTime, imagePaths);
         }
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
@@ -1965,7 +2013,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const filterSuffix = currentFilteredSpeaker ? `-filtered-${currentFilteredSpeaker.replace(/[^a-z0-9]/gi, '_')}` : '';
 
         // Build filename: {date}_{title}{filterSuffix}_{time}.{extension}
-        const filename = `${dateStr}_${cleanTitle}${filterSuffix}_${timeStr}.${format}`;
+        const baseName = `${dateStr}_${cleanTitle}${filterSuffix}_${timeStr}`;
+        let filename = `${baseName}.${format}`;
 
         try {
             let mimeType;
@@ -1979,7 +2028,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 // txt and srt both use text/plain
                 mimeType = 'text/plain';
             }
-            const blob = new Blob([content], { type: mimeType });
+            let blob;
+            if (imageFiles.length > 0) {
+                // Transcript + images travel together as <name>.zip
+                const zip = ExportPackage.buildZip([{ name: filename, data: content }, ...imageFiles]);
+                blob = new Blob([zip], { type: 'application/zip' });
+                filename = `${baseName}.zip`;
+            } else {
+                blob = new Blob([content], { type: mimeType });
+            }
             const url = URL.createObjectURL(blob);
 
             try {

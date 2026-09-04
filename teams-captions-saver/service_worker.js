@@ -1,5 +1,5 @@
 // --- Import SessionManager ---
-importScripts('sessionManager.js', 'imageStore.js', 'transcriptRenderer.js');
+importScripts('sessionManager.js', 'imageStore.js', 'transcriptRenderer.js', 'exportPackage.js');
 const sessionManager = new SessionManager();
 
 // Constants for documented magic numbers
@@ -55,22 +55,14 @@ function parseSafeTimestamp(timestampValue) {
 }
 
 // Storage quota management
-const QUOTA_THRESHOLD = 0.9; // 90% of quota limit
-
+// The manifest requests "unlimitedStorage", so chrome.storage.local.QUOTA_BYTES (10 MB)
+// no longer applies. Space is governed by the user's storage budget in
+// sessionManager.enforceBudget(); this check only logs usage and never blocks a save.
 async function checkStorageQuota() {
     try {
         const usage = await chrome.storage.local.getBytesInUse();
-        const limit = chrome.storage.local.QUOTA_BYTES;
-        const percentUsed = usage / limit;
-
-        console.log(`[Storage] Usage: ${usage} bytes / ${limit} bytes (${(percentUsed * 100).toFixed(1)}%)`);
-
-        if (percentUsed > QUOTA_THRESHOLD) {
-            console.warn(`[Storage] Quota threshold exceeded: ${(percentUsed * 100).toFixed(1)}%`);
-            return { exceeded: true, usage, limit, percentUsed };
-        }
-
-        return { exceeded: false, usage, limit, percentUsed };
+        console.log(`[Storage] chrome.storage.local usage: ${(usage / 1024 / 1024).toFixed(2)} MB (unlimitedStorage granted)`);
+        return { exceeded: false, usage, limit: Infinity, percentUsed: 0 };
     } catch (error) {
         console.error('[checkStorageQuota] Failed to check quota:', error);
         return { exceeded: false, error: error.message };
@@ -221,7 +213,7 @@ function validateTranscriptInput(transcript) {
     );
 }
 
-function formatAsTxt(transcript, attendeeReport) {
+function formatAsTxt(transcript, attendeeReport, imagePaths = {}) {
     const validTranscript = validateTranscriptInput(transcript);
     let content = '';
 
@@ -336,9 +328,9 @@ function formatAsTxt(transcript, attendeeReport) {
             // Format: [TIME] ● Name joined/left the meeting
             return `[${entry.Time}] ● ${entry.Name} ${entry.Text}`;
         } else if (entry.Type === 'chat') {
-            return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+            return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}${imageRefsFor(entry, imagePaths)}`;
         } else if (entry.Type === 'slide') {
-            return `[SLIDE] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+            return `[SLIDE] [${entry.Time}] ${entry.Name}: ${entry.Text}${imageRefsFor(entry, imagePaths)}`;
         } else {
             return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
         }
@@ -347,7 +339,7 @@ function formatAsTxt(transcript, attendeeReport) {
     return content;
 }
 
-function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled Meeting', recordingStartTime = null) {
+function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled Meeting', recordingStartTime = null, imagePaths = {}) {
     const validTranscript = validateTranscriptInput(transcript);
     let content = '';
 
@@ -480,6 +472,16 @@ function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled M
 
             // Add caption as blockquote with timestamp
             content += `> **[${entry.Time}]** ${entry.Text}\n\n`;
+
+            // Packaged images (zip export): slide snapshot / chat image as Markdown images
+            if (entry.Type === 'slide' && entry.imageId && imagePaths[entry.imageId]) {
+                content += `![Slide ${entry.slideNumber || ''}](${imagePaths[entry.imageId]})\n\n`;
+            }
+            (entry.attachments || []).forEach(att => {
+                if (att && att.imageId && imagePaths[att.imageId]) {
+                    content += `![${att.filename || 'attachment'}](${imagePaths[att.imageId]})\n\n`;
+                }
+            });
         }
     });
 
@@ -670,7 +672,12 @@ function formatSrtTimestamp(ms) {
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')},${milliseconds.toString().padStart(3, '0')}`;
 }
 
-async function formatForAi(transcript, meetingTitle, recordingStartTime, attendeeReport) {
+// AI-analysis text. Optimised for an LLM reader: consecutive captions from one
+// speaker are merged into paragraphs (Teams emits short fragments, each with
+// its own timestamp and speaker prefix, and that overhead can rival the words
+// themselves), a slide index lists every unique slide once, and slide/chat
+// image lines point at the files packaged in the zip when images are exported.
+async function formatForAi(transcript, meetingTitle, recordingStartTime, attendeeReport, imagePaths = {}) {
     let aiInstructions = '';
     try {
         const result = await chrome.storage.sync.get('aiInstructions');
@@ -710,15 +717,24 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
 
     // Add attendee info to metadata header
     if (totalAttendees > 0) {
-        metadataHeader += `\nTotal Attendees: ${totalAttendees}`;
-        metadataHeader += '\n\nAttendee List:';
-        attendeeList.forEach(name => {
-            metadataHeader += `\n- ${name}`;
-        });
+        metadataHeader += `\nAttendees (${totalAttendees}): ${attendeeList.join(', ')}`;
     }
 
-    // Merge transcript and attendee events chronologically
-    const combinedEvents = [...transcript];
+    // Slide index: one line per unique slide, with the packaged file when images are exported
+    const slides = ExportPackage.slideIndex(transcript, imagePaths);
+    if (slides.length > 0) {
+        const hasFiles = slides.some(s => s.path);
+        metadataHeader += `\n\nSlides (${slides.length}${hasFiles ? ', images in slides/' : ''}):`;
+        slides.forEach(s => {
+            metadataHeader += `\n- Slide ${s.slideNumber} at ${s.time}${s.presenter ? ' by ' + s.presenter : ''}${s.path ? ': ' + s.path : ''}`;
+        });
+        if (hasFiles) {
+            metadataHeader += '\nOpen a slide image only when the discussion around it needs the visual; "[SLIDE]" lines below mark when each slide was on screen.';
+        }
+    }
+
+    // Merge transcript and attendee events chronologically (captions compacted into paragraphs)
+    const combinedEvents = ExportPackage.compactCaptions(transcript);
 
     // Add join/leave events
     if (attendeeHistory && attendeeHistory.length > 0) {
@@ -745,9 +761,10 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
         if (entry.Type === 'attendance') {
             return `[${entry.Time}] ● ${entry.Name} ${entry.Text}`;
         } else if (entry.Type === 'chat') {
-            return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+            return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}${imageRefsFor(entry, imagePaths)}`;
         } else if (entry.Type === 'slide') {
-            return `[SLIDE] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+            const path = entry.imageId && imagePaths[entry.imageId] ? ` -> ${imagePaths[entry.imageId]}` : '';
+            return `[SLIDE] [${entry.Time}] ${ExportPackage.slideLabel(entry)}${entry.Name ? ' by ' + entry.Name : ''}${path}`;
         } else {
             return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
         }
@@ -771,6 +788,7 @@ function escapeHtml(str) {
 }
 
 // --- Core Actions ---
+// `content` is a string for text files, or { base64 } for binary files (zip packages)
 async function downloadFile(filename, content, mimeType, saveAs) {
     // Ensure filename is not empty or undefined
     if (!filename || filename.trim() === '') {
@@ -779,7 +797,9 @@ async function downloadFile(filename, content, mimeType, saveAs) {
     }
 
     try {
-        const url = `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`;
+        const url = (content && typeof content === 'object' && content.base64)
+            ? `data:${mimeType};base64,${content.base64}`
+            : `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`;
 
         // Safety-net sanitization: strip any characters Windows forbids in filenames.
         // getSanitizedMeetingName already handles this for meeting titles, but this
@@ -924,9 +944,28 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
 
     console.log('[saveTranscript] Processing format:', format, 'userRecordingStartTime:', userRecordingStartTime);
 
+    // "Include images with exports": text formats become a zip with a slides/
+    // (and attachments/) folder, and the transcript references those paths.
+    let imageFiles = [];
+    let imagePaths = {};
+    if (ExportPackage.TEXT_FORMATS.includes(format) && ExportPackage.hasImages(processedTranscript)) {
+        try {
+            const { exportImages } = await chrome.storage.sync.get('exportImages');
+            if (exportImages) {
+                const images = await ImageStore.getDataUrls(TranscriptRenderer.collectImageIds(processedTranscript));
+                ({ files: imageFiles, paths: imagePaths } = await ExportPackage.collectImageFiles(processedTranscript, images));
+                console.log(`[saveTranscript] Packaging ${imageFiles.length} image(s) with the ${format} export`);
+            }
+        } catch (error) {
+            console.warn('[saveTranscript] Could not prepare images for export, saving text only:', error);
+            imageFiles = [];
+            imagePaths = {};
+        }
+    }
+
     switch (format) {
         case 'md':
-            content = formatAsMarkdown(processedTranscript, processedAttendeeReport, meetingTitle, recordingStartTime);
+            content = formatAsMarkdown(processedTranscript, processedAttendeeReport, meetingTitle, recordingStartTime, imagePaths);
             extension = 'md';
             mimeType = 'text/markdown';
             break;
@@ -935,7 +974,7 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
             const jsonData = {
                 meetingTitle: meetingTitle,
                 recordingStartTime,
-                transcript: processedTranscript,
+                transcript: withImageFiles(processedTranscript, imagePaths),
                 attendees: processedAttendeeReport
             };
             content = JSON.stringify(jsonData, null, 2);
@@ -948,7 +987,7 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
             mimeType = 'application/msword';
             break;
         case 'ai':
-            content = await formatForAi(processedTranscript, meetingTitle, recordingStartTime, processedAttendeeReport);
+            content = await formatForAi(processedTranscript, meetingTitle, recordingStartTime, processedAttendeeReport, imagePaths);
             extension = 'txt';
             mimeType = 'text/plain';
             break;
@@ -984,16 +1023,48 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
         }
         case 'txt':
         default:
-            content = formatAsTxt(processedTranscript, processedAttendeeReport);
+            content = formatAsTxt(processedTranscript, processedAttendeeReport, imagePaths);
             extension = 'txt';
             mimeType = 'text/plain';
             break;
     }
-    
+
     // Add extension to filename
     const fullFilename = `${filename}.${extension}`;
     console.log('[saveTranscript] Final filename with extension:', fullFilename);
+
+    if (imageFiles.length > 0) {
+        // Transcript + images travel together as <filename>.zip
+        const zip = ExportPackage.buildZip([{ name: fullFilename, data: content }, ...imageFiles]);
+        await downloadFile(`${filename}.zip`, { base64: ExportPackage.base64FromBytes(zip) }, 'application/zip', saveAsPrompt);
+        return;
+    }
     await downloadFile(fullFilename, content, mimeType, saveAsPrompt);
+}
+
+// JSON export: add relative image file paths (from the zip) next to imageId
+function withImageFiles(transcript, imagePaths) {
+    if (!imagePaths || Object.keys(imagePaths).length === 0) return transcript;
+    return transcript.map(entry => {
+        if (!entry) return entry;
+        const copy = { ...entry };
+        if (entry.imageId && imagePaths[entry.imageId]) copy.imageFile = imagePaths[entry.imageId];
+        if (Array.isArray(entry.attachments)) {
+            copy.attachments = entry.attachments.map(att => (att && att.imageId && imagePaths[att.imageId])
+                ? { ...att, imageFile: imagePaths[att.imageId] }
+                : att);
+        }
+        return copy;
+    });
+}
+
+// Text suffix pointing at the packaged image files for an entry ("" when none)
+function imageRefsFor(entry, imagePaths) {
+    if (!imagePaths) return '';
+    const refs = [];
+    if (entry.Type === 'slide' && entry.imageId && imagePaths[entry.imageId]) refs.push(imagePaths[entry.imageId]);
+    (entry.attachments || []).forEach(att => { if (att && att.imageId && imagePaths[att.imageId]) refs.push(imagePaths[att.imageId]); });
+    return refs.length ? ` -> ${refs.join(', ')}` : '';
 }
 
 // --- State Management ---

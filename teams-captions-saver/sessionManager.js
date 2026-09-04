@@ -11,9 +11,13 @@
 class SessionManager {
     constructor() {
         this.sessions = new Map(); // Active sessions in memory
-        this.MAX_SESSIONS = 20; // Support up to 20 concurrent meetings
-        this.MAX_CHUNK_SIZE = 7000; // Stay under 8KB limit per key
-        this.STORAGE_QUOTA = 8 * 1024 * 1024; // Reserve 8MB for sessions
+        this.MAX_SESSIONS = 20; // Legacy constant (no longer enforced; retention is size-based, see getStorageBudgetBytes)
+        this.MAX_CHUNK_SIZE = 7000; // Transcript chunk size per key
+        // The manifest requests "unlimitedStorage", so chrome.storage.local and IndexedDB are
+        // limited only by disk. The user-facing limit is the storage budget setting
+        // (storageBudgetMB, default 100, 0 = unlimited) covering transcripts + images.
+        this.DEFAULT_BUDGET_MB = 100;
+        this.STORAGE_QUOTA = this.DEFAULT_BUDGET_MB * 1024 * 1024; // Legacy alias used by getStorageStats
         this._initialized = false; // Track initialization state
         this._initPromise = this.initializeFromStorage(); // Store promise for awaiting
         this._sessionLocks = new Map(); // Per-session locks to prevent read/write conflicts
@@ -479,34 +483,20 @@ class SessionManager {
                 return false;
             }
 
-            // Check storage quota BEFORE chunking to avoid wasted memory
-            let currentUsage = 0;
-            if (chrome.storage.local.getBytesInUse) {
-                try {
-                    currentUsage = await chrome.storage.local.getBytesInUse(null);
-                } catch (error) {
-                    currentUsage = await this.getStorageUsage();
-                }
-            } else {
-                currentUsage = await this.getStorageUsage();
-            }
-
-            // Estimate new data size before chunking (rough estimate based on JSON size)
+            // Keep the storage budget honoured before writing: evict the oldest ended
+            // meetings (never active ones) if this save would push usage over it.
+            // Storage itself is unlimited (unlimitedStorage permission), so this is the
+            // only limit that applies.
             const estimatedTranscriptSize = this.calculateSize(transcriptArray);
             const estimatedAttendeeSize = attendeeReport ? this.calculateSize(attendeeReport) : 0;
             const estimatedChatSize = chatMessages ? this.calculateSize(chatMessages) : 0;
             const estimatedNewDataSize = estimatedTranscriptSize + estimatedAttendeeSize + estimatedChatSize;
-
-            // Use 7MB as safe limit to leave room for other data
-            const SAFE_QUOTA = 7 * 1024 * 1024;
-
-            if (currentUsage + estimatedNewDataSize > SAFE_QUOTA) {
-                console.log(`[SessionManager] Storage cleanup needed. Current: ${(currentUsage / 1024 / 1024).toFixed(2)}MB, Estimated new data: ${(estimatedNewDataSize / 1024 / 1024).toFixed(2)}MB`);
-                // Need to clean up old sessions - free up enough space plus 1MB buffer
-                await this.cleanupOldSessions(estimatedNewDataSize + 1024 * 1024);
+            try {
+                await this.enforceBudget({ reserveBytes: estimatedNewDataSize, protectSessionId: sessionId });
+            } catch (error) {
+                console.warn('[SessionManager] Budget check failed, saving anyway:', error);
             }
 
-            // Now chunk the transcript after quota check passes
             const chunks = this.chunkTranscript(transcriptArray);
 
             // Save transcript chunks using Promise.allSettled to handle partial failures
@@ -755,8 +745,137 @@ class SessionManager {
         }
         
         console.log(`[SessionManager] Ended session ${sessionId} with ${session.stats.captionCount} captions`);
-        
+
+        // Apply the storage budget now that this meeting's data is final; never touches active sessions
+        this.enforceBudget().catch(err => console.warn('[SessionManager] Budget cleanup failed:', err));
+
         return true;
+    }
+
+    // Storage budget in bytes from settings (storageBudgetMB; 0 = unlimited). Default 100 MB.
+    async getStorageBudgetBytes() {
+        try {
+            const { storageBudgetMB } = await chrome.storage.sync.get('storageBudgetMB');
+            if (storageBudgetMB === 0 || storageBudgetMB === '0') return 0;
+            const mb = parseInt(storageBudgetMB, 10);
+            if (Number.isFinite(mb) && mb > 0) return mb * 1024 * 1024;
+        } catch (e) { /* fall through */ }
+        return this.DEFAULT_BUDGET_MB * 1024 * 1024;
+    }
+
+    // Transcript bytes in chrome.storage.local plus image bytes in IndexedDB
+    async getCombinedUsage() {
+        let transcriptBytes = 0;
+        try {
+            transcriptBytes = chrome.storage.local.getBytesInUse
+                ? await chrome.storage.local.getBytesInUse(null)
+                : await this.getStorageUsage();
+        } catch (e) {
+            transcriptBytes = await this.getStorageUsage();
+        }
+        let images = { total: { count: 0, bytes: 0 }, bySession: {} };
+        if (typeof ImageStore !== 'undefined' && ImageStore.usageBySession) {
+            try { images = await ImageStore.usageBySession(); } catch (e) { /* IndexedDB unavailable */ }
+        }
+        return { transcriptBytes, images, totalBytes: transcriptBytes + images.total.bytes };
+    }
+
+    /**
+     * Delete the oldest ended sessions (with their images) until combined usage,
+     * plus `reserveBytes` about to be written, fits the budget. Active sessions
+     * and `protectSessionId` are never deleted. Returns { deleted, freedBytes }.
+     */
+    async enforceBudget(opts = {}) {
+        const budget = await this.getStorageBudgetBytes();
+        const result = { deleted: 0, freedBytes: 0 };
+        if (!budget) return result; // unlimited
+
+        const usage = await this.getCombinedUsage();
+        let total = usage.totalBytes + (opts.reserveBytes || 0);
+        if (total <= budget) return result;
+
+        const candidates = (await this.getAllSessions())
+            .filter(s => s.status !== 'active' && s.sessionId !== opts.protectSessionId)
+            .sort((a, b) => new Date(a.startTime || 0) - new Date(b.startTime || 0)); // oldest first
+
+        for (const session of candidates) {
+            if (total <= budget) break;
+            try {
+                const size = await this.getSessionSize(session.sessionId)
+                    + ((usage.images.bySession[session.sessionId] || {}).bytes || 0);
+                await this.deleteSession(session.sessionId);
+                total -= size;
+                result.freedBytes += size;
+                result.deleted++;
+                console.log(`[SessionManager] Budget: removed "${session.meetingTitle || session.sessionId}" (${(size / 1024 / 1024).toFixed(2)} MB)`);
+            } catch (error) {
+                console.error(`[SessionManager] Budget delete failed for ${session.sessionId}:`, error);
+            }
+        }
+        if (total > budget) {
+            console.warn(`[SessionManager] Still over budget after cleanup: ${(total / 1024 / 1024).toFixed(1)} MB of ${(budget / 1024 / 1024).toFixed(0)} MB (remaining sessions are active)`);
+        }
+        return result;
+    }
+
+    /**
+     * Storage overview for the popup. Pure read: no cleanup side effects.
+     * Transcripts live in chrome.storage.local, images in IndexedDB; both are
+     * unlimited by Chrome (unlimitedStorage) and governed by the budget setting.
+     */
+    async getStorageOverview() {
+        const usage = await this.getCombinedUsage();
+
+        let disk = null;
+        try {
+            if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.estimate) {
+                const est = await navigator.storage.estimate();
+                disk = { usageBytes: est.usage || 0, quotaBytes: est.quota || 0 };
+            }
+        } catch (e) { /* not available */ }
+
+        const all = await this.getAllSessions();
+        const sessions = [];
+        for (const s of all) {
+            const img = usage.images.bySession[s.sessionId] || { count: 0, bytes: 0 };
+            sessions.push({
+                sessionId: s.sessionId,
+                meetingTitle: s.meetingTitle,
+                startTime: s.startTime,
+                status: s.status,
+                transcriptBytes: await this.getSessionSize(s.sessionId),
+                imageBytes: img.bytes,
+                imageCount: img.count
+            });
+        }
+
+        return {
+            transcriptBytes: usage.transcriptBytes,
+            images: { count: usage.images.total.count, bytes: usage.images.total.bytes },
+            totalBytes: usage.totalBytes,
+            budgetBytes: await this.getStorageBudgetBytes(), // 0 = unlimited
+            disk,
+            sessions
+        };
+    }
+
+    /**
+     * On-demand cleanup from the popup: orphaned transcript keys, orphaned
+     * images, then the storage budget. Returns { deletedSessions, freedBytes, orphanImages }.
+     */
+    async freeUpSpace() {
+        let freedBytes = 0;
+        try { freedBytes += await this.cleanupOrphanedData(); } catch (e) { console.warn('[SessionManager] Orphan cleanup failed:', e); }
+        let orphanImages = 0;
+        if (typeof ImageStore !== 'undefined' && ImageStore.pruneOrphans) {
+            try {
+                const known = (await this.getAllSessions()).map(s => s.sessionId);
+                orphanImages = await ImageStore.pruneOrphans(known);
+            } catch (e) { console.warn('[SessionManager] Image prune failed:', e); }
+        }
+        const budget = await this.enforceBudget();
+        freedBytes += budget.freedBytes;
+        return { deletedSessions: budget.deleted, freedBytes, orphanImages };
     }
 
     // Delete a session
@@ -1307,8 +1426,13 @@ class SessionManager {
     async getSessionSize(sessionId) {
         try {
             const session = this.sessions.get(sessionId);
-            const chunkCount = session?.metadata?.chunkCount || 0;
-            
+            let chunkCount = session?.metadata?.chunkCount || 0;
+            if (!session) {
+                // Not in this instance's memory (e.g. popup, or an ended session): read chunkCount from storage
+                const stored = await chrome.storage.local.get(`${sessionId}_metadata`);
+                chunkCount = stored[`${sessionId}_metadata`]?.chunkCount || 0;
+            }
+
             const keys = [
                 `${sessionId}_metadata`,
                 `${sessionId}_stats`,
