@@ -2,6 +2,47 @@
 
 All notable changes to the Live Captions Saver extension will be documented in this file.
 
+## [5.4.0] - 2026-09-04
+
+### Added
+- **Shared Content (Slide) Capture**: Opt-in snapshot of the shared screen every time its content changes, shown live in the viewer and embedded in HTML exports
+  - New `slideCapture.js` samples the Teams share `<video>` (found via `[data-cid="calling-participant-stream"][aria-label^="Content shared by"] video`, verified in a live meeting) every 1s on a timer, so it keeps working in a hidden tab. With the two-sample stability check a new slide reaches the viewer 1-2s after it appears (was 2-4s at the original 2s interval)
+  - Change detection: 64x36 grayscale thumbnail compared against the last kept slide (mean diff > 6/255), then a stability check over two consecutive samples filters scrolling, cursor movement and transitions. Measured noise floor on a static slide was 0-0.45
+  - Kept frames are rendered to an image (max 1920px wide; PNG or JPEG, see "Slide image quality" below) and fingerprinted with a 64-bit difference hash. A slide shown again later is deduplicated (Hamming distance <= 6): it is re-added to the timeline flagged "seen earlier" because the discussion at that moment is about it, but its pixels are stored once
+  - Presenter attribution from the tile's aria-label ("Content shared by Vignesh Iyer [C]" -> "Vignesh Iyer"); slides count per presenter in analytics
+  - New transcript entry `Type: 'slide'` with `imageId`, `slideNumber`, `seenEarlier`; exported as `[SLIDE] [time] Presenter: Shared content (slide N)` in TXT/Markdown/AI/DOC
+  - Budget: 300 slides or 60 MB per session, then capture continues without storing
+  - New "Capture Shared Content" toggle under Settings > Capture (`captureSharedContent` sync key, default off). Teams only for now; the platform config carries a `sharedContent` block so Meet/Zoom can be added when their stage DOM is investigated
+  - **PowerPoint Live support**: Teams does not deliver PowerPoint Live as a video; it embeds the Office slideshow viewer in a cross-origin iframe (`https://<region>.pods.officeapps.live.com/slideshow.aspx`), so the Teams page cannot see the slide at all. New `pptLiveCapture.js` runs inside that frame (new content script match `https://*.officeapps.live.com/*`, all frames), composites the slideshow canvases under `#slideshow-canvas-container` (WebGL slide plus 2D ink/pointer overlays, verified readable and untainted), and sends settled frames to the service worker, which relays them to the Teams top frame of the same tab as `shared_content_frame`
+  - `slideCapture.js` now samples any drawable source via a `getFrame()` callback (video or canvas) and only does change detection, image rendering and hashing. Session-level dedupe, numbering and the storage budget moved to a registry in `content_script.js` so screen-share and PowerPoint Live slides share one sequence and "seen earlier" works across both
+  - Presenter for PowerPoint Live slides: the stage carries no "shared by" label for PowerPoint Live (verified live). When this client is presenting, Teams shows the `ppt-stop-presenting-button`, so the name is read from the signed-in user's profile avatar (`[data-tid="me-control-avatar"]` aria-label "Profile picture of <Name>."). When someone else presents, the stage text is scanned for "<Name> is presenting/sharing"; otherwise "Presenter"
+  - **Slide image quality**: kept frames are now saved as PNG when that stays under 1 MB (slides are text on flat colour, so this is typical and keeps text crisp), otherwise JPEG at quality 0.9; max width raised from 1280 to 1920. Previously every slide was JPEG 0.8, which smeared small text
+  - **PowerPoint Live render scale** (`pptLiveDpr.js`): a MAIN-world script injected at `document_start` into the slideshow frame reports `devicePixelRatio` 3 on monitors below that, so the Office viewer draws its WebGL canvas at three times the on-screen pixels (as it would on a HiDPI display) and the capture gets a readable image even from the small presenter-view canvas. Verified live: 2x took the presenter-view capture from ~540px to 1078x606 PNG (73-162 KB); 3x lands at ~1617px
+  - Enlarging an image in the viewer modal and in the HTML export lightbox now scales it to fill the viewport (90vw x 85vh in the viewer, 96vw x 86vh in the export). Previously images displayed at natural size, so a slide captured from PowerPoint Live presenter view (about 540px wide, because that is how large PowerPoint draws it there) barely grew on click. Attendees' captures are larger because their stage shows the slide full size
+- **HTML Export**: Self-contained page that mirrors the Live Transcript Viewer: meeting metadata, attendee list, analytics, search with highlighting, speaker filter, type toggles (captions / chat / slides / joins), image lightbox, dark-mode aware, print-friendly. Slides and embedded chat images are inlined as data URLs so the file works offline
+  - Available from the popup Save dropdown, Default Format, Previous Sessions export dialog, and the viewer's Save dialog. Saved as `.html` with `text/html`
+- **Image Store** (`imageStore.js`): IndexedDB store in the extension origin for slide and attachment pixels. Transcript entries only carry an `imageId`, keeping the chunked session storage small. Images are deleted with their session and pruned with it
+- **Chat attachment embedding**: Image attachments are now fetched (or copied from the already-decoded `<img>`) and stored at capture time, downscaled to 1280px JPEG (small PNG/GIF/WebP kept as-is). Previously exports and history only held blob:/authenticated URLs that stopped working once the meeting tab closed
+- **Live Viewer**: Slides appear inline as they are captured (data URL rides along with the live update, then hydrates from the image store on reload), with a "Slide N" badge, presenter, "seen earlier" marker, click-to-enlarge, and a "Slides" show/hide toggle in the filter bar. Embedded attachments re-render in place when embedding completes
+
+### Changed
+- **Shared renderer** (`transcriptRenderer.js`): entry rendering and analytics are now one module used by the viewer, the service-worker HTML export and the viewer's own Save-as-HTML, so the three cannot drift. Analytics panel markup moved from inline styles to classes
+- Save messages now carry the platform so exports can label it
+
+## [5.3.5] - 2026-09-04
+
+### Added
+- **Background Capture**: Captions keep flowing while the meeting tab is in the background
+  - Verified in a live Teams meeting: captions were captured continuously while the tab was hidden, with no flush-on-return
+  - Meeting apps (notably Teams) stop rendering new captions into the DOM when the tab is hidden and flush them all in when the tab regains focus. The extension's MutationObserver is not throttled, so it was the app deferring its own rendering that caused gaps and batched timestamps
+  - New `visibility_shim.js` is injected into the page's main world (same mechanism as `transcript_interceptor.js`) and, only while capture is active, makes the page believe the tab is visible and focused: overrides `document.hidden` / `document.visibilityState` / `document.hasFocus()`, swallows trusted `visibilitychange` and window `blur` events, and falls back to a 100ms timer for `requestAnimationFrame` while the tab is really hidden (Chrome pauses rAF in hidden tabs). Frames pending at the moment the tab hides are migrated to the timer so render loops don't stall
+  - Everything is restored to native behaviour when capture stops, and the page is nudged with a synthetic `visibilitychange` so it re-syncs to the real state
+  - New "Background Capture" toggle under Settings > Capture (`backgroundCapture` sync key, default on). Toggling mid-meeting takes effect immediately. Turn it off if the meeting tab uses too much CPU in the background, since the app no longer scales back work when hidden
+  - Content script's own `visibilitychange` handler now registers on `window` in the capture phase at load time so it still fires when the shim swallows the event for the page (the propagation-stopped flag is shared across JS worlds)
+
+### Removed
+- **Silent AudioContext anti-throttle** (added in the background tab protection commit): it never worked. An `AudioContext` created without a user gesture starts suspended under Chrome's autoplay policy, and a 1Hz tone at gain 0.0001 is far below Chrome's audible-power threshold, so the tab was never marked as playing audio. It was also redundant, since a tab with an active WebRTC call is already exempt from intensive throttling
+
 ## [5.3.4] - 2026-04-07
 
 ### Fixed

@@ -803,6 +803,7 @@
                     <div id="saveOptions" class="dropdown-menu">
                         <div class="dropdown-item" data-format="txt">Save as TXT</div>
                         <div class="dropdown-item" data-format="md">Save as Markdown</div>
+                        <div class="dropdown-item" data-format="html">Save as HTML (with images)</div>
                         <div class="dropdown-item" data-format="doc">Save as DOC</div>
                         <div class="dropdown-item" data-format="json">Save as JSON</div>
                         <div class="dropdown-item" data-format="ai">Save for AI</div>
@@ -869,6 +870,26 @@
                         <span class="slider"></span>
                     </label>
                 </div>
+                <div class="setting-row">
+                    <div>
+                        <span class="setting-label">Background Capture</span>
+                        <div style="font-size: 10px; color: #888; margin-top: 1px;">Keeps captions flowing while you're on another tab (uses more CPU)</div>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="backgroundCaptureToggle" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <span class="setting-label">Capture Shared Content</span>
+                        <div style="font-size: 10px; color: #888; margin-top: 1px;">Saves a snapshot each time the shared screen changes (Teams). Shown in the Live Viewer and HTML exports</div>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="captureSharedContentToggle">
+                        <span class="slider"></span>
+                    </label>
+                </div>
             </div>
 
             <!-- Automation -->
@@ -930,6 +951,7 @@
                     <select id="defaultSaveFormat">
                         <option value="txt">TXT</option>
                         <option value="md">Markdown</option>
+                        <option value="html">HTML (with images)</option>
                         <option value="doc">Word</option>
                         <option value="json">JSON</option>
                         <option value="ai">AI Analysis</option>
@@ -1028,6 +1050,7 @@
 
     <div id="status-message" style="display: none;"></div>
 
+    <script src="imageStore.js"></script>
     <script src="sessionManager.js"></script>
     <script src="popup.js"></script>
 </body>

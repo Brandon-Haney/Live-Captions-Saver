@@ -740,7 +740,7 @@
         .image-modal img {
             max-width: 90vw;
             max-height: 85vh;
-            width: auto;
+            width: auto;   /* viewer.js sets an explicit size so small sources scale up to fill the viewport */
             height: auto;
             object-fit: contain;
             border-radius: 8px;
@@ -1343,8 +1343,91 @@
         .keyword-alert-actions .btn-secondary:hover {
             background: #e0e0e0;
         }
+
+        /* --- Shared content (slides) --- */
+        .slide-entry {
+            background-color: #f6f2fb;
+            border-left: 3px solid #6f42c1;
+            padding-left: 12px;
+            margin: 6px 0;
+            border-radius: 4px;
+        }
+        .slide-entry:hover {
+            background-color: #efe8f8;
+        }
+        .slide-entry .message-type svg {
+            color: #6f42c1;
+        }
+        .slide-badge {
+            display: inline-block;
+            margin-left: 8px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #fff;
+            background: #6f42c1;
+            border-radius: 10px;
+            padding: 1px 8px;
+            vertical-align: middle;
+        }
+        .slide-seen {
+            display: inline-block;
+            margin-left: 6px;
+            font-size: 11px;
+            color: #6b7280;
+            font-style: italic;
+        }
+        .slide-entry .text {
+            font-size: 12px;
+            color: #6b7280;
+        }
+        .slide-image-wrap {
+            margin-top: 8px;
+        }
+        .slide-thumbnail img {
+            max-width: min(100%, 720px);
+            max-height: 420px;
+        }
+        .slide-missing {
+            font-size: 12px;
+            color: #6b7280;
+            font-style: italic;
+        }
+        .slides-toggle {
+            opacity: 0.6;
+        }
+        .slides-toggle.active {
+            opacity: 1;
+        }
+        .slides-toggle svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        /* --- Analytics panel (markup shared with the HTML export) --- */
+        #meeting-analytics {
+            background: #f8f9fa;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+        }
+        .analytics-title { margin: 0 0 12px; color: #495057; font-size: 16px; }
+        .analytics-subtitle { margin: 15px 0 10px; color: #495057; font-size: 14px; }
+        .analytics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 15px; }
+        .analytics-value { font-size: 24px; font-weight: bold; }
+        .analytics-value small { font-size: 12px; font-weight: normal; color: #6c757d; }
+        .analytics-label { font-size: 12px; color: #6c757d; }
+        .analytics-speaker { margin-bottom: 8px; }
+        .analytics-speaker-row { display: flex; justify-content: space-between; margin-bottom: 2px; }
+        .analytics-speaker-name { font-size: 14px; color: #495057; }
+        .analytics-speaker-stat, .analytics-more { font-size: 12px; color: #6c757d; }
+        .analytics-more { margin-top: 8px; }
+        .analytics-bar { background: #e9ecef; border-radius: 4px; height: 20px; overflow: hidden; }
+        .analytics-bar-fill { background: linear-gradient(90deg, #17a2b8, #28a745); height: 100%; transition: width 0.3s ease; }
     </style>
     <script src="keywordEngine.js"></script>
+    <script src="imageStore.js"></script>
+    <script src="transcriptRenderer.js"></script>
     <script src="sessionManager.js"></script>
     <script src="viewer.js" defer></script>
 </head>
@@ -1357,6 +1440,10 @@
                 <div id="speaker-filters" class="speaker-filters">
                     <button id="show-all-btn" class="active" aria-label="Show all speakers">Show All</button>
                 </div>
+                <button id="toggle-slides-btn" class="export-btn slides-toggle active" title="Show or hide shared content slides" aria-pressed="true" style="display: none;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                    Slides
+                </button>
                 <div class="export-controls">
                     <button id="copy-all-btn" class="export-btn" title="Copy visible transcript to clipboard">
                         <svg viewBox="0 0 24 24" fill="currentColor">

@@ -82,7 +82,46 @@ const PLATFORM_CONFIGS = {
             
             return cleanedTitle || 'Untitled Meeting';
         },
-        
+
+        // Shared content (screen share) capture. Teams renders a shared screen as a
+        // <video> inside a participant-stream tile whose aria-label reads
+        // "Content shared by <Name>", which distinguishes it from camera tiles.
+        // PowerPoint Live is not a video: Teams embeds the Office slideshow viewer
+        // in a cross-origin iframe, sampled by pptLiveCapture.js and relayed here.
+        sharedContent: {
+            videoSelector: '[data-cid="calling-participant-stream"][aria-label^="Content shared by"] video, [data-cid="calling-participant-stream"][aria-label*="shared by"] video',
+            // `video` is null for frames that arrive from the PowerPoint Live iframe;
+            // fall back to whichever stage tile says who is sharing.
+            getPresenter: (video) => {
+                const tile = video
+                    ? video.closest('[data-cid="calling-participant-stream"]')
+                    : document.querySelector('[data-cid="calling-participant-stream"][aria-label*="shared by"], [aria-label*="Content shared by"]');
+                const label = tile ? (tile.getAttribute('aria-label') || '') : '';
+                // "Content shared by Vignesh Iyer [C]" -> "Vignesh Iyer"
+                const match = label.match(/shared by\s+(.+?)(?:\s*\[[^\]]*\])?\s*$/i);
+                if (match) return match[1].trim();
+                if (video) return null;
+
+                // PowerPoint Live carries no presenter label on the stage (verified 2026-09-04).
+                // When this client is the one presenting, Teams shows a "Stop sharing"
+                // button, so the presenter is the signed-in user: read the name from the
+                // profile avatar ("Profile picture of Brandon Haney.").
+                if (document.querySelector('[data-tid="ppt-stop-presenting-button"]')) {
+                    const me = document.querySelector('[data-tid="me-control-avatar"]');
+                    const meLabel = me ? (me.getAttribute('aria-label') || '') : '';
+                    const meMatch = meLabel.match(/Profile picture of\s+(.+?)\.?\s*$/i);
+                    if (meMatch) return meMatch[1].trim();
+                    if (window.currentUserName && window.currentUserName !== 'You') return window.currentUserName;
+                }
+
+                // Someone else presenting: look for "<Name> is presenting" / "is sharing" on the stage
+                const stage = document.querySelector('[data-tid="stage-layout"], [data-tid="modern-stage-wrapper"]') || document.body;
+                const text = (stage.textContent || '').replace(/\s+/g, ' ');
+                const presenting = text.match(/([A-Z][^.:|]{1,60}?)\s+is\s+(?:presenting|sharing)/);
+                return presenting ? presenting[1].trim() : null;
+            }
+        },
+
         // Chat capture methods for Teams
         chatCapture: {
             isSupported: () => true,
@@ -1743,6 +1782,9 @@ function deepCopyPlatformConfig(source) {
     }
     if (source.chatCapture) {
         copy.chatCapture = { ...source.chatCapture };
+    }
+    if (source.sharedContent) {
+        copy.sharedContent = { ...source.sharedContent };
     }
     // Create new Map instance for speakerNameCache to avoid shared state
     if (source.speakerNameCache instanceof Map) {
