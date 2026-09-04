@@ -42,6 +42,8 @@ const UI_ELEMENTS = {
     trackCaptionsToggle: document.getElementById('trackCaptionsToggle'),
     trackAttendeesToggle: document.getElementById('trackAttendeesToggle'),
     chatCaptureToggle: document.getElementById('chatCaptureToggle'),
+    backgroundCaptureToggle: document.getElementById('backgroundCaptureToggle'),
+    captureSharedContentToggle: document.getElementById('captureSharedContentToggle'),
     timestampFormat: document.getElementById('timestampFormat'),
     filenamePattern: document.getElementById('filenamePattern'),
     meetingType: document.getElementById('meetingType'),
@@ -516,7 +518,7 @@ async function loadSettings() {
     const settings = await chrome.storage.sync.get([
         'autoEnableCaptions', 'autoSaveOnEnd', 'aiInstructions', 'defaultSaveFormat',
         'trackCaptions', 'trackAttendees', 'timestampFormat',
-        'filenamePattern', 'chatCapture', 'm365KeepAlive'
+        'filenamePattern', 'chatCapture', 'm365KeepAlive', 'backgroundCapture', 'captureSharedContent'
     ]);
 
     UI_ELEMENTS.autoEnableCaptionsToggle.checked = !!settings.autoEnableCaptions;
@@ -524,6 +526,8 @@ async function loadSettings() {
     UI_ELEMENTS.trackCaptionsToggle.checked = settings.trackCaptions !== false;
     UI_ELEMENTS.trackAttendeesToggle.checked = settings.trackAttendees !== false;
     UI_ELEMENTS.chatCaptureToggle.checked = settings.chatCapture !== false;
+    UI_ELEMENTS.backgroundCaptureToggle.checked = settings.backgroundCapture !== false;
+    UI_ELEMENTS.captureSharedContentToggle.checked = !!settings.captureSharedContent;
     UI_ELEMENTS.timestampFormat.value = settings.timestampFormat || '12hr';
     UI_ELEMENTS.filenamePattern.value = settings.filenamePattern || '{date}_{title}_{format}';
     UI_ELEMENTS.aiInstructions.value = settings.aiInstructions || '';
@@ -570,6 +574,16 @@ function setupEventListeners() {
 
     UI_ELEMENTS.trackAttendeesToggle.addEventListener('change', (e) => {
         chrome.storage.sync.set({ trackAttendees: e.target.checked });
+    });
+
+    UI_ELEMENTS.backgroundCaptureToggle.addEventListener('change', (e) => {
+        // Content script reacts via chrome.storage.onChanged, even mid-capture
+        chrome.storage.sync.set({ backgroundCapture: e.target.checked });
+    });
+
+    UI_ELEMENTS.captureSharedContentToggle.addEventListener('change', (e) => {
+        // Content script starts/stops the slide sampler via chrome.storage.onChanged
+        chrome.storage.sync.set({ captureSharedContent: e.target.checked });
     });
 
     UI_ELEMENTS.chatCaptureToggle.addEventListener('change', (e) => {
@@ -923,6 +937,7 @@ async function handleSave(target) {
                     message: "save_from_session",
                     transcriptArray: transcript,
                     meetingTitle: meetingTitle,
+                    platform: metadata?.platform || null,
                     format: format,
                     recordingStartTime: recordingStartTime,
                     attendeeReport: attendeeReport,
@@ -1220,6 +1235,7 @@ async function exportPreviousSession(sessionId) {
             transcriptArray: sessionData.transcript,
             format: result.format,
             meetingTitle: sessionData.metadata?.meetingTitle || 'Meeting',
+            platform: sessionData.metadata?.platform || null,
             attendeeReport: sessionData.attendeeReport,
             recordingStartTime: sessionData.metadata?.startTime || new Date().toISOString(),
             userRecordingStartTime: result.userRecordingStartTime
@@ -1288,6 +1304,9 @@ function showExportFormatDialog(meetingStartTime = null) {
                 </button>
                 <button data-format="md" style="padding: 12px; background: #6f42c1; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                     Markdown (Formatted)
+                </button>
+                <button data-format="html" style="padding: 12px; background: #e34c26; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                    HTML (Viewer page with images)
                 </button>
                 <button data-format="ai" style="padding: 12px; background: #ff6b6b; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                     AI Analysis (with Instructions)

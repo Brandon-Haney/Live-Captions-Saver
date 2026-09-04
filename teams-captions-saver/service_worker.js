@@ -1,5 +1,5 @@
 // --- Import SessionManager ---
-importScripts('sessionManager.js');
+importScripts('sessionManager.js', 'imageStore.js', 'transcriptRenderer.js');
 const sessionManager = new SessionManager();
 
 // Constants for documented magic numbers
@@ -337,6 +337,8 @@ function formatAsTxt(transcript, attendeeReport) {
             return `[${entry.Time}] ● ${entry.Name} ${entry.Text}`;
         } else if (entry.Type === 'chat') {
             return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+        } else if (entry.Type === 'slide') {
+            return `[SLIDE] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
         } else {
             return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
         }
@@ -468,7 +470,7 @@ function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled M
             content += `\n*● ${entry.Name} ${entry.Text}* (${entry.Time})\n\n`;
         } else {
             // Regular captions or chat messages
-            const typeIndicator = entry.Type === 'chat' ? '[CHAT] ' : '';
+            const typeIndicator = entry.Type === 'chat' ? '[CHAT] ' : (entry.Type === 'slide' ? '[SLIDE] ' : '');
 
             // Add speaker heading if speaker changed
             if (entry.Name !== lastSpeaker) {
@@ -560,6 +562,8 @@ function formatAsDoc(transcript, attendeeReport) {
             return `<p style="text-align:center; color:#666; font-style:italic;">● ${escapeHtml(entry.Name)} ${escapeHtml(entry.Text)} - <i>${escapeHtml(entry.Time)}</i></p>`;
         } else if (entry.Type === 'chat') {
             return `<p>[CHAT] <b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`;
+        } else if (entry.Type === 'slide') {
+            return `<p>[SLIDE] <b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`;
         } else {
             return `<p><b>${escapeHtml(entry.Name)}</b> (<i>${escapeHtml(entry.Time)}</i>): ${escapeHtml(entry.Text)}</p>`;
         }
@@ -742,6 +746,8 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
             return `[${entry.Time}] ● ${entry.Name} ${entry.Text}`;
         } else if (entry.Type === 'chat') {
             return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+        } else if (entry.Type === 'slide') {
+            return `[SLIDE] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
         } else {
             return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
         }
@@ -883,7 +889,7 @@ async function generateFilename(pattern, meetingTitle, format, attendeeReport) {
     }
 }
 
-async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt, attendeeReport = null, userRecordingStartTime = null) {
+async function saveTranscript(meetingTitle, transcriptArray, aliases, format, recordingStartTime, saveAsPrompt, attendeeReport = null, userRecordingStartTime = null, platform = null) {
     // Validate and fix meeting title
     if (!meetingTitle || meetingTitle.trim() === '') {
         console.log('[saveTranscript] Meeting title was empty, using "Untitled Meeting"');
@@ -955,6 +961,27 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
             extension = 'srt';
             mimeType = 'application/x-subrip';
             break;
+        case 'html': {
+            // Self-contained page: slides and embedded chat images are inlined from the image store
+            let images = {};
+            try {
+                images = await ImageStore.getDataUrls(TranscriptRenderer.collectImageIds(processedTranscript));
+            } catch (error) {
+                console.warn('[saveTranscript] Could not load images for HTML export:', error);
+            }
+            const PLATFORM_NAMES = { teams: 'Microsoft Teams', meet: 'Google Meet', zoom: 'Zoom' };
+            content = TranscriptRenderer.buildStandaloneDocument({
+                meetingTitle,
+                platform: PLATFORM_NAMES[platform] || platform || null,
+                entries: processedTranscript,
+                attendeeReport: processedAttendeeReport,
+                images,
+                recordingStartTime
+            });
+            extension = 'html';
+            mimeType = 'text/html';
+            break;
+        }
         case 'txt':
         default:
             content = formatAsTxt(processedTranscript, processedAttendeeReport);
@@ -1355,6 +1382,23 @@ chrome.downloads.onChanged?.addListener((delta) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // Slide frames from the PowerPoint Live iframe (pptLiveCapture.js) go to the
+    // Teams top frame of the same tab, which owns the session and the registry.
+    if (message.message === 'shared_content_frame') {
+        if (sender.tab && sender.tab.id != null && sender.frameId) {
+            chrome.tabs.sendMessage(sender.tab.id, {
+                message: 'shared_content_frame',
+                source: message.source,
+                frame: message.frame,
+                fromFrameId: sender.frameId
+            }, { frameId: 0 }).catch(() => {
+                // No meeting content script in this tab (e.g. PowerPoint embedded elsewhere)
+            });
+        }
+        sendResponse({ received: true });
+        return;
+    }
+
     // Handle live updates synchronously for immediate relay
     if (message.message === 'live_caption_update' || message.message === 'live_attendee_update') {
         console.log('[Service Worker] Relaying live update:', message.message, 'sessionId:', message.sessionId, 'caption:', message.caption);
@@ -1441,6 +1485,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         switch (message.message) {
+            case 'store_image': {
+                // Content script hands us pixels (slides, embedded chat images); they live in IndexedDB
+                try {
+                    const image = message.image || {};
+                    if (!image.id || !image.dataUrl) throw new Error('store_image requires id and dataUrl');
+                    await ImageStore.put({
+                        ...image,
+                        sessionId: image.sessionId || message.sessionId || null
+                    });
+                    sendResponse({ success: true, id: image.id });
+                } catch (error) {
+                    console.error('[Service Worker] store_image failed:', error);
+                    sendResponse({ success: false, error: error.message });
+                }
+                return;
+            }
             case 'save_from_session':
                 // Handle save from session data (multi-meeting support)
                 console.log('Saving transcript from session');
@@ -1460,7 +1520,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         recordingStartTime || new Date().toISOString(),
                         false,
                         attendeeReport,
-                        userRecordingStartTime
+                        userRecordingStartTime,
+                        message.platform || null
                     );
 
                     sendResponse({ success: true });
@@ -1502,9 +1563,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 zoomMeetingEnded.transcript, 
                                 speakerAliases, 
                                 formatToSave, 
-                                zoomMeetingEnded.recordingStartTime, 
-                                false, 
-                                zoomMeetingEnded.attendeeReport
+                                zoomMeetingEnded.recordingStartTime,
+                                false,
+                                zoomMeetingEnded.attendeeReport,
+                                null,
+                                'Zoom'
                             );
                             
                             console.log('Zoom auto-save completed');
@@ -1571,7 +1634,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     console.log('[Service Worker] Saving with title:', titleToSave);
 
                     // Use auto-download (saveAs: false) to provide filename automatically
-                    await saveTranscript(titleToSave, message.transcriptArray, downloadAliases, message.format, message.recordingStartTime, false, message.attendeeReport, message.userRecordingStartTime);
+                    await saveTranscript(titleToSave, message.transcriptArray, downloadAliases, message.format, message.recordingStartTime, false, message.attendeeReport, message.userRecordingStartTime, message.platform || null);
 
                     sendResponse({ success: true });
                 } catch (error) {
@@ -1612,7 +1675,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const autoSaveAliasData = await chrome.storage.local.get(autoSaveSessionKey);
                         const autoSaveAliases = autoSaveAliasData[autoSaveSessionKey] || {};
 
-                        await saveTranscript(meetingTitleToSave, message.transcriptArray, autoSaveAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport);
+                        await saveTranscript(meetingTitleToSave, message.transcriptArray, autoSaveAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport, null, message.platform || null);
                         console.log(`Auto-save completed: ${meetingTitleToSave}`);
 
                         // Also save to session history

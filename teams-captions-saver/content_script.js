@@ -361,42 +361,268 @@ let cachedElements = new Map();
 let autoEnableInProgress = false;
 let autoEnableLastAttempt = 0;
 
-// --- Silent AudioContext for Background Tab Throttle Prevention ---
-// Chrome applies intensive throttling to background tabs after 5 minutes,
-// but exempts tabs that are playing audio. This silent AudioContext keeps
-// the tab in Chrome's "minimal throttling" tier so MutationObserver-based
-// caption capture continues working when the tab is hidden.
-let antiThrottleAudioCtx = null;
-let antiThrottleOscillator = null;
+// --- Background Capture (visibility shim) ---
+// Meeting apps stop rendering captions into the DOM while the tab is hidden
+// and flush them when it regains focus. visibility_shim.js (injected into the
+// page's main world below) makes the page believe the tab is always visible
+// and focused while capture is active. Controlled by the `backgroundCapture`
+// sync setting (default on).
+let visibilityShimActive = false;
 
-function startAntiThrottle() {
-    if (antiThrottleAudioCtx) return; // Already running
+function setVisibilityShim(active) {
+    active = !!active;
+    if (active === visibilityShimActive) return;
+    visibilityShimActive = active;
     try {
-        antiThrottleAudioCtx = new AudioContext();
-        antiThrottleOscillator = antiThrottleAudioCtx.createOscillator();
-        const gain = antiThrottleAudioCtx.createGain();
-        // Inaudible: 1Hz frequency at near-zero volume
-        antiThrottleOscillator.frequency.setValueAtTime(1, antiThrottleAudioCtx.currentTime);
-        gain.gain.setValueAtTime(0.0001, antiThrottleAudioCtx.currentTime);
-        antiThrottleOscillator.connect(gain);
-        gain.connect(antiThrottleAudioCtx.destination);
-        antiThrottleOscillator.start();
-        Logger.info('[Caption Saver] Anti-throttle audio started (background tab protection)');
+        window.postMessage({ type: 'LCS_VISIBILITY_SHIM', active }, window.location.origin);
+        Logger.info(Logger.Category.CAPTION, `Background capture shim ${active ? "enabled" : "disabled"}`);
     } catch (e) {
-        Logger.warn('[Caption Saver] Failed to start anti-throttle audio:', e.message);
+        Logger.warn(Logger.Category.CAPTION, "Failed to toggle background capture shim:", e.message);
     }
 }
 
-function stopAntiThrottle() {
-    if (antiThrottleOscillator) {
-        try { antiThrottleOscillator.stop(); } catch (e) { /* already stopped */ }
-        antiThrottleOscillator = null;
+async function applyBackgroundCaptureSetting() {
+    if (!capturing) {
+        setVisibilityShim(false);
+        return;
     }
-    if (antiThrottleAudioCtx) {
-        try { antiThrottleAudioCtx.close(); } catch (e) { /* already closed */ }
-        antiThrottleAudioCtx = null;
+    const { backgroundCapture } = await chrome.storage.sync.get('backgroundCapture');
+    setVisibilityShim(backgroundCapture !== false);
+}
+
+// --- Image embedding & shared content (slide) capture ---
+// Pixels never go into the transcript: they are sent to the service worker,
+// which stores them in IndexedDB (imageStore.js). Transcript entries carry an
+// imageId. The live viewer gets the data URL in the broadcast for instant display.
+const IMAGE_EMBED = {
+    MAX_WIDTH: 1280,
+    JPEG_QUALITY: 0.85,
+    KEEP_ORIGINAL_BYTES: 400 * 1024,   // small PNG/GIF stay lossless, keep animation
+    MAX_ORIGINAL_BYTES: 4 * 1024 * 1024 // refuse anything bigger before decoding
+};
+
+function hashString(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+    return h.toString(36);
+}
+
+function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function fetchImageBlob(url) {
+    if (!url) return null;
+    // blob:/data: URLs and same-origin/authenticated resources: try a plain fetch first
+    try {
+        const response = await fetch(url, { credentials: 'include' });
+        if (response.ok) {
+            const blob = await response.blob();
+            if (blob.type.startsWith('image/') && blob.size <= IMAGE_EMBED.MAX_ORIGINAL_BYTES) return blob;
+        }
+    } catch (e) { /* fall through to the DOM copy */ }
+
+    // Fallback: the page already decoded this image; copy it off the <img> element
+    const img = [...document.images].find(el =>
+        el.src === url || el.currentSrc === url || el.getAttribute('data-orig-src') === url);
+    if (img && img.complete && img.naturalWidth > 0) {
+        try {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            canvas.getContext('2d').drawImage(img, 0, 0);
+            return await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        } catch (e) {
+            // Cross-origin image without CORS taints the canvas; nothing more we can do
+        }
     }
-    Logger.info('[Caption Saver] Anti-throttle audio stopped');
+    return null;
+}
+
+// Returns { dataUrl, width, height, bytes } or null.
+async function imageBlobToEmbeddable(blob) {
+    if (!blob) return null;
+    let bitmap;
+    try {
+        bitmap = await createImageBitmap(blob);
+    } catch (e) {
+        return null;
+    }
+    try {
+        const keepOriginal = blob.size <= IMAGE_EMBED.KEEP_ORIGINAL_BYTES &&
+            (blob.type === 'image/gif' || blob.type === 'image/png' || blob.type === 'image/webp') &&
+            bitmap.width <= IMAGE_EMBED.MAX_WIDTH;
+        if (keepOriginal) {
+            return { dataUrl: await blobToDataUrl(blob), width: bitmap.width, height: bitmap.height, bytes: blob.size };
+        }
+        const scale = Math.min(1, IMAGE_EMBED.MAX_WIDTH / bitmap.width);
+        const w = Math.max(1, Math.round(bitmap.width * scale));
+        const h = Math.max(1, Math.round(bitmap.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', IMAGE_EMBED.JPEG_QUALITY);
+        return { dataUrl, width: w, height: h, bytes: Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75) };
+    } finally {
+        bitmap.close();
+    }
+}
+
+function storeImage(record) {
+    if (!record || !record.id || !record.dataUrl) return;
+    safeSendMessage({
+        message: 'store_image',
+        sessionId: currentSessionId,
+        image: { sessionId: currentSessionId, createdAt: Date.now(), ...record }
+    });
+}
+
+const embeddedAttachmentIds = new Map(); // url -> imageId, so repeated images are stored once per session
+
+async function embedChatAttachments(chatMessage) {
+    const attachments = chatMessage.attachments || [];
+    let changed = false;
+    const liveImages = {};
+    for (const att of attachments) {
+        if (att.imageId || att.type !== 'image' || !att.url) continue;
+        const cached = embeddedAttachmentIds.get(att.url);
+        if (cached) {
+            att.imageId = cached;
+            changed = true;
+            continue;
+        }
+        const embeddable = await imageBlobToEmbeddable(await fetchImageBlob(att.url));
+        if (!embeddable) continue;
+        const imageId = `att_${currentSessionId || 'nosession'}_${hashString(att.url)}`;
+        storeImage({ id: imageId, kind: 'attachment', hash: null, ...embeddable });
+        embeddedAttachmentIds.set(att.url, imageId);
+        att.imageId = imageId;
+        liveImages[imageId] = embeddable.dataUrl;
+        changed = true;
+        Logger.logChat(`Embedded attachment ${att.filename || ''} (${Math.round(embeddable.bytes / 1024)} KB)`);
+    }
+    if (changed) {
+        broadcastCaptionUpdate({ type: 'update', caption: chatMessage, images: liveImages });
+    }
+}
+
+// Session-level slide registry. Frames arrive from two samplers: the Teams
+// share <video> (SlideCapture in this script) and the PowerPoint Live iframe
+// (pptLiveCapture.js, relayed by the service worker as 'shared_content_frame').
+// Both funnel through registerSlide() so numbering, "seen earlier" dedupe and
+// the storage budget are shared.
+const slideRegistry = { slides: [], bytes: 0 };
+let sharedContentEnabled = false;
+
+function resetSlideRegistry() {
+    slideRegistry.slides.length = 0;
+    slideRegistry.bytes = 0;
+}
+
+function registerSlide(frame, sourceLabel) {
+    if (!frame || !frame.dataUrl || !frame.hash) return;
+    const cfg = SlideCapture.CONFIG;
+
+    let earlier = null;
+    for (const s of slideRegistry.slides) {
+        if (SlideCapture.hammingHex(s.hash, frame.hash) <= cfg.HASH_DISTANCE) { earlier = s; break; }
+    }
+
+    let slide;
+    if (earlier) {
+        slide = { ...earlier, dataUrl: null, bytes: 0, seenEarlier: true };
+        Logger.logCaption(`[Slide Capture] Slide ${earlier.slideNumber} shown again${sourceLabel ? ' (' + sourceLabel + ')' : ''}`);
+    } else {
+        if (slideRegistry.slides.length >= cfg.MAX_SLIDES_PER_SESSION || slideRegistry.bytes >= cfg.MAX_BYTES_PER_SESSION) {
+            Logger.logCaption('[Slide Capture] Session image budget reached, not storing new slide');
+            return;
+        }
+        const slideNumber = slideRegistry.slides.length + 1;
+        const imageId = `slide_${currentSessionId || 'nosession'}_${Date.now()}_${slideNumber}`;
+        const rec = { imageId, hash: frame.hash, width: frame.width, height: frame.height, slideNumber };
+        slideRegistry.slides.push(rec);
+        slideRegistry.bytes += frame.bytes || 0;
+        slide = { ...rec, dataUrl: frame.dataUrl, bytes: frame.bytes || 0, seenEarlier: false };
+        Logger.logCaption(`[Slide Capture] Kept slide ${slideNumber} (${frame.width}x${frame.height}, ${Math.round((frame.bytes || 0) / 1024)} KB)${sourceLabel ? ' from ' + sourceLabel : ''}`);
+    }
+
+    const presenter = frame.presenter || resolveSharedContentPresenter() || 'Presenter';
+    const now = new Date();
+    const label = slide.seenEarlier
+        ? `Shared content (slide ${slide.slideNumber}, seen earlier)`
+        : `Shared content (slide ${slide.slideNumber})`;
+    const entry = {
+        Name: presenter,
+        Text: label,
+        Time: formatTimestamp(now),
+        timestamp: now.toISOString(),
+        Type: 'slide',
+        key: `slide_${slide.imageId}_${now.getTime()}`,
+        imageId: slide.imageId,
+        imageHash: slide.hash,
+        slideNumber: slide.slideNumber,
+        seenEarlier: !!slide.seenEarlier
+    };
+    transcriptArray.push(entry);
+    if (slide.dataUrl) {
+        storeImage({ id: slide.imageId, kind: 'slide', hash: slide.hash, dataUrl: slide.dataUrl, width: slide.width, height: slide.height, bytes: slide.bytes });
+    }
+    broadcastCaptionUpdate({
+        type: 'new',
+        caption: entry,
+        images: slide.dataUrl ? { [slide.imageId]: slide.dataUrl } : undefined
+    });
+}
+
+// Presenter name when the frame itself carries none (PowerPoint Live): ask the
+// platform config to read it from the stage, if it can.
+function resolveSharedContentPresenter() {
+    try {
+        const cfg = platformConfig && platformConfig.sharedContent;
+        const name = cfg && cfg.getPresenter ? cfg.getPresenter(null) : null;
+        return (name && String(name).trim()) || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Frames relayed from the PowerPoint Live iframe (see pptLiveCapture.js)
+function handleSharedContentFrame(request) {
+    if (window.top !== window.self) return;
+    if (!capturing || !sharedContentEnabled) return;
+    if (typeof SlideCapture === 'undefined') return;
+    registerSlide(request.frame, request.source === 'powerpoint-live' ? 'PowerPoint Live' : request.source);
+}
+
+async function applySharedContentSetting() {
+    if (typeof SlideCapture === 'undefined') return;
+    if (!capturing) {
+        SlideCapture.stop();
+        return;
+    }
+    const { captureSharedContent } = await chrome.storage.sync.get('captureSharedContent');
+    sharedContentEnabled = !!captureSharedContent;
+    const config = platformConfig && platformConfig.sharedContent;
+    if (sharedContentEnabled && config && config.videoSelector) {
+        if (!SlideCapture.isActive()) {
+            SlideCapture.start({
+                getFrame: SlideCapture.videoFrameSource(config),
+                onSlide: (frame) => registerSlide(frame, 'screen share'),
+                log: (...args) => Logger.info(Logger.Category.CAPTION, ...args)
+            });
+        }
+    } else {
+        if (sharedContentEnabled && !config) {
+            Logger.info(Logger.Category.PLATFORM, 'Shared content capture is not supported on this platform yet');
+        }
+        SlideCapture.stop();
+    }
 }
 let autoEnableDebounceTimer = null;
 let autoSaveTriggered = false;
@@ -1102,6 +1328,12 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
         }
         if (changes.hotKeywordSettings) {
             kwSettings = { ...kwSettings, ...(changes.hotKeywordSettings.newValue || {}) };
+        }
+        if (changes.backgroundCapture) {
+            applyBackgroundCaptureSetting();
+        }
+        if (changes.captureSharedContent) {
+            applySharedContentSetting();
         }
     }
 });
@@ -2359,6 +2591,12 @@ function captureChatMessages(skipInitialMessages = false) {
             type: 'new',
             caption: chatMessage
         });
+
+        // Embed image attachments so they survive in exports and history (async, re-broadcasts when done)
+        if (chatMessage.attachments) {
+            embedChatAttachments(chatMessage).catch(err =>
+                Logger.warn(Logger.Category.CHAT, 'Attachment embedding failed:', err.message));
+        }
     });
     
     if (skipInitialMessages && skippedCount > 0) {
@@ -2557,6 +2795,15 @@ let captionsStateDebounceTimer = null;
 let leaveButtonListener = null;
 let visibilityChangeHandler = null;
 
+// Registered once, at load time, on window in the capture phase. The background
+// capture shim (visibility_shim.js) swallows trusted visibilitychange events at
+// the same point for the page, and the stop flag is shared across JS worlds, so
+// this must be registered before the shim to keep receiving the event.
+window.addEventListener('visibilitychange', (e) => {
+    if (!e.isTrusted) return; // Ignore the shim's synthetic re-dispatches
+    if (visibilityChangeHandler) visibilityChangeHandler(e);
+}, true);
+
 function setupMeetingObserver() {
     if (meetingObserver) return;
     
@@ -2575,7 +2822,7 @@ function setupMeetingObserver() {
                 }, 500);
             }
         };
-        document.addEventListener('visibilitychange', visibilityChangeHandler);
+        // Dispatched via the load-time window capture listener above
     }
     
     meetingObserver = new MutationObserver((mutations) => {
@@ -3248,9 +3495,9 @@ async function startCaptureSession() {
     currentMeetingTitle = extractMeetingTitle();
     recordingStartTime = new Date();
 
-    // Start silent audio to prevent Chrome from throttling this tab in the background
-    startAntiThrottle();
-    
+    // Keep the meeting app rendering captions while this tab is in the background
+    applyBackgroundCaptureSetting();
+
     console.log(`Capture started. Title: "${currentMeetingTitle}", Time: ${recordingStartTime.toLocaleString()}`);
     
     // Create a session if we don't have one yet
@@ -3272,9 +3519,13 @@ async function startCaptureSession() {
     
     // Start periodic backup
     startPeriodicBackup();
-    
+
     // Start attendee tracking
     startAttendeeTracking();
+
+    // Start shared content (slide) capture if enabled and supported (needs the session id for image ids)
+    resetSlideRegistry();
+    applySharedContentSetting();
     
     // For Google Meet, try to capture the user's name early
     if (platformConfig && platformConfig.name === 'Google Meet' && platformConfig.getCurrentUserName) {
@@ -3406,7 +3657,10 @@ async function stopCaptureSession() {
 
     console.log("Captions turned off or meeting ended. Capture stopped. Data preserved.");
     capturing = false;
-    stopAntiThrottle();
+    setVisibilityShim(false);
+    if (typeof SlideCapture !== 'undefined') SlideCapture.stop();
+    sharedContentEnabled = false;
+    embeddedAttachmentIds.clear();
     if (observer) {
         observer.disconnect();
         observer = null;
@@ -3692,11 +3946,8 @@ function cleanupObservers() {
         leaveButtonListener = null;
     }
 
-    // Remove visibility change handler
-    if (visibilityChangeHandler) {
-        document.removeEventListener('visibilitychange', visibilityChangeHandler);
-        visibilityChangeHandler = null;
-    }
+    // Detach visibility change handler (the window listener stays, but does nothing)
+    visibilityChangeHandler = null;
 
     // Clear all intervals (memory leak prevention)
     if (observerCheckInterval) {
@@ -3810,6 +4061,12 @@ if (initializePlatform()) {
 // --- Message Handling ---
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.message) {
+        case 'shared_content_frame':
+            // Slide frame relayed from the PowerPoint Live iframe via the service worker
+            handleSharedContentFrame(request);
+            sendResponse({ received: true });
+            break;
+
         case 'viewer_ready':
             // Viewer is ready to receive live updates
             sendResponse({
@@ -4051,23 +4308,26 @@ function showToastNotification(meetingTitle) {
     }, 5000);
 }
 
-// --- Recording Transcript Interceptor ---
-// Inject external script to intercept Teams recording transcript requests
-// Using external file to avoid CSP inline script violations
-(function injectTranscriptInterceptor() {
+// --- Main-world script injection ---
+// External files are used to avoid CSP inline script violations.
+function injectPageScript(file, label) {
     const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('transcript_interceptor.js');
+    script.src = chrome.runtime.getURL(file);
     script.onload = function() {
-        console.log('[Recording Transcript] Interceptor script loaded');
+        console.log(`[${label}] Script loaded`);
         this.remove();
     };
     script.onerror = function() {
-        console.error('[Recording Transcript] Failed to load interceptor script');
+        console.error(`[${label}] Failed to load ${file}`);
         this.remove();
     };
-
     (document.head || document.documentElement).appendChild(script);
-})();
+}
+
+// Intercepts Teams recording transcript requests
+injectPageScript('transcript_interceptor.js', 'Recording Transcript');
+// Keeps the meeting app rendering captions while the tab is hidden (idle until capture starts)
+injectPageScript('visibility_shim.js', 'Background Capture');
 
 // Listen for transcript data from injected script
 window.addEventListener('message', (event) => {

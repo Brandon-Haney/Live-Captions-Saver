@@ -764,6 +764,13 @@ class SessionManager {
         try {
             console.log(`[SessionManager] Deleting session: ${sessionId}`);
 
+            // Images (slides, embedded chat attachments) live in IndexedDB; drop them with the session
+            if (typeof ImageStore !== 'undefined' && ImageStore.deleteBySession) {
+                ImageStore.deleteBySession(sessionId)
+                    .then(n => { if (n) console.log(`[SessionManager] Removed ${n} image(s) for session ${sessionId}`); })
+                    .catch(err => console.warn('[SessionManager] Image cleanup failed:', err));
+            }
+
             // Get metadata from memory or storage
             let metadata = this.sessions.get(sessionId)?.metadata;
             let chunkCount = 0;
