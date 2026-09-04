@@ -2,6 +2,19 @@
 
 All notable changes to the Live Captions Saver extension will be documented in this file.
 
+## [5.4.1] - 2026-09-04
+
+### Added
+- **Include Images with Exports** (`exportImages` sync key, default off, Settings > Export): when on and the transcript holds slides or embedded chat images, TXT, Markdown, JSON and AI exports download as a `.zip` containing the transcript file plus `slides/slide-NN.png` (and `attachments/`), from both the popup/service worker and the viewer's Save dialog. Images are resized to a 1600px long edge at export (PNG kept; JPEG re-encoded at 0.9; GIF passed through), which reads well for a vision model at roughly 1,900 tokens per slide on current Claude models. The transcript references files by relative path so a file-reading agent such as Claude Code opens a slide only when it needs it: TXT/AI lines end with `-> slides/slide-03.png`, Markdown adds `![Slide 3](slides/slide-03.png)`, JSON entries gain `imageFile`. New `exportPackage.js` holds the dependency-free stored-zip writer, image preparation and caption compaction; loaded by the service worker and viewer
+
+- **Unlimited storage**: the manifest now requests `unlimitedStorage`, which lifts Chrome's 10 MB cap on `chrome.storage.local` (transcripts) and exempts the extension's IndexedDB (images) from quota eviction. Chrome shows no permission warning for it, so existing installs update without being disabled. Meeting history is bounded only by the storage budget below
+- **Storage Budget** (`storageBudgetMB` sync key, default 100, Settings > Storage; 50 MB, 100 MB, 250 MB, 500 MB, 1 GB or Unlimited): transcripts and images are counted together. Before each save and when a meeting ends, the oldest ended meetings (with their images) are deleted until usage fits the budget. Active meetings and the meeting being saved are never removed. This replaces the reactive 7 MB / 8 MB eviction that used to fire when a write no longer fit the old 10 MB quota, and the never-enforced 20-session count limit
+- **Storage panel** at the bottom of the popup's main tab: a bar of combined usage against the budget (green, amber past 60%, red past 85%; with Unlimited it shows usage and free disk from `navigator.storage.estimate()`), a transcripts/images breakdown, a hint about what gets deleted and when, and a "Free up space" button that removes orphaned transcript keys and images and applies the budget on demand. Each entry in Previous Sessions now shows its size (transcript plus images, with an image count)
+- `SessionManager.getStorageOverview()` (pure read, no cleanup side effects), `getCombinedUsage()`, `enforceBudget()`, `freeUpSpace()`; `ImageStore.usageBySession()` sums bytes per session in one cursor pass; `getSessionSize()` now reads chunk counts from storage for sessions not held in memory, so popup-side sizes are complete
+
+### Changed
+- **AI Analysis format is now compact**: consecutive captions from one speaker within 60s are merged into a single paragraph with one timestamp (Teams emits short fragments whose per-line timestamp and speaker prefix can rival the words in token cost); attendees are listed on one line; a "Slides" index lists each unique slide once with time, presenter and packaged file; `[SLIDE]` lines read "Slide 3 shown by Name" or "Slide 3 shown again". PDF was considered and rejected for AI use: Claude renders every PDF page as an image on top of extracting its text, so a text-heavy transcript pays roughly double
+
 ## [5.4.0] - 2026-09-04
 
 ### Added
