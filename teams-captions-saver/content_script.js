@@ -348,6 +348,7 @@ const TIMING = {
 // --- State ---
 const transcriptArray = [];
 let capturing = false;
+let finalSessionSaveDone = false; // set once the meeting-end save is confirmed on disk; pagehide re-sends otherwise
 let currentMeetingTitle = ''; // Current meeting title
 let recordingStartTime = null;
 let observer = null;
@@ -3648,6 +3649,7 @@ async function startCaptureSession() {
 
     console.log("New caption session detected. Starting capture.");
     transcriptArray.length = 0;
+    finalSessionSaveDone = false;
     kwLastAlerts = {};
     dismissAllKeywordToasts();
 
@@ -3875,7 +3877,10 @@ async function stopCaptureSession() {
                     if (attempt < 3) await delay(1000 * attempt);
                 }
             }
-            if (finalSaved) Logger.logSession(`Final session data saved (${transcriptArray.length} entries)`);
+            if (finalSaved) {
+                finalSessionSaveDone = true;
+                Logger.logSession(`Final session data saved (${transcriptArray.length} entries)`);
+            }
         } else {
             // Fallback to old storage method - check quota first
             const hasSpace = await checkStorageQuota();
@@ -4182,6 +4187,31 @@ function cleanupObservers() {
 }
 
 // Cleanup on page unload
+// Last line of defence: if the tab is closed or navigated away before the awaited
+// meeting-end save confirmed (its retries span ~4 s), push the current transcript
+// once more. Fire-and-forget by necessity; the service worker reloads the session
+// from storage if it was cold-started, so this usually lands.
+window.addEventListener('pagehide', () => {
+    try {
+        if (window.top !== window.self) return;
+        if (!currentSessionId || transcriptArray.length === 0 || finalSessionSaveDone) return;
+        chrome.runtime.sendMessage({
+            action: 'updateSession',
+            sessionId: currentSessionId,
+            data: {
+                transcript: getCleanTranscript(),
+                attendeeReport: buildAttendeeReportSnapshot(),
+                meetingTitle: currentMeetingTitle || 'Untitled Meeting',
+                captionCount: transcriptArray.length,
+                attendeeCount: attendeeData.allAttendees.size,
+                status: capturing ? undefined : 'ended'
+            }
+        }, () => { void chrome.runtime.lastError; });
+    } catch (e) {
+        // Page is going away; nothing else we can do
+    }
+});
+
 window.addEventListener('beforeunload', () => {
     // For Zoom iframe, save data before unload
     if (platformConfig && platformConfig.name === 'Zoom' && transcriptArray.length > 0) {
