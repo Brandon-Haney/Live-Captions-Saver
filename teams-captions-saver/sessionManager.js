@@ -607,22 +607,21 @@ class SessionManager {
         }
 
         try {
-            const session = this.sessions.get(sessionId);
+            // Always read metadata fresh from storage. The popup and the service worker each
+            // hold their own SessionManager; an in-memory copy can carry a chunkCount from an
+            // earlier backup, and reading with a stale count silently drops the end of the
+            // meeting (viewer showed 28 s less than the export of the same session).
             let metadata = null;
             let stats = {};
-
-            if (session) {
-                metadata = session.metadata;
-                stats = session.stats;
-            } else {
-                // Try loading from storage
-                const metadataKey = `${sessionId}_metadata`;
-                const stored = await chrome.storage.local.get(metadataKey);
-                if (stored[metadataKey]) {
-                    metadata = stored[metadataKey];
-                    const statsData = await chrome.storage.local.get(`${sessionId}_stats`);
-                    stats = statsData[`${sessionId}_stats`] || {};
-                }
+            const stored = await chrome.storage.local.get([`${sessionId}_metadata`, `${sessionId}_stats`]);
+            if (stored[`${sessionId}_metadata`]) {
+                metadata = stored[`${sessionId}_metadata`];
+                stats = stored[`${sessionId}_stats`] || {};
+                const inMemory = this.sessions.get(sessionId);
+                if (inMemory) { inMemory.metadata = metadata; inMemory.stats = stats; }
+            } else if (this.sessions.get(sessionId)) {
+                metadata = this.sessions.get(sessionId).metadata;
+                stats = this.sessions.get(sessionId).stats;
             }
 
             // If no metadata found, check if this is an orphaned migrated session
@@ -671,24 +670,33 @@ class SessionManager {
                 throw new Error('Corrupted session metadata: invalid chunkCount');
             }
 
-            for (let i = 0; i < chunkCount; i++) {
+            // Chunks are written before the count is; if the count lags, probe past it so a
+            // reader never loses the tail of a meeting to a stale metadata write
+            const PROBE_BEYOND = 20;
+            for (let i = 0; i < chunkCount + PROBE_BEYOND; i++) {
                 chunkKeys.push(`${sessionId}_chunk_${i}`);
             }
 
             const chunks = await chrome.storage.local.get(chunkKeys);
             const transcriptArray = [];
             let missingChunks = [];
+            let loadedCount = 0;
 
-            for (let i = 0; i < chunkCount; i++) {
+            for (let i = 0; i < chunkCount + PROBE_BEYOND; i++) {
                 const chunk = chunks[`${sessionId}_chunk_${i}`];
+                if (i >= chunkCount && !chunk) break; // past the recorded count and nothing more on disk
                 // Validate chunk is array before spreading
                 if (chunk && Array.isArray(chunk)) {
                     transcriptArray.push(...chunk);
+                    loadedCount = i + 1;
                 } else if (chunk) {
                     console.warn(`[SessionManager] Chunk ${i} is not an array:`, typeof chunk);
                 } else {
                     missingChunks.push(i);
                 }
+            }
+            if (loadedCount > chunkCount) {
+                console.warn(`[SessionManager] Session ${sessionId}: metadata said ${chunkCount} chunk(s) but ${loadedCount} were on disk; using all of them`);
             }
 
             // Warn about missing chunks but don't fail - return partial data
@@ -769,8 +777,9 @@ class SessionManager {
         
         console.log(`[SessionManager] Ended session ${sessionId} with ${session.stats.captionCount} captions`);
 
-        // Apply the storage budget now that this meeting's data is final; never touches active sessions
-        this.enforceBudget().catch(err => console.warn('[SessionManager] Budget cleanup failed:', err));
+        // Apply the storage budget now that this meeting's data is final; never touches active
+        // sessions, and never the one that just ended
+        this.enforceBudget({ protectSessionId: sessionId }).catch(err => console.warn('[SessionManager] Budget cleanup failed:', err));
 
         return true;
     }
