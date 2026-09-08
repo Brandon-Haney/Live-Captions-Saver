@@ -42,6 +42,26 @@ startPendingDownloadsCleanup();
 
 // --- Utility Functions ---
 // Safe timestamp parsing to prevent NaN in sorting
+// Start, end and duration of a meeting from its entries (and the recording start, if earlier)
+function meetingSpan(transcript, recordingStartTime) {
+    let start = parseSafeTimestamp(recordingStartTime) || Infinity;
+    let end = 0;
+    for (const e of transcript || []) {
+        const t = e ? parseSafeTimestamp(e.timestamp) : 0;
+        if (!t) continue;
+        if (t < start) start = t;
+        if (t > end) end = t;
+    }
+    if (!isFinite(start)) return null;
+    if (end < start) end = start;
+    const mins = Math.round((end - start) / 60000);
+    const durationText = mins >= 60 ? `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m` : `${mins}m`;
+    const startDate = new Date(start);
+    const pad = (n) => String(n).padStart(2, '0');
+    const isoDate = `${startDate.getFullYear()}-${pad(startDate.getMonth() + 1)}-${pad(startDate.getDate())}`;
+    return { start: startDate, end: new Date(end), durationText, isoDate };
+}
+
 function parseSafeTimestamp(timestampValue) {
     if (!timestampValue) return 0;
 
@@ -409,6 +429,12 @@ function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled M
         content += `**Meeting Start:** ${new Date(meetingStart).toLocaleString()}\n\n`;
     }
 
+    const span = meetingSpan(validTranscript, meetingStart || recordingStartTime);
+    if (span) {
+        content += `**Date:** ${span.isoDate}\n\n`;
+        content += `**Duration:** ${span.durationText} (${span.start.toLocaleTimeString()} to ${span.end.toLocaleTimeString()})\n\n`;
+    }
+
     // Add first and last caption times if available
     if (transcript.length > 0 && transcript[0].Time && transcript[transcript.length - 1].Time) {
         content += `**First Caption:** ${transcript[0].Time}\n\n`;
@@ -686,9 +712,15 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
         console.error('[formatForAi] Failed to get AI instructions from storage:', error);
         // Continue with empty instructions
     }
-    const date = recordingStartTime ? new Date(recordingStartTime) : new Date();
+    const span = meetingSpan(transcript, recordingStartTime);
+    const date = span ? span.start : (recordingStartTime ? new Date(recordingStartTime) : new Date());
 
-    let metadataHeader = `Meeting Title: ${meetingTitle}\nDate: ${date.toLocaleString()}`;
+    let metadataHeader = `Meeting Title: ${meetingTitle}\nDate: ${span ? span.isoDate : date.toISOString().slice(0, 10)}`;
+    if (span) {
+        metadataHeader += `\nStart: ${span.start.toLocaleString()}\nEnd: ${span.end.toLocaleString()}\nDuration: ${span.durationText}`;
+    } else {
+        metadataHeader += `\nStart: ${date.toLocaleString()}`;
+    }
     let attendeeHistory = [];
     let attendeeList = [];
     let totalAttendees = 0;
@@ -1568,6 +1600,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     sendResponse({ success: true, id: image.id });
                 } catch (error) {
                     console.error('[Service Worker] store_image failed:', error);
+                    sendResponse({ success: false, error: error.message });
+                }
+                return;
+            }
+            case 'delete_image': {
+                // A retracted slide: its pixels are no longer referenced by any entry
+                try {
+                    if (message.id) await ImageStore.remove(message.id);
+                    sendResponse({ success: true });
+                } catch (error) {
+                    console.warn('[Service Worker] delete_image failed:', error);
                     sendResponse({ success: false, error: error.message });
                 }
                 return;

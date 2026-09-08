@@ -2,6 +2,21 @@
 
 All notable changes to the Live Captions Saver extension will be documented in this file.
 
+## [5.4.2] - 2026-09-08
+
+Fixes from reading the first real exported AI package.
+
+### Fixed
+- **Blank loading frames were kept as slides**: a screen that stayed still for two samples qualified, so an Excel loading state landed as its own slide two seconds before the real one. `slideCapture.js` now skips low-content frames (gray standard deviation below 4: blank, loading, black) without adding delay, and the registry retracts any slide replaced within 3 seconds: the transcript entry is dropped, the viewer receives a `remove` live update, and the stored image is deleted (`delete_image` message). The replacement takes the retracted slide's number, so numbering stays contiguous
+- **Spurious "left the meeting" events**: every roster scan recorded a departure for anyone missing from the visible rows, and the roster is virtualized and torn down during chat-pane rotation, so a half-dismantled list read as everyone leaving (the local user "left" twice while speaking). A scan may now produce leave events only when the pane is visible and its row count reaches the header count; a person must be missing from complete scans at least 20 s apart; the local user (name from the Teams profile avatar) and anyone who produced a caption in the last 60 s are never marked as leaving; partial scans no longer clear the current-attendee set, so they cannot fake rejoins either; and roster mutations are debounced 1.5 s so teardown bursts yield one scan
+- **"Name" and "Name [C]" listed as two attendees**: new `normalizeDisplayName()` in `platformConfig.js` strips trailing bracketed tenant tags and "(You)/(Guest)/(External)/(Unverified)" suffixes, applied at every intake: caption speakers, chat authors, roster rows, slide presenters. Teams gained `getCurrentUserName()` from the profile avatar
+- **Entries out of chronological order**: when a caption was extended in place, its displayed `Time` was moved to the latest edit while the sort key (`timestamp`) stayed at first appearance, so a slide at 7:35:58 could print after a caption labelled 7:36:00. `Time` now stays at first appearance on every platform, matching the sort key and SRT semantics
+- **Cursor-only re-captures**: two captures of the same sheet with a moved cursor or cell selection passed the hash test as different slides. The registry now also compares 64x36 thumbnails and treats a change confined to under 4% of the area as the same slide; if that slide is the one already on screen nothing is recorded, otherwise it is a "shown again" entry
+
+### Changed
+- **One image format**: slides are always PNG at capture (the JPEG fallback above 1 MB is gone) and the export package re-encodes any non-PNG to PNG, so every packaged image has one format. Photographic shares cost more disk, which the storage budget absorbs
+- **Header date and duration**: the AI header now carries an ISO date plus start, end and duration; the Markdown header gains Date and Duration lines
+
 ## [5.4.1] - 2026-09-04
 
 ### Added

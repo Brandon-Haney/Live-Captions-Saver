@@ -517,26 +517,81 @@ async function embedChatAttachments(chatMessage) {
 // (pptLiveCapture.js, relayed by the service worker as 'shared_content_frame').
 // Both funnel through registerSlide() so numbering, "seen earlier" dedupe and
 // the storage budget are shared.
-const slideRegistry = { slides: [], bytes: 0 };
+const slideRegistry = { slides: [], bytes: 0, last: null, currentImageId: null };
+const SLIDE_RETRACT_MS = 3000;          // a slide replaced this soon after appearing was a transition or loading state
+const SLIDE_SAME_AREA_FRACTION = 0.04;  // change confined to under 4% of the thumbnail (cursor, caret, cell selection) = same slide
+const SLIDE_PIXEL_DELTA = 24;           // per-pixel gray difference that counts as "changed"
 let sharedContentEnabled = false;
 
 function resetSlideRegistry() {
     slideRegistry.slides.length = 0;
     slideRegistry.bytes = 0;
+    slideRegistry.last = null;
+    slideRegistry.currentImageId = null;
+}
+
+// Fraction of thumbnail pixels that differ between two frames (0..1)
+function changedAreaFraction(a, b) {
+    if (!a || !b || a.length !== b.length || a.length === 0) return 1;
+    let changed = 0;
+    for (let i = 0; i < a.length; i++) {
+        if (Math.abs(a[i] - b[i]) > SLIDE_PIXEL_DELTA) changed++;
+    }
+    return changed / a.length;
+}
+
+// Withdraw the most recently registered slide: drop the transcript entry, tell the
+// viewer to remove it, and delete its pixels if this entry was the one that stored them
+function retractLastSlide(reason) {
+    const last = slideRegistry.last;
+    if (!last) return;
+    const idx = transcriptArray.findIndex(e => e && e.key === last.key);
+    if (idx !== -1) transcriptArray.splice(idx, 1);
+    if (last.isNew) {
+        const sIdx = slideRegistry.slides.findIndex(s => s.imageId === last.imageId);
+        if (sIdx !== -1) {
+            slideRegistry.bytes -= slideRegistry.slides[sIdx].bytes || 0;
+            slideRegistry.slides.splice(sIdx, 1);
+        }
+        safeSendMessage({ message: 'delete_image', id: last.imageId });
+    }
+    broadcastCaptionUpdate({ type: 'remove', key: last.key, imageId: last.isNew ? last.imageId : undefined });
+    Logger.logCaption(`[Slide Capture] Retracted slide ${last.slideNumber} (${reason})`);
+    slideRegistry.last = null;
+    slideRegistry.currentImageId = last.previousImageId || null;
 }
 
 function registerSlide(frame, sourceLabel) {
     if (!frame || !frame.dataUrl || !frame.hash) return;
     const cfg = SlideCapture.CONFIG;
+    const now = new Date();
+    const thumb = Array.isArray(frame.thumb) ? frame.thumb : null;
 
+    // A slide replaced within SLIDE_RETRACT_MS was a transition or loading state, not content
+    if (slideRegistry.last && (now.getTime() - slideRegistry.last.at) < SLIDE_RETRACT_MS) {
+        retractLastSlide(`replaced after ${now.getTime() - slideRegistry.last.at} ms`);
+    }
+
+    // Match against slides already kept: by hash, or when the change is confined to a
+    // sliver of the image (cursor moved, cell selected) rather than the whole slide
     let earlier = null;
     for (const s of slideRegistry.slides) {
-        if (SlideCapture.hammingHex(s.hash, frame.hash) <= cfg.HASH_DISTANCE) { earlier = s; break; }
+        if (SlideCapture.hammingHex(s.hash, frame.hash) <= cfg.HASH_DISTANCE ||
+            (thumb && s.thumb && changedAreaFraction(thumb, s.thumb) < SLIDE_SAME_AREA_FRACTION)) {
+            earlier = s;
+            break;
+        }
+    }
+
+    // Same slide that is already on screen: nothing to record
+    if (earlier && earlier.imageId === slideRegistry.currentImageId) {
+        Logger.logCaption(`[Slide Capture] Ignored cursor-only change on slide ${earlier.slideNumber}`);
+        return;
     }
 
     let slide;
     if (earlier) {
-        slide = { ...earlier, dataUrl: null, bytes: 0, seenEarlier: true };
+        slide = { ...earlier, thumb: undefined, dataUrl: null, bytes: 0, seenEarlier: true };
         Logger.logCaption(`[Slide Capture] Slide ${earlier.slideNumber} shown again${sourceLabel ? ' (' + sourceLabel + ')' : ''}`);
     } else {
         if (slideRegistry.slides.length >= cfg.MAX_SLIDES_PER_SESSION || slideRegistry.bytes >= cfg.MAX_BYTES_PER_SESSION) {
@@ -545,15 +600,15 @@ function registerSlide(frame, sourceLabel) {
         }
         const slideNumber = slideRegistry.slides.length + 1;
         const imageId = `slide_${currentSessionId || 'nosession'}_${Date.now()}_${slideNumber}`;
-        const rec = { imageId, hash: frame.hash, width: frame.width, height: frame.height, slideNumber };
+        const rec = { imageId, hash: frame.hash, width: frame.width, height: frame.height, slideNumber, bytes: frame.bytes || 0, thumb };
         slideRegistry.slides.push(rec);
         slideRegistry.bytes += frame.bytes || 0;
-        slide = { ...rec, dataUrl: frame.dataUrl, bytes: frame.bytes || 0, seenEarlier: false };
+        slide = { ...rec, thumb: undefined, dataUrl: frame.dataUrl, seenEarlier: false };
         Logger.logCaption(`[Slide Capture] Kept slide ${slideNumber} (${frame.width}x${frame.height}, ${Math.round((frame.bytes || 0) / 1024)} KB)${sourceLabel ? ' from ' + sourceLabel : ''}`);
     }
 
-    const presenter = frame.presenter || resolveSharedContentPresenter() || 'Presenter';
-    const now = new Date();
+    const presenter = (typeof normalizeDisplayName === 'function' ? normalizeDisplayName(frame.presenter) : frame.presenter)
+        || resolveSharedContentPresenter() || 'Presenter';
     const label = slide.seenEarlier
         ? `Shared content (slide ${slide.slideNumber}, seen earlier)`
         : `Shared content (slide ${slide.slideNumber})`;
@@ -578,6 +633,15 @@ function registerSlide(frame, sourceLabel) {
         caption: entry,
         images: slide.dataUrl ? { [slide.imageId]: slide.dataUrl } : undefined
     });
+    slideRegistry.last = {
+        key: entry.key,
+        imageId: slide.imageId,
+        slideNumber: slide.slideNumber,
+        isNew: !slide.seenEarlier,
+        at: now.getTime(),
+        previousImageId: slideRegistry.currentImageId
+    };
+    slideRegistry.currentImageId = slide.imageId;
 }
 
 // Presenter name when the frame itself carries none (PowerPoint Live): ask the
@@ -1750,7 +1814,9 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
             if (!captionData) return;
 
             // Use the formatted timestamp if Time is not provided correctly
-            const { Name: name, Text: text } = captionData;
+            const { Name: rawName, Text: text } = captionData;
+            // Same person, same name everywhere (roster tags like "[C]" stripped)
+            const name = typeof normalizeDisplayName === 'function' ? (normalizeDisplayName(rawName) || rawName) : rawName;
             const time = getFormattedTimestamp(); // Always use our formatted timestamp
             if (text.length === 0) return;
 
@@ -1918,10 +1984,11 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                         // Update the element ID for next comparison
                         element.setAttribute('data-caption-id', newCaptionId);
                     } else {
-                        // Same speaker - just update the existing caption in place
+                        // Same speaker - just update the existing caption in place.
+                        // Time stays at first-seen: it is what exports sort on (via `timestamp`),
+                        // so moving it to the latest edit made entries display out of order.
                         if (existingEntry.Text !== text) {
                             existingEntry.Text = text;
-                            existingEntry.Time = time;
                             debouncedKeywordCheck(existingEntry);
 
                             // Broadcast update to viewer
@@ -1932,10 +1999,9 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                         }
                     }
                 } else {
-                    // For other platforms, use original logic
+                    // For other platforms, use original logic (Time stays at first-seen, see above)
                     if (existingEntry.Text !== text) {
                         existingEntry.Text = text;
-                        existingEntry.Time = time;
                         debouncedKeywordCheck(existingEntry);
                         // Broadcast update to viewer
                         broadcastCaptionUpdate({
@@ -2039,9 +2105,20 @@ function updateAttendeeList() {
         const currentTime = new Date().toLocaleTimeString();
         const currentTimestamp = Date.now(); // Use numeric timestamp for reliable comparison
 
-        // Clear current attendees for fresh update
+        // Only a complete scan may produce "left" events. The roster is virtualized and
+        // is torn down during chat-pane rotation, so a hidden pane or a row count below
+        // the header count means we are looking at a partial list, not at departures.
+        const paneVisible = attendeeTree.offsetParent !== null;
+        const headerCount = getRosterHeaderCount();
+        const scanComplete = paneVisible && attendeeItems.length > 0 &&
+            (headerCount === null || attendeeItems.length >= headerCount);
+        if (!attendeeData.pendingLeaves) attendeeData.pendingLeaves = new Map();
+
+        // Clear current attendees for a fresh update only when the scan is trustworthy;
+        // a partial scan may add newcomers but must not make anyone disappear.
         const previousAttendees = new Set(attendeeData.currentAttendees.keys());
-        attendeeData.currentAttendees.clear();
+        const previousRoles = new Map(attendeeData.currentAttendees);
+        if (scanComplete) attendeeData.currentAttendees.clear();
         
         // Process each attendee
         attendeeItems.forEach(item => {
@@ -2074,8 +2151,8 @@ function updateAttendeeList() {
             if (attendeeInfo && attendeeInfo.name) {
                 const { name, role, isCurrentUser } = attendeeInfo;
                 
-                // Skip "(You)" suffix for Google Meet
-                const cleanName = name.replace(/\s*\(You\)\s*$/, '');
+                // Strip "(You)" and tenant tags such as "[C]" so roster and captions agree on one name
+                const cleanName = (typeof normalizeDisplayName === 'function' ? normalizeDisplayName(name) : name.replace(/\s*\(You\)\s*$/, '')) || name;
                 
                 // If this is the current user on Google Meet, store their name
                 if (isCurrentUser && platformConfig && platformConfig.name === 'Google Meet') {
@@ -2142,9 +2219,29 @@ function updateAttendeeList() {
             }
         });
         
-        // Check for attendees who left
+        // Check for attendees who left. A departure is recorded only when:
+        //   - this scan was complete (pane visible, row count matches the header),
+        //   - the person was missing from two complete scans at least LEAVE_CONFIRM_MS apart,
+        //   - they are not the local user and have not produced a caption in the last minute.
+        // Until confirmed, the person stays in currentAttendees so no rejoin is faked either.
+        const LEAVE_CONFIRM_MS = 20000;
+        const localUser = getLocalUserName();
         previousAttendees.forEach(name => {
-            if (!attendeeData.currentAttendees.has(name)) {
+            if (!scanComplete) return;
+            if (attendeeData.currentAttendees.has(name)) {
+                attendeeData.pendingLeaves.delete(name);
+                return;
+            }
+            const stillHere = (localUser && name === localUser) || spokeRecently(name, 60000);
+            const firstMissing = attendeeData.pendingLeaves.get(name);
+            if (stillHere || !firstMissing || (currentTimestamp - firstMissing) < LEAVE_CONFIRM_MS) {
+                if (stillHere) attendeeData.pendingLeaves.delete(name);
+                else if (!firstMissing) attendeeData.pendingLeaves.set(name, currentTimestamp);
+                attendeeData.currentAttendees.set(name, previousRoles.get(name) || 'Attendee');
+                return;
+            }
+            attendeeData.pendingLeaves.delete(name);
+            {
                 // Check for duplicate leave event in recent history (within last 5 seconds)
                 // Use numeric timestamp for reliable comparison
                 const recentLeave = attendeeData.attendeeHistory
@@ -2200,6 +2297,41 @@ function updateAttendeeList() {
     } catch (error) {
         ErrorHandler.log(error, 'Updating attendee list', true);
     }
+}
+
+// Participant count from the roster header ("People (12)"), or null when unavailable
+function getRosterHeaderCount() {
+    try {
+        const selector = SELECTORS.ATTENDEE_COUNT || SELECTORS.attendeeCount;
+        if (!selector) return null;
+        const el = document.querySelector(selector);
+        const match = el && (el.textContent || '').match(/\((\d+)\)/);
+        return match ? parseInt(match[1], 10) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// The signed-in user's display name (never recorded as leaving while we are capturing)
+function getLocalUserName() {
+    try {
+        const name = platformConfig && platformConfig.getCurrentUserName ? platformConfig.getCurrentUserName() : null;
+        if (name && name !== 'You') return name;
+    } catch (e) { /* fall through */ }
+    return (window.currentUserName && window.currentUserName !== 'You') ? window.currentUserName : null;
+}
+
+// True when this person produced a caption within the last `withinMs`
+function spokeRecently(name, withinMs) {
+    const cutoff = Date.now() - withinMs;
+    for (let i = transcriptArray.length - 1; i >= 0; i--) {
+        const e = transcriptArray[i];
+        if (!e || !e.timestamp) continue;
+        const t = new Date(e.timestamp).getTime();
+        if (t < cutoff) return false;
+        if ((!e.Type || e.Type === 'caption') && e.Name === name) return true;
+    }
+    return false;
 }
 
 async function tryOpenParticipantPanel() {
@@ -2261,6 +2393,7 @@ async function startAttendeeTracking() {
         allAttendees: new Set(),
         currentAttendees: new Map(),
         attendeeHistory: [],
+        pendingLeaves: new Map(), // name -> first complete scan (ms) where they were missing
         lastUpdated: null,
         meetingStartTime: startTime,
     };
@@ -2332,6 +2465,8 @@ async function startAttendeeTracking() {
     }, TIMING.INITIAL_ATTENDEE_DELAY);
 }
 
+let attendeeScanDebounce = null;
+
 function setupAttendeeObserver() {
     // Disconnect existing observer if any
     if (attendeeObserver) {
@@ -2375,8 +2510,13 @@ function setupAttendeeObserver() {
         });
 
         if (hasRelevantChanges) {
-            console.log('[Attendee Observer] Detected attendee list change, updating...');
-            updateAttendeeList();
+            // Debounce: pane teardown and virtualized scrolling fire dozens of mutations in a
+            // burst; one scan after the DOM settles avoids reading a half-dismantled roster
+            clearTimeout(attendeeScanDebounce);
+            attendeeScanDebounce = setTimeout(() => {
+                console.log('[Attendee Observer] Detected attendee list change, updating...');
+                updateAttendeeList();
+            }, 1500);
         }
     });
 
@@ -2553,7 +2693,7 @@ function captureChatMessages(skipInitialMessages = false) {
         }
 
         const chatMessage = {
-            Name: messageData.author,
+            Name: (typeof normalizeDisplayName === 'function' ? normalizeDisplayName(messageData.author) : '') || messageData.author,
             Text: messageData.text,
             Time: formatTimestamp(messageTime), // Format the message's actual timestamp
             timestamp: messageTime.toISOString(), // ISO format for sorting in service worker

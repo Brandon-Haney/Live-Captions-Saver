@@ -1,7 +1,37 @@
 // Platform-specific configurations for caption capture
+
+/**
+ * One display name per person, wherever it comes from. Teams appends tenant
+ * tags to roster names ("Lexi Lambert [C]") and Meet/Zoom append "(You)" or
+ * "(Guest)"; captions carry the bare name, so without this the same person
+ * shows up twice in attendee lists and analytics. Applied at every intake
+ * point: captions, chat authors, roster rows, slide presenters.
+ */
+function normalizeDisplayName(raw) {
+    if (!raw || typeof raw !== 'string') return '';
+    let name = raw.replace(/\s+/g, ' ').trim();
+    let prev;
+    do {
+        prev = name;
+        name = name
+            .replace(/\s*\[[^\]]*\]\s*$/, '')                                            // "[C]", "[External]"
+            .replace(/\s*\((?:you|me|guest|external|unverified|organizer|presenter|attendee)\)\s*$/i, '')
+            .trim();
+    } while (name !== prev && name.length > 0);
+    return name || raw.trim();
+}
+
 const PLATFORM_CONFIGS = {
     'teams.microsoft.com': {
         name: 'Microsoft Teams',
+        // Signed-in user's display name from the profile avatar ("Profile picture of Brandon Haney.")
+        getCurrentUserName: () => {
+            const me = document.querySelector('[data-tid="me-control-avatar"]');
+            const label = me ? (me.getAttribute('aria-label') || '') : '';
+            const match = label.match(/Profile picture of\s+(.+?)\.?\s*$/i);
+            if (match) return normalizeDisplayName(match[1]);
+            return (window.currentUserName && window.currentUserName !== 'You') ? window.currentUserName : null;
+        },
         selectors: {
             captionsContainer: "[data-tid='closed-caption-v2-window-wrapper'], [data-tid='closed-captions-renderer'], [data-tid*='closed-caption']",
             captionBlock: '.fui-ChatMessageCompact',
@@ -313,7 +343,7 @@ const PLATFORM_CONFIGS = {
 
                 return {
                     id: messageId,
-                    author: authorEl?.textContent || 'Unknown',
+                    author: normalizeDisplayName(authorEl?.textContent) || 'Unknown',
                     text: messageText || '[Attachment]',
                     time: null, // Will be replaced with formatted timestamp in content_script
                     timestamp: timestamp, // Unix timestamp in milliseconds for filtering
