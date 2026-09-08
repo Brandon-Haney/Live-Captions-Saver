@@ -23,6 +23,7 @@ Fixes from reading the first real exported AI package.
 ### Changed
 - **One image format**: slides are always PNG at capture (the JPEG fallback above 1 MB is gone) and the export package re-encodes any non-PNG to PNG, so every packaged image has one format. Photographic shares cost more disk, which the storage budget absorbs
 - **Header date and duration**: the AI header now carries an ISO date plus start, end and duration; the Markdown header gains Date and Duration lines
+- **Per-meeting image cap removed**: the 60 MB per-session limit on slide images predates the storage budget and truncated one real screen-share meeting at 62 MB. The storage budget governs total usage and evicts whole old meetings instead; a 1,000-slide guard remains only to stop a runaway capture loop
 - **Default storage budget raised to 250 MB** (was 100 MB; existing settings unchanged). Real usage showed images at 94% of storage with image-heavy meetings between 5 and 60 MB each, so 100 MB evicted history after a handful of them
 - **HTML export label** is now "HTML (Viewer page)" in the save dropdown, the default-format list and both export dialogs. "With images" stopped being a distinction once other formats gained packaged images; the settings hints now state that HTML embeds images inline regardless of the setting
 
