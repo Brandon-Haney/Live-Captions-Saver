@@ -20,6 +20,8 @@ Fixes from reading the first real exported AI package.
 - "Unknown user" (Teams' label for unattributed captions) is no longer counted as an attendee or speaker in attendee lists
 - **Cursor-only re-captures**: two captures of the same sheet with a moved cursor or cell selection passed the hash test as different slides. The registry now also compares 64x36 thumbnails and treats a change confined to under 4% of the area as the same slide; if that slide is the one already on screen nothing is recorded, otherwise it is a "shown again" entry
 
+- **Export consistency check** (`tests/export-consistency.js`, run with `node`): loads the real service-worker and viewer formatter code into Node with a stubbed Chrome API, renders one session (a built-in edge-case fixture or a JSON export passed as an argument) through all nine export paths, and reports every fact that differs between formats: attendee list, join/leave events, slide and chat counts, event order, first/last caption, packaged slide files. Exit code is the number of divergences
+
 ### Changed
 - **One image format**: slides are always PNG at capture (the JPEG fallback above 1 MB is gone) and the export package re-encodes any non-PNG to PNG, so every packaged image has one format. Photographic shares cost more disk, which the storage budget absorbs
 - **Header date and duration**: the AI header now carries an ISO date plus start, end and duration; the Markdown header gains Date and Duration lines
