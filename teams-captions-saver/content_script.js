@@ -595,8 +595,8 @@ function registerSlide(frame, sourceLabel) {
         slide = { ...earlier, thumb: undefined, dataUrl: null, bytes: 0, seenEarlier: true };
         Logger.logCaption(`[Slide Capture] Slide ${earlier.slideNumber} shown again${sourceLabel ? ' (' + sourceLabel + ')' : ''}`);
     } else {
-        if (slideRegistry.slides.length >= cfg.MAX_SLIDES_PER_SESSION || slideRegistry.bytes >= cfg.MAX_BYTES_PER_SESSION) {
-            Logger.logCaption('[Slide Capture] Session image budget reached, not storing new slide');
+        if (slideRegistry.slides.length >= cfg.MAX_SLIDES_PER_SESSION) {
+            Logger.logCaption(`[Slide Capture] ${cfg.MAX_SLIDES_PER_SESSION} slides in one meeting, not storing more (runaway guard)`);
             return;
         }
         const slideNumber = slideRegistry.slides.length + 1;

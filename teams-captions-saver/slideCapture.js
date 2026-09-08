@@ -35,8 +35,9 @@ const SlideCapture = (() => {
         LOW_CONTENT_STDDEV: 4,    // gray std-dev below this = blank/loading screen, never kept
         MAX_WIDTH: 1920,
         HASH_DISTANCE: 6,         // max Hamming distance (of 64 bits) to treat two slides as the same
-        MAX_SLIDES_PER_SESSION: 300,
-        MAX_BYTES_PER_SESSION: 60 * 1024 * 1024
+        // Runaway guard only. Storage is governed by the user's storage budget
+        // (sessionManager.enforceBudget), so there is no per-meeting byte cap.
+        MAX_SLIDES_PER_SESSION: 1000
     };
 
     let state = null;
