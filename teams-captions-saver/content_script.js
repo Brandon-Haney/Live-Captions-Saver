@@ -2061,17 +2061,14 @@ function updateAttendeesFromTranscript() {
             }
         }
         
+        if (isPlaceholderSpeaker(name)) return;
+
         if (!attendeeData.allAttendees.has(name)) {
             attendeeData.allAttendees.add(name);
             attendeeData.currentAttendees.set(name, 'Speaker');
-            
-            attendeeData.attendeeHistory.push({
-                name,
-                role: 'Speaker',
-                action: 'detected from transcript',
-                time: currentTime
-            });
-            
+            // Not pushed to attendeeHistory: that list is join/leave events only. Exporters
+            // rendered any non-"joined" action as "left the meeting", which is where the
+            // phantom departures of people who were mid-sentence came from.
             console.log(`Speaker detected from transcript: ${name}`);
         }
     });
@@ -2229,6 +2226,12 @@ function updateAttendeeList() {
         previousAttendees.forEach(name => {
             if (!scanComplete) return;
             if (attendeeData.currentAttendees.has(name)) {
+                attendeeData.pendingLeaves.delete(name);
+                return;
+            }
+            // Transcript-derived entries (role "Speaker") were never on the roster, so their
+            // absence from it means nothing; drop them quietly rather than record a departure
+            if (previousRoles.get(name) === 'Speaker' || isPlaceholderSpeaker(name)) {
                 attendeeData.pendingLeaves.delete(name);
                 return;
             }
@@ -2543,6 +2546,27 @@ function stopAttendeeTracking() {
         attendeeObserver = null;
         console.log("Stopped attendee observer");
     }
+}
+
+// Serializable snapshot of attendeeData for session backups. attendeeData holds a
+// Set and a Map, which chrome.runtime messaging turns into empty objects; sessions
+// saved that way lost their attendee list and only kept the join/leave history.
+function buildAttendeeReportSnapshot() {
+    if (!attendeeData) return null;
+    return {
+        meetingStartTime: attendeeData.meetingStartTime,
+        lastUpdated: attendeeData.lastUpdated,
+        totalUniqueAttendees: attendeeData.allAttendees.size,
+        currentAttendeeCount: attendeeData.currentAttendees.size,
+        attendeeList: Array.from(attendeeData.allAttendees),
+        currentAttendees: Array.from(attendeeData.currentAttendees.entries()).map(([name, role]) => ({ name, role })),
+        attendeeHistory: attendeeData.attendeeHistory
+    };
+}
+
+// Teams labels unattributed captions "Unknown user"; that is not a participant
+function isPlaceholderSpeaker(name) {
+    return /^unknown\s*(user|speaker)?$/i.test(String(name || '').trim());
 }
 
 async function getAttendeeReport() {
@@ -3729,7 +3753,7 @@ function startPeriodicBackup() {
                             sessionId: currentSessionId,
                             data: {
                                 transcript: transcriptArray,
-                                attendeeReport: attendeeData,
+                                attendeeReport: buildAttendeeReportSnapshot(),
                                 meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                                 captionCount: transcriptArray.length,
                                 attendeeCount: attendeeData.allAttendees.size
@@ -3824,21 +3848,34 @@ async function stopCaptureSession() {
     // Final backup before stopping
     if (transcriptArray.length > 0) {
         if (currentSessionId) {
-            // Update session with final data - use cached title (don't extract as page may have changed)
+            // Update session with final data - use cached title (don't extract as page may have changed).
+            // Awaited and retried: this is the save that exports read, and a fire-and-forget
+            // message to a service worker that had just been stopped was silently lost,
+            // leaving the stored transcript at the last 30 s backup.
             const finalTitle = currentMeetingTitle || 'Untitled Meeting';
             console.log(`[Caption Saver] Saving final session data - Session: ${currentSessionId}, Title: "${finalTitle}", Captions: ${transcriptArray.length}`);
-            chrome.runtime.sendMessage({
-                action: 'updateSession',
-                sessionId: currentSessionId,
-                data: {
-                    transcript: transcriptArray,
-                    attendeeReport: attendeeData,
-                    meetingTitle: finalTitle,
-                    captionCount: transcriptArray.length,
-                    attendeeCount: attendeeData.allAttendees.size,
-                    status: 'ended'
+            const finalData = {
+                transcript: getCleanTranscript(),
+                attendeeReport: buildAttendeeReportSnapshot(),
+                meetingTitle: finalTitle,
+                captionCount: transcriptArray.length,
+                attendeeCount: attendeeData.allAttendees.size,
+                status: 'ended'
+            };
+            let finalSaved = false;
+            for (let attempt = 1; attempt <= 3 && !finalSaved; attempt++) {
+                try {
+                    const response = await safeSendMessageAsync({ action: 'updateSession', sessionId: currentSessionId, data: finalData });
+                    finalSaved = !!(response && response.success);
+                } catch (e) {
+                    finalSaved = false;
                 }
-            });
+                if (!finalSaved) {
+                    Logger.warn(Logger.Category.SESSION, `Final session save attempt ${attempt} failed${attempt < 3 ? ', retrying' : ''}`);
+                    if (attempt < 3) await delay(1000 * attempt);
+                }
+            }
+            if (finalSaved) Logger.logSession(`Final session data saved (${transcriptArray.length} entries)`);
         } else {
             // Fallback to old storage method - check quota first
             const hasSpace = await checkStorageQuota();

@@ -379,8 +379,29 @@ class SessionManager {
     }
 
     // Update session with new data (transcript, attendees, etc.)
+    // Make sure a session is in memory, reloading it from storage if this service
+    // worker instance started after the session was created. Chrome stops an idle
+    // MV3 service worker after ~30 s; a backup or the final save that woke it up
+    // used to be dropped with "Session not found" while initialization was still
+    // running, which is how exports ended up 30 s stale and mid-caption.
+    async ensureSessionLoaded(sessionId) {
+        await this.ensureInitialized();
+        if (this.sessions.has(sessionId)) return true;
+        try {
+            const stored = await chrome.storage.local.get([`${sessionId}_metadata`, `${sessionId}_stats`]);
+            const metadata = stored[`${sessionId}_metadata`];
+            if (!metadata) return false;
+            this.sessions.set(sessionId, { metadata, stats: stored[`${sessionId}_stats`] || {} });
+            console.log(`[SessionManager] Reloaded session ${sessionId} from storage`);
+            return true;
+        } catch (error) {
+            console.error(`[SessionManager] Failed to reload session ${sessionId}:`, error);
+            return false;
+        }
+    }
+
     async updateSession(sessionId, data) {
-        if (!this.sessions.has(sessionId)) {
+        if (!(await this.ensureSessionLoaded(sessionId))) {
             console.warn(`[SessionManager] Session ${sessionId} not found`);
             return false;
         }
@@ -480,7 +501,7 @@ class SessionManager {
         }
 
         try {
-            if (!this.sessions.has(sessionId)) {
+            if (!(await this.ensureSessionLoaded(sessionId))) {
                 console.warn(`[SessionManager] Session ${sessionId} not found`);
                 return false;
             }

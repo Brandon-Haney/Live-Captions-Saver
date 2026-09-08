@@ -1498,22 +1498,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const combinedEvents = [...transcript];
 
-        // Add attendance events
+        // Add attendance events (join/leave only; numeric timestamps, locale time strings
+        // resolved against the meeting date since new Date("10:00 AM") is NaN)
+        const meetingStart = currentAttendeeReport && currentAttendeeReport.meetingStartTime;
+        const sortKeyFor = (event) => {
+            if (typeof event.timestamp === 'number' && event.timestamp > 0) return event.timestamp;
+            if (event.timestamp) { const t = new Date(event.timestamp).getTime(); if (!isNaN(t)) return t; }
+            const direct = new Date(event.time).getTime();
+            if (!isNaN(direct)) return direct;
+            const m = String(event.time || '').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)?/i);
+            if (m) {
+                const base = meetingStart ? new Date(meetingStart) : new Date();
+                if (!isNaN(base.getTime())) {
+                    let h = parseInt(m[1], 10);
+                    if (m[4]) { if (/pm/i.test(m[4]) && h < 12) h += 12; if (/am/i.test(m[4]) && h === 12) h = 0; }
+                    base.setHours(h, parseInt(m[2], 10), parseInt(m[3] || '0', 10), 0);
+                    return base.getTime();
+                }
+            }
+            return 0;
+        };
         attendeeHistory.forEach(event => {
+            if (!event || (event.action !== 'joined' && event.action !== 'left')) return;
             combinedEvents.push({
                 Time: event.time,
                 Name: event.name,
                 Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
                 Type: 'attendance',
                 action: event.action,
-                sortKey: new Date(event.time).getTime()
+                sortKey: sortKeyFor(event)
             });
         });
 
-        // Sort by time
+        // Sort by time (ISO timestamp for captions/slides, sortKey for attendance)
         combinedEvents.sort((a, b) => {
-            const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
-            const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+            const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0) || new Date(a.Time).getTime() || 0;
+            const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0) || new Date(b.Time).getTime() || 0;
             return timeA - timeB;
         });
 
@@ -1900,7 +1920,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     captions
                         .filter(entry => entry.Type !== 'attendance') // Exclude join/leave events
                         .map(entry => entry.Name)
-                        .filter(name => name && name.trim())
+                        .filter(name => name && name.trim() && !/^unknown\s*(user|speaker)?$/i.test(name.trim()))
                 )];
                 if (speakers.length > 0) {
                     attendeeList = speakers.sort();

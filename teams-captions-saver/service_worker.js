@@ -62,6 +62,29 @@ function meetingSpan(transcript, recordingStartTime) {
     return { start: startDate, end: new Date(end), durationText, isoDate };
 }
 
+// Sort key for a join/leave event. Events carry a numeric `timestamp`; older ones
+// only a locale time string ("10:00:19 AM"), which is resolved against the meeting
+// date. `new Date("10:00:19 AM")` is NaN, which used to sort every attendance
+// event to the top of the transcript.
+function attendanceSortKey(event, meetingStartTime) {
+    if (!event) return 0;
+    if (typeof event.timestamp === 'number' && event.timestamp > 0) return event.timestamp;
+    if (event.timestamp) { const t = new Date(event.timestamp).getTime(); if (!isNaN(t)) return t; }
+    const direct = new Date(event.time).getTime();
+    if (!isNaN(direct)) return direct;
+    const m = String(event.time || '').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)?/i);
+    if (m) {
+        const base = meetingStartTime ? new Date(meetingStartTime) : new Date();
+        if (!isNaN(base.getTime())) {
+            let h = parseInt(m[1], 10);
+            if (m[4]) { if (/pm/i.test(m[4]) && h < 12) h += 12; if (/am/i.test(m[4]) && h === 12) h = 0; }
+            base.setHours(h, parseInt(m[2], 10), parseInt(m[3] || '0', 10), 0);
+            return base.getTime();
+        }
+    }
+    return 0;
+}
+
 function parseSafeTimestamp(timestampValue) {
     if (!timestampValue) return 0;
 
@@ -284,7 +307,7 @@ function formatAsTxt(transcript, attendeeReport, imagePaths = {}) {
             validTranscript
                 .filter(entry => entry.Type !== 'attendance')
                 .map(entry => entry.Name)
-                .filter(name => name && name.trim())
+                .filter(name => name && name.trim() && !/^unknown\s*(user|speaker)?$/i.test(name.trim()))
         )];
         if (speakers.length > 0) {
             attendeeList = speakers.sort();
@@ -321,13 +344,14 @@ function formatAsTxt(transcript, attendeeReport, imagePaths = {}) {
     // Add join/leave events to the combined array
     if (attendeeHistory && attendeeHistory.length > 0) {
         attendeeHistory.forEach(event => {
+            if (!event || (event.action !== 'joined' && event.action !== 'left')) return; // bookkeeping entries are not events
             combinedEvents.push({
                 Time: event.time,
                 Name: event.name,
                 Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
                 Type: 'attendance',
                 action: event.action,
-                sortKey: new Date(event.time).getTime()
+                sortKey: attendanceSortKey(event, attendeeReport && attendeeReport.meetingStartTime)
             });
         });
     }
@@ -406,7 +430,7 @@ function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled M
             validTranscript
                 .filter(entry => entry.Type !== 'attendance')
                 .map(entry => entry.Name)
-                .filter(name => name && name.trim())
+                .filter(name => name && name.trim() && !/^unknown\s*(user|speaker)?$/i.test(name.trim()))
         )];
         if (speakers.length > 0) {
             attendeeList = speakers.sort();
@@ -461,13 +485,14 @@ function formatAsMarkdown(transcript, attendeeReport, meetingTitle = 'Untitled M
     // Add join/leave events
     if (attendeeHistory && attendeeHistory.length > 0) {
         attendeeHistory.forEach(event => {
+            if (!event || (event.action !== 'joined' && event.action !== 'left')) return; // bookkeeping entries are not events
             combinedEvents.push({
                 Time: event.time,
                 Name: event.name,
                 Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
                 Type: 'attendance',
                 action: event.action,
-                sortKey: new Date(event.time).getTime()
+                sortKey: attendanceSortKey(event, attendeeReport && attendeeReport.meetingStartTime)
             });
         });
     }
@@ -529,7 +554,7 @@ function formatAsDoc(transcript, attendeeReport) {
             transcript
                 .filter(entry => entry.Type !== 'attendance')
                 .map(entry => entry.Name)
-                .filter(name => name && name.trim())
+                .filter(name => name && name.trim() && !/^unknown\s*(user|speaker)?$/i.test(name.trim()))
         )];
         if (speakers.length > 0) {
             attendeeList = speakers.sort();
@@ -566,13 +591,14 @@ function formatAsDoc(transcript, attendeeReport) {
     // Add join/leave events
     if (attendeeHistory && attendeeHistory.length > 0) {
         attendeeHistory.forEach(event => {
+            if (!event || (event.action !== 'joined' && event.action !== 'left')) return; // bookkeeping entries are not events
             combinedEvents.push({
                 Time: event.time,
                 Name: event.name,
                 Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
                 Type: 'attendance',
                 action: event.action,
-                sortKey: new Date(event.time).getTime()
+                sortKey: attendanceSortKey(event, attendeeReport && attendeeReport.meetingStartTime)
             });
         });
     }
@@ -729,6 +755,11 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
         attendeeList = attendeeReport.attendeeList;
         totalAttendees = attendeeReport.totalUniqueAttendees;
         attendeeHistory = attendeeReport.attendeeHistory || [];
+    } else if (attendeeReport && Array.isArray(attendeeReport.attendeeHistory)) {
+        // Sessions saved before the serializable snapshot kept only the history; use it
+        attendeeHistory = attendeeReport.attendeeHistory;
+        const joined = [...new Set(attendeeHistory.filter(e => e && e.action === 'joined').map(e => e.name).filter(Boolean))];
+        if (joined.length > 0) { attendeeList = joined.sort(); totalAttendees = joined.length; }
     }
 
     // Fallback: If still no attendees, generate from speakers in transcript
@@ -739,7 +770,7 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
             transcript
                 .filter(entry => entry.Type !== 'attendance')
                 .map(entry => entry.Name)
-                .filter(name => name && name.trim())
+                .filter(name => name && name.trim() && !/^unknown\s*(user|speaker)?$/i.test(name.trim()))
         )];
         if (speakers.length > 0) {
             attendeeList = speakers.sort();
@@ -771,13 +802,14 @@ async function formatForAi(transcript, meetingTitle, recordingStartTime, attende
     // Add join/leave events
     if (attendeeHistory && attendeeHistory.length > 0) {
         attendeeHistory.forEach(event => {
+            if (!event || (event.action !== 'joined' && event.action !== 'left')) return; // bookkeeping entries are not events
             combinedEvents.push({
                 Time: event.time,
                 Name: event.name,
                 Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
                 Type: 'attendance',
                 action: event.action,
-                sortKey: new Date(event.time).getTime()
+                sortKey: attendanceSortKey(event, attendeeReport && attendeeReport.meetingStartTime)
             });
         });
     }
@@ -1549,12 +1581,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     sendResponse({ sessionId });
                     return;
 
-                case 'updateSession':
+                case 'updateSession': {
                     const updated = await sessionManager.updateSession(message.sessionId, message.data);
 
                     // If we have transcript data, save it
+                    let saved = true;
                     if (message.data.transcript) {
-                        await sessionManager.saveSessionTranscript(
+                        saved = await sessionManager.saveSessionTranscript(
                             message.sessionId,
                             message.data.transcript,
                             message.data.attendeeReport,
@@ -1562,8 +1595,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         );
                     }
 
-                    sendResponse({ success: updated });
+                    // The content script's final backup carries status 'ended'. Mark the
+                    // session ended only after its data is on disk, so the ended state
+                    // never outruns the transcript it describes.
+                    if (updated && saved && message.data.status === 'ended') {
+                        try {
+                            await sessionManager.endSession(message.sessionId);
+                        } catch (error) {
+                            console.warn('[Service Worker] endSession after final save failed:', error);
+                        }
+                    }
+
+                    // The content script retries the final save when this is false
+                    sendResponse({ success: !!(updated && saved) });
                     return;
+                }
 
                 case 'getActiveSessions':
                     const sessions = await sessionManager.getActiveSessions();
