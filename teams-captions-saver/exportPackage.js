@@ -20,7 +20,6 @@ const ExportPackage = (() => {
     // for a vision model at roughly 1,900 tokens per image on current Claude
     // models; smaller images cost proportionally less.
     const IMAGE_MAX_LONG_EDGE = 1600;
-    const JPEG_QUALITY = 0.9;
     const TEXT_FORMATS = ['txt', 'md', 'json', 'ai'];
     const MERGE_GAP_MS = 60 * 1000; // consecutive captions from one speaker within this gap become one paragraph
 
@@ -155,9 +154,11 @@ const ExportPackage = (() => {
     }
 
     /**
-     * Resize an image so its long edge is at most `maxLongEdge`. Returns
-     * { bytes, mime, width, height }. GIFs are passed through untouched so
-     * animation survives; images already small enough keep their bytes.
+     * Normalize an image for the package: PNG, long edge at most `maxLongEdge`.
+     * Returns { bytes, mime, width, height }. GIFs are passed through untouched
+     * so animation survives; a PNG already small enough keeps its bytes, and
+     * anything else (JPEG, WebP, oversized PNG) is re-encoded as PNG so every
+     * file in the zip has one format.
      */
     async function prepareImage(dataUrl, maxLongEdge) {
         const blob = await decode(dataUrl);
@@ -168,7 +169,7 @@ const ExportPackage = (() => {
         const bitmap = await createImageBitmap(blob);
         try {
             const long = Math.max(bitmap.width, bitmap.height);
-            if (long <= maxLongEdge && EXT[mime]) {
+            if (long <= maxLongEdge && mime === 'image/png') {
                 return { bytes: new Uint8Array(await blob.arrayBuffer()), mime, width: bitmap.width, height: bitmap.height };
             }
             const scale = Math.min(1, maxLongEdge / long);
@@ -176,9 +177,8 @@ const ExportPackage = (() => {
             const h = Math.max(1, Math.round(bitmap.height * scale));
             const canvas = new OffscreenCanvas(w, h);
             canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
-            const outMime = mime === 'image/jpeg' ? 'image/jpeg' : 'image/png';
-            const out = await canvas.convertToBlob(outMime === 'image/jpeg' ? { type: outMime, quality: JPEG_QUALITY } : { type: outMime });
-            return { bytes: new Uint8Array(await out.arrayBuffer()), mime: outMime, width: w, height: h };
+            const out = await canvas.convertToBlob({ type: 'image/png' });
+            return { bytes: new Uint8Array(await out.arrayBuffer()), mime: 'image/png', width: w, height: h };
         } finally {
             bitmap.close();
         }

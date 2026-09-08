@@ -1241,6 +1241,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = newCaptionHTML;
         const newCaptionElement = tempDiv.firstElementChild;
+        if (caption.key) newCaptionElement.dataset.key = caption.key; // lets a later 'remove' update find it
         captionsContainer.appendChild(newCaptionElement);
 
         // Performance: Add element to cache
@@ -1396,6 +1397,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 appendNewCaption(update.caption);
             } else if (update.type === 'update') {
                 updateExistingCaption(update.caption);
+            } else if (update.type === 'remove') {
+                removeCaptionByKey(update.key, update.imageId);
             }
         });
         
@@ -1403,6 +1406,28 @@ document.addEventListener('DOMContentLoaded', () => {
         updateTimer = null;
     }
     
+    // A retracted entry (e.g. a slide that turned out to be a loading screen): drop it
+    // from the data, the DOM, the element cache and, if nothing else uses it, the image cache
+    function removeCaptionByKey(key, imageId) {
+        if (!key) return;
+        const index = allCaptions.findIndex(c => c && c.key === key);
+        if (index !== -1) allCaptions.splice(index, 1);
+        let el = null;
+        try { el = captionsContainer.querySelector(`[data-key="${CSS.escape(key)}"]`); } catch (e) { el = null; }
+        if (el) {
+            const ci = captionElementsCache.indexOf(el);
+            if (ci !== -1) captionElementsCache.splice(ci, 1);
+            el.remove();
+        }
+        if (imageId && !allCaptions.some(c => c && (c.imageId === imageId || (c.attachments || []).some(a => a && a.imageId === imageId)))) {
+            delete imageCache[imageId];
+        }
+        updateSlidesToggleVisibility(allCaptions.some(c => c && c.Type === 'slide'));
+        const analytics = calculateAnalytics(allCaptions);
+        if (analytics) displayAnalytics(analytics);
+        debug.log('[Viewer] Removed retracted entry:', key);
+    }
+
     function queueUpdate(update) {
         debug.log('[Viewer] Queuing update:', update.type, update.caption?.Name);
         pendingUpdates.push(update);

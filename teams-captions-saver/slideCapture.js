@@ -32,9 +32,8 @@ const SlideCapture = (() => {
         CHANGE_THRESHOLD: 6,      // mean abs gray diff (0-255) vs last kept slide to count as new content
         STABLE_THRESHOLD: 1.5,    // mean abs gray diff between consecutive samples to count as settled
         STABLE_SAMPLES: 2,        // consecutive settled samples before keeping
+        LOW_CONTENT_STDDEV: 4,    // gray std-dev below this = blank/loading screen, never kept
         MAX_WIDTH: 1920,
-        PNG_MAX_BYTES: 1024 * 1024, // PNG keeps slide text crisp; fall back to JPEG above this size (photos, busy desktops)
-        JPEG_QUALITY: 0.9,
         HASH_DISTANCE: 6,         // max Hamming distance (of 64 bits) to treat two slides as the same
         MAX_SLIDES_PER_SESSION: 300,
         MAX_BYTES_PER_SESSION: 60 * 1024 * 1024
@@ -97,6 +96,17 @@ const SlideCapture = (() => {
         return sum / a.length;
     }
 
+    // Standard deviation of the gray thumbnail; near zero means a blank or loading screen
+    function stdDev(g) {
+        if (!g || g.length === 0) return 0;
+        let sum = 0;
+        for (let i = 0; i < g.length; i++) sum += g[i];
+        const mean = sum / g.length;
+        let sq = 0;
+        for (let i = 0; i < g.length; i++) { const d = g[i] - mean; sq += d * d; }
+        return Math.sqrt(sq / g.length);
+    }
+
     // 64-bit difference hash from a 9x8 grayscale downscale, as 16 hex chars.
     function dHash(frame) {
         const ctx = state.hashCtx;
@@ -130,15 +140,10 @@ const SlideCapture = (() => {
         const h = Math.max(1, Math.round(frame.height * scale));
         const canvas = makeCanvas(w, h);
         canvas.getContext('2d').drawImage(frame.source, 0, 0, w, h);
-        const sizeOf = (url) => Math.round((url.length - (url.indexOf(',') + 1)) * 0.75);
-        // Slides are mostly text on flat colour: PNG is small and lossless. Anything
-        // photographic blows past the PNG budget and goes to high-quality JPEG instead.
-        let dataUrl = canvas.toDataURL('image/png');
-        let bytes = sizeOf(dataUrl);
-        if (bytes > CONFIG.PNG_MAX_BYTES) {
-            dataUrl = canvas.toDataURL('image/jpeg', CONFIG.JPEG_QUALITY);
-            bytes = sizeOf(dataUrl);
-        }
+        // Always PNG: lossless keeps slide text crisp and every capture has one format.
+        // Photographic shares cost more disk, which the storage budget absorbs.
+        const dataUrl = canvas.toDataURL('image/png');
+        const bytes = Math.round((dataUrl.length - (dataUrl.indexOf(',') + 1)) * 0.75);
         return { dataUrl, width: w, height: h, bytes };
     }
 
@@ -150,7 +155,8 @@ const SlideCapture = (() => {
         state.candidate = null;
         log(`[Slide Capture] Content settled (${full.width}x${full.height}, ${Math.round(full.bytes / 1024)} KB)${frame.presenter ? ' from ' + frame.presenter : ''}`);
         try {
-            state.onSlide({ ...full, hash, presenter: frame.presenter || null });
+            // `thumb` lets the registry tell a cursor move from a slide change
+            state.onSlide({ ...full, hash, presenter: frame.presenter || null, thumb: Array.from(gray) });
         } catch (e) {
             log('[Slide Capture] onSlide handler failed:', e.message);
         }
@@ -182,6 +188,15 @@ const SlideCapture = (() => {
             // Source detached mid-draw or canvas tainted; try again next tick
             return;
         }
+
+        // Blank or loading screens (near-uniform gray) are never content; wait for the real slide
+        if (stdDev(gray) < CONFIG.LOW_CONTENT_STDDEV) {
+            if (!state.lowContent) log('[Slide Capture] Low-content frame (blank/loading), waiting');
+            state.lowContent = true;
+            state.candidate = null;
+            return;
+        }
+        state.lowContent = false;
 
         const diffFromKept = state.lastKeptGray ? meanDiff(gray, state.lastKeptGray) : Infinity;
         if (diffFromKept < CONFIG.CHANGE_THRESHOLD) {
@@ -225,6 +240,7 @@ const SlideCapture = (() => {
             kept: 0,
             lastKeptGray: null,
             candidate: null,
+            lowContent: false,
             thumbCtx: makeCanvas(CONFIG.THUMB_W, CONFIG.THUMB_H).getContext('2d', { willReadFrequently: true }),
             hashCtx: makeCanvas(9, 8).getContext('2d', { willReadFrequently: true }),
             timer: null
