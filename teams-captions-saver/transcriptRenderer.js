@@ -260,16 +260,38 @@ const TranscriptRenderer = (() => {
     }
 
     /** Merge attendee join/leave history into the transcript chronologically. */
-    function mergeAttendanceEvents(transcript, attendeeHistory) {
+    // Sort key for a join/leave event: numeric `timestamp` when present, else the
+    // locale time string resolved against the meeting date (new Date("10:00 AM") is NaN)
+    function attendanceSortKey(event, meetingStartTime) {
+        if (!event) return 0;
+        if (typeof event.timestamp === 'number' && event.timestamp > 0) return event.timestamp;
+        if (event.timestamp) { const t = new Date(event.timestamp).getTime(); if (!isNaN(t)) return t; }
+        const direct = new Date(event.time).getTime();
+        if (!isNaN(direct)) return direct;
+        const m = String(event.time || '').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)?/i);
+        if (m) {
+            const base = meetingStartTime ? new Date(meetingStartTime) : new Date();
+            if (!isNaN(base.getTime())) {
+                let h = parseInt(m[1], 10);
+                if (m[4]) { if (/pm/i.test(m[4]) && h < 12) h += 12; if (/am/i.test(m[4]) && h === 12) h = 0; }
+                base.setHours(h, parseInt(m[2], 10), parseInt(m[3] || '0', 10), 0);
+                return base.getTime();
+            }
+        }
+        return 0;
+    }
+
+    function mergeAttendanceEvents(transcript, attendeeHistory, meetingStartTime) {
         const combined = [...(transcript || [])];
         (attendeeHistory || []).forEach(event => {
+            if (!event || (event.action !== 'joined' && event.action !== 'left')) return; // bookkeeping entries are not events
             combined.push({
                 Time: event.time,
                 Name: event.name,
                 Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
                 Type: 'attendance',
                 action: event.action,
-                sortKey: new Date(event.time).getTime()
+                sortKey: attendanceSortKey(event, meetingStartTime)
             });
         });
         combined.sort((a, b) => {
@@ -288,7 +310,7 @@ const TranscriptRenderer = (() => {
             (entries || [])
                 .filter(e => e && e.Type !== 'attendance' && e.Type !== 'slide')
                 .map(e => e.Name)
-                .filter(n => n && n.trim())
+                .filter(n => n && n.trim() && !/^unknown\s*(user|speaker)?$/i.test(n.trim()))
         )].sort();
     }
 
@@ -474,7 +496,7 @@ footer { margin-top:20px; font-size:12px; color:var(--muted); text-align:center;
         };
 
         const entries = includeAttendance && report && Array.isArray(report.attendeeHistory)
-            ? mergeAttendanceEvents(p.entries, report.attendeeHistory)
+            ? mergeAttendanceEvents(p.entries, report.attendeeHistory, report.meetingStartTime || p.recordingStartTime)
             : [...(p.entries || [])];
 
         const attendees = attendeeListFor(p.entries, report);
