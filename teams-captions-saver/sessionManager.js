@@ -15,8 +15,10 @@ class SessionManager {
         this.MAX_CHUNK_SIZE = 7000; // Transcript chunk size per key
         // The manifest requests "unlimitedStorage", so chrome.storage.local and IndexedDB are
         // limited only by disk. The user-facing limit is the storage budget setting
-        // (storageBudgetMB, default 100, 0 = unlimited) covering transcripts + images.
-        this.DEFAULT_BUDGET_MB = 100;
+        // (storageBudgetMB, default 250, 0 = unlimited) covering transcripts + images.
+        // 250 MB: real usage showed image-heavy meetings at 5-60 MB each, so 100 MB
+        // evicted history after only a few of them.
+        this.DEFAULT_BUDGET_MB = 250;
         this.STORAGE_QUOTA = this.DEFAULT_BUDGET_MB * 1024 * 1024; // Legacy alias used by getStorageStats
         this._initialized = false; // Track initialization state
         this._initPromise = this.initializeFromStorage(); // Store promise for awaiting
@@ -752,7 +754,7 @@ class SessionManager {
         return true;
     }
 
-    // Storage budget in bytes from settings (storageBudgetMB; 0 = unlimited). Default 100 MB.
+    // Storage budget in bytes from settings (storageBudgetMB; 0 = unlimited). Default 250 MB.
     async getStorageBudgetBytes() {
         try {
             const { storageBudgetMB } = await chrome.storage.sync.get('storageBudgetMB');

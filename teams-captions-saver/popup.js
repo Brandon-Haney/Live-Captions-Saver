@@ -533,7 +533,7 @@ async function loadSettings() {
     UI_ELEMENTS.backgroundCaptureToggle.checked = settings.backgroundCapture !== false;
     UI_ELEMENTS.captureSharedContentToggle.checked = !!settings.captureSharedContent;
     UI_ELEMENTS.exportImagesToggle.checked = !!settings.exportImages;
-    UI_ELEMENTS.storageBudgetSelect.value = settings.storageBudgetMB === undefined ? '100' : String(settings.storageBudgetMB);
+    UI_ELEMENTS.storageBudgetSelect.value = settings.storageBudgetMB === undefined ? '250' : String(settings.storageBudgetMB);
     UI_ELEMENTS.timestampFormat.value = settings.timestampFormat || '12hr';
     UI_ELEMENTS.filenamePattern.value = settings.filenamePattern || '{date}_{title}_{format}';
     UI_ELEMENTS.aiInstructions.value = settings.aiInstructions || '';
@@ -1328,7 +1328,7 @@ async function loadStorageOverview() {
 
 async function freeUpSpace() {
     const btn = UI_ELEMENTS.freeUpSpaceBtn;
-    const budgetMB = UI_ELEMENTS.storageBudgetSelect ? parseInt(UI_ELEMENTS.storageBudgetSelect.value, 10) : 100;
+    const budgetMB = UI_ELEMENTS.storageBudgetSelect ? parseInt(UI_ELEMENTS.storageBudgetSelect.value, 10) : 250;
     const budgetText = budgetMB ? `and, if usage is over the ${budgetMB >= 1024 ? (budgetMB / 1024) + ' GB' : budgetMB + ' MB'} budget, the oldest ended meetings` : '(no budget is set, so no meetings are removed)';
     if (!confirm(`Remove orphaned data ${budgetText}? Active meetings are kept. This cannot be undone.`)) return;
     btn.disabled = true;
@@ -1412,7 +1412,7 @@ function showExportFormatDialog(meetingStartTime = null) {
                     Markdown (Formatted)
                 </button>
                 <button data-format="html" style="padding: 12px; background: #e34c26; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
-                    HTML (Viewer page with images)
+                    HTML (Viewer page)
                 </button>
                 <button data-format="ai" style="padding: 12px; background: #ff6b6b; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                     AI Analysis (with Instructions)

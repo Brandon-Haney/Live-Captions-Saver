@@ -2130,7 +2130,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         Markdown (Formatted)
                     </button>
                     <button data-format="html" style="padding: 12px; background: #e34c26; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
-                        HTML (Viewer page with images)
+                        HTML (Viewer page)
                     </button>
                     <button data-format="srt" style="padding: 12px; background: #fd7e14; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                         SRT (Subtitles for Video)

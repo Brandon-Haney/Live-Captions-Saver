@@ -873,7 +873,7 @@
                     <div id="saveOptions" class="dropdown-menu">
                         <div class="dropdown-item" data-format="txt">Save as TXT</div>
                         <div class="dropdown-item" data-format="md">Save as Markdown</div>
-                        <div class="dropdown-item" data-format="html">Save as HTML (with images)</div>
+                        <div class="dropdown-item" data-format="html">Save as HTML (Viewer page)</div>
                         <div class="dropdown-item" data-format="doc">Save as DOC</div>
                         <div class="dropdown-item" data-format="json">Save as JSON</div>
                         <div class="dropdown-item" data-format="ai">Save for AI</div>
@@ -973,7 +973,7 @@
                 <div class="setting-row">
                     <div>
                         <span class="setting-label">Capture Shared Content</span>
-                        <div style="font-size: 10px; color: #888; margin-top: 1px;">Saves a snapshot each time the shared screen changes (Teams). Shown in the Live Viewer and HTML exports</div>
+                        <div style="font-size: 10px; color: #888; margin-top: 1px;">Saves a snapshot each time the shared screen changes (Teams). Shown in the Live Viewer, embedded in HTML exports, and packaged with other exports when "Include Images with Exports" is on</div>
                     </div>
                     <label class="toggle-switch">
                         <input type="checkbox" id="captureSharedContentToggle">
@@ -1041,7 +1041,7 @@
                     <select id="defaultSaveFormat">
                         <option value="txt">TXT</option>
                         <option value="md">Markdown</option>
-                        <option value="html">HTML (with images)</option>
+                        <option value="html">HTML (Viewer page)</option>
                         <option value="doc">Word</option>
                         <option value="json">JSON</option>
                         <option value="ai">AI Analysis</option>
@@ -1050,7 +1050,7 @@
                 <div class="setting-row">
                     <div>
                         <span class="setting-label">Include Images with Exports</span>
-                        <div style="font-size: 10px; color: #888; margin-top: 1px;">TXT, Markdown, JSON and AI exports become a .zip with a slides/ folder that the transcript references by path. HTML always embeds images</div>
+                        <div style="font-size: 10px; color: #888; margin-top: 1px;">TXT, Markdown, JSON and AI exports become a .zip with a slides/ folder that the transcript references by path. HTML always embeds images inline, with or without this setting</div>
                     </div>
                     <label class="toggle-switch">
                         <input type="checkbox" id="exportImagesToggle">
@@ -1082,8 +1082,8 @@
                     </div>
                     <select id="storageBudgetSelect" style="width: auto;">
                         <option value="50">50 MB</option>
-                        <option value="100" selected>100 MB</option>
-                        <option value="250">250 MB</option>
+                        <option value="100">100 MB</option>
+                        <option value="250" selected>250 MB</option>
                         <option value="500">500 MB</option>
                         <option value="1024">1 GB</option>
                         <option value="0">Unlimited</option>
