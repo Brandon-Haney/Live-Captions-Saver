@@ -927,7 +927,7 @@ async function handleSave(target) {
                     action: 'getSessionData',
                     sessionId: capturedSessionId
                 });
-                meetingStartTime = response?.sessionData?.metadata?.startTime;
+                meetingStartTime = response?.sessionData?.metadata?.recordingStartTime || response?.sessionData?.attendeeReport?.meetingStartTime || response?.sessionData?.metadata?.startTime;
             } catch (e) {
                 // Ignore - will use current time as fallback
             }
@@ -950,7 +950,9 @@ async function handleSave(target) {
             if (response?.sessionData) {
                 const { transcript, attendeeReport, metadata } = response.sessionData;
                 const meetingTitle = metadata?.meetingTitle || 'Meeting';
-                const recordingStartTime = metadata?.startTime || new Date().toISOString();
+                // Capture start (stored by the content script), not the session's creation
+                // time, so Previous Sessions exports match the auto-saved file
+                const recordingStartTime = metadata?.recordingStartTime || attendeeReport?.meetingStartTime || metadata?.startTime || null;
 
                 const saveResponse = await chrome.runtime.sendMessage({
                     message: "save_from_session",
@@ -1248,7 +1250,7 @@ async function exportPreviousSession(sessionId) {
         }
 
         // Get meeting start time for SRT default
-        const meetingStartTime = sessionData.metadata?.startTime;
+        const meetingStartTime = sessionData.metadata?.recordingStartTime || sessionData.attendeeReport?.meetingStartTime || sessionData.metadata?.startTime;
 
         // Show format selection dialog with meeting start time for SRT
         const result = await showExportFormatDialog(meetingStartTime);
@@ -1261,7 +1263,7 @@ async function exportPreviousSession(sessionId) {
             meetingTitle: sessionData.metadata?.meetingTitle || 'Meeting',
             platform: sessionData.metadata?.platform || null,
             attendeeReport: sessionData.attendeeReport,
-            recordingStartTime: sessionData.metadata?.startTime || new Date().toISOString(),
+            recordingStartTime: sessionData.metadata?.recordingStartTime || sessionData.attendeeReport?.meetingStartTime || sessionData.metadata?.startTime || null,
             userRecordingStartTime: result.userRecordingStartTime
         });
 

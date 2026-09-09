@@ -43,6 +43,20 @@ startPendingDownloadsCleanup();
 // --- Utility Functions ---
 // Safe timestamp parsing to prevent NaN in sorting
 // Start, end and duration of a meeting from its entries (and the recording start, if earlier)
+// The meeting start every export reports: when capture began (the content script's
+// recordingStartTime, also stored as session metadata), else the attendee tracker's
+// start, else the earliest transcript timestamp. Returns an ISO string or null.
+function resolveMeetingStart(recordingStartTime, attendeeReport, transcript) {
+    const explicit = parseSafeTimestamp(recordingStartTime) || parseSafeTimestamp(attendeeReport && attendeeReport.meetingStartTime);
+    if (explicit) return new Date(explicit).toISOString();
+    let earliest = Infinity;
+    for (const e of transcript || []) {
+        const t = e ? parseSafeTimestamp(e.timestamp) : 0;
+        if (t && t < earliest) earliest = t;
+    }
+    return isFinite(earliest) ? new Date(earliest).toISOString() : null;
+}
+
 function meetingSpan(transcript, recordingStartTime) {
     let start = parseSafeTimestamp(recordingStartTime) || Infinity;
     let end = 0;
@@ -988,7 +1002,15 @@ async function saveTranscript(meetingTitle, transcriptArray, aliases, format, re
     });
 
     const processedTranscript = applyAliasesToTranscript(transcriptArray, aliases);
-    const processedAttendeeReport = applyAliasesToAttendeeReport(attendeeReport, aliases);
+    let processedAttendeeReport = applyAliasesToAttendeeReport(attendeeReport, aliases);
+
+    // One meeting start for every format. The formatters used to read it from different
+    // places (the caller's recordingStartTime, the attendee tracker's start, the session's
+    // creation time), so Markdown and AI could disagree on duration for the same meeting.
+    recordingStartTime = resolveMeetingStart(recordingStartTime, processedAttendeeReport, processedTranscript);
+    if (processedAttendeeReport && recordingStartTime) {
+        processedAttendeeReport = { ...processedAttendeeReport, meetingStartTime: recordingStartTime };
+    }
 
     // Get filename pattern from settings
     let filenamePattern = null;
@@ -1838,13 +1860,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         await saveTranscript(meetingTitleToSave, message.transcriptArray, autoSaveAliases, formatToSave, message.recordingStartTime, false, message.attendeeReport, null, message.platform || null);
                         console.log(`Auto-save completed: ${meetingTitleToSave}`);
 
-                        // Also save to session history
-                        try {
-                            await saveSessionToHistory(message.transcriptArray, message.meetingTitle, message.attendeeReport);
-                            console.log('Session also saved to history.');
-                        } catch (sessionError) {
-                            console.error('Failed to save to session history:', sessionError);
-                        }
+                        // The session manager already holds this meeting (the content script's
+                        // final updateSession landed before this message). The legacy
+                        // saveSessionToHistory() copy that used to be written here doubled the
+                        // transcript bytes counted against the storage budget; it remains only
+                        // for the Zoom paths, which delete their session before saving.
 
                         sendResponse({ success: true });
                     } else {

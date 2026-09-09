@@ -1357,6 +1357,13 @@ function waitForElement(selector, context = document, timeout = 5000) {
 // Create shallow copy before mapping to prevent issues from concurrent mutation
 const getCleanTranscript = () => [...transcriptArray].map(({ key, ...rest }) => rest);
 
+// Session metadata sent with every save. recordingStartTime (when capture began) is the
+// meeting start that every export reports; without it the Previous Sessions path fell
+// back to the session's creation time and disagreed with the auto-saved file.
+function sessionMetadataPatch() {
+    return recordingStartTime ? { recordingStartTime: recordingStartTime.toISOString() } : null;
+}
+
 // Sanitize attendee/speaker names from DOM to prevent XSS and normalize whitespace
 function sanitizeNameFromDOM(rawName) {
     if (!rawName || typeof rawName !== 'string') return '';
@@ -3254,12 +3261,21 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                     sessionId: currentSessionId
                 });
             } else {
-                // End session with content (this adds it to history)
+                // Flush the transcript before the session is ended. stopCaptureSession()
+                // sends the awaited final save with status 'ended', and the service
+                // worker ends the session only after that data is on disk. Ending the
+                // session here first (and clearing currentSessionId) left the final save
+                // with no session to write to, so storage kept the last 30 s backup and
+                // exports from Previous Sessions lost the meeting's last seconds.
                 console.log(`[Caption Saver] Ending session with ${transcriptArray.length} captions: ${currentSessionId}`);
-                chrome.runtime.sendMessage({
-                    action: 'endSession',
-                    sessionId: currentSessionId
-                });
+                await stopCaptureSession();
+                if (!finalSessionSaveDone) {
+                    console.warn('[Caption Saver] Final save did not confirm; ending session with the last backup');
+                    chrome.runtime.sendMessage({
+                        action: 'endSession',
+                        sessionId: currentSessionId
+                    });
+                }
             }
             currentSessionId = null;
         }
@@ -3758,7 +3774,8 @@ function startPeriodicBackup() {
                                 attendeeReport: buildAttendeeReportSnapshot(),
                                 meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                                 captionCount: transcriptArray.length,
-                                attendeeCount: attendeeData.allAttendees.size
+                                attendeeCount: attendeeData.allAttendees.size,
+                                metadata: sessionMetadataPatch()
                             }
                         });
                     } else {
@@ -3862,6 +3879,7 @@ async function stopCaptureSession() {
                 meetingTitle: finalTitle,
                 captionCount: transcriptArray.length,
                 attendeeCount: attendeeData.allAttendees.size,
+                metadata: sessionMetadataPatch(),
                 status: 'ended'
             };
             let finalSaved = false;
@@ -4204,6 +4222,7 @@ window.addEventListener('pagehide', () => {
                 meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                 captionCount: transcriptArray.length,
                 attendeeCount: attendeeData.allAttendees.size,
+                metadata: sessionMetadataPatch(),
                 status: capturing ? undefined : 'ended'
             }
         }, () => { void chrome.runtime.lastError; });

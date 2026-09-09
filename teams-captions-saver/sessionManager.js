@@ -9,6 +9,10 @@
     }
 
 class SessionManager {
+    // How many chunk keys past the recorded chunkCount loadSessionData probes (a count can
+    // lag a write) and saveSessionTranscript clears (a write can shrink)
+    static CHUNK_PROBE_BEYOND = 20;
+
     constructor() {
         this.sessions = new Map(); // Active sessions in memory
         this.MAX_SESSIONS = 20; // Legacy constant (no longer enforced; retention is size-based, see getStorageBudgetBytes)
@@ -521,6 +525,7 @@ class SessionManager {
             }
 
             const chunks = this.chunkTranscript(transcriptArray);
+            const previousChunkCount = Number(this.sessions.get(sessionId)?.metadata?.chunkCount) || 0;
 
             // Save transcript chunks using Promise.allSettled to handle partial failures
             const chunkPromises = chunks.map((chunk, index) =>
@@ -549,6 +554,22 @@ class SessionManager {
                 // If ALL chunks failed, this is a critical error
                 if (successfulChunks.length === 0) {
                     throw new Error(`All ${chunks.length} chunks failed to save`);
+                }
+            }
+
+            // Drop chunks left over from a larger earlier write. The 30 s backups carry
+            // each entry's `key`, the meeting-end save does not, so the final write can
+            // need fewer chunks than the one before it; loadSessionData probes past the
+            // recorded count and would otherwise append the stale tail as duplicates.
+            if (failedChunks.length === 0) {
+                const staleKeys = [];
+                for (let i = chunks.length; i < Math.max(previousChunkCount, chunks.length) + SessionManager.CHUNK_PROBE_BEYOND; i++) {
+                    staleKeys.push(`${sessionId}_chunk_${i}`);
+                }
+                try {
+                    await chrome.storage.local.remove(staleKeys);
+                } catch (error) {
+                    console.warn(`[SessionManager] Could not remove stale chunks for ${sessionId}:`, error);
                 }
             }
 
@@ -672,13 +693,17 @@ class SessionManager {
 
             // Chunks are written before the count is; if the count lags, probe past it so a
             // reader never loses the tail of a meeting to a stale metadata write
-            const PROBE_BEYOND = 20;
+            // An ended session's count was recorded after its final save, so only active
+            // sessions (where a write may still be in flight) are probed
+            const PROBE_BEYOND = metadata.status === 'ended' ? 0 : SessionManager.CHUNK_PROBE_BEYOND;
             for (let i = 0; i < chunkCount + PROBE_BEYOND; i++) {
                 chunkKeys.push(`${sessionId}_chunk_${i}`);
             }
 
             const chunks = await chrome.storage.local.get(chunkKeys);
             const transcriptArray = [];
+            const seenKeys = new Set();
+            let duplicateEntries = 0;
             let missingChunks = [];
             let loadedCount = 0;
 
@@ -687,7 +712,16 @@ class SessionManager {
                 if (i >= chunkCount && !chunk) break; // past the recorded count and nothing more on disk
                 // Validate chunk is array before spreading
                 if (chunk && Array.isArray(chunk)) {
-                    transcriptArray.push(...chunk);
+                    // A probed chunk can be a leftover from an earlier, larger write; entries
+                    // that carry a key are dropped when that key was already loaded
+                    for (const entry of chunk) {
+                        const key = entry && entry.key;
+                        if (key) {
+                            if (seenKeys.has(key)) { duplicateEntries++; continue; }
+                            seenKeys.add(key);
+                        }
+                        transcriptArray.push(entry);
+                    }
                     loadedCount = i + 1;
                 } else if (chunk) {
                     console.warn(`[SessionManager] Chunk ${i} is not an array:`, typeof chunk);
@@ -697,6 +731,9 @@ class SessionManager {
             }
             if (loadedCount > chunkCount) {
                 console.warn(`[SessionManager] Session ${sessionId}: metadata said ${chunkCount} chunk(s) but ${loadedCount} were on disk; using all of them`);
+            }
+            if (duplicateEntries > 0) {
+                console.warn(`[SessionManager] Session ${sessionId}: skipped ${duplicateEntries} duplicate entr${duplicateEntries === 1 ? 'y' : 'ies'} from stale chunks`);
             }
 
             // Warn about missing chunks but don't fail - return partial data
