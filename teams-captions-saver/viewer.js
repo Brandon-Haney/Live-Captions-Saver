@@ -239,6 +239,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let searchDebounceTimer = null;
     let meetingStartTime = null;
     let meetingEndTime = null;
+    let sessionRecordingStartTime = null; // capture start stored with the session (historical view)
     const SEARCH_DEBOUNCE_DELAY = 300;
 
     // Live streaming state
@@ -1992,7 +1993,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Get meeting start time for SRT default (from attendee report or first caption)
-        let meetingStartTime = currentAttendeeReport?.meetingStartTime;
+        let meetingStartTime = sessionRecordingStartTime || currentAttendeeReport?.meetingStartTime;
         if (!meetingStartTime && allCaptions.length > 0 && allCaptions[0].timestamp) {
             meetingStartTime = allCaptions[0].timestamp;
         }
@@ -2448,6 +2449,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currentMeetingTitle = meetingTitle;
             currentPlatform = platform;
             currentAttendeeReport = sessionData.attendeeReport || null;
+            sessionRecordingStartTime = sessionData.metadata?.recordingStartTime || null;
 
             h1.innerHTML = `${createPlatformBadge(platform)}Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
 
