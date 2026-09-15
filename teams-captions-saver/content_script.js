@@ -1183,6 +1183,8 @@ function safeSendMessage(message, callback) {
     }
 }
 
+// Reason the most recent safeSendMessageAsync() call got no usable reply, for log lines
+let lastSendFailure = null;
 async function safeSendMessageAsync(message) {
     return new Promise((resolve) => {
         try {
@@ -1194,16 +1196,19 @@ async function safeSendMessageAsync(message) {
 
             chrome.runtime.sendMessage(message, (response) => {
                 if (chrome.runtime.lastError) {
+                    lastSendFailure = chrome.runtime.lastError.message || 'unknown runtime error';
                     // Check for context invalidation
                     if (chrome.runtime.lastError.message?.includes('Extension context invalidated')) {
                         showContextInvalidationNotification();
                     }
                     resolve(null);
                 } else {
+                    lastSendFailure = response === undefined ? 'no response from service worker' : null;
                     resolve(response);
                 }
             });
         } catch (error) {
+            lastSendFailure = error.message || String(error);
             if (error.message?.includes('Extension context invalidated')) {
                 showContextInvalidationNotification();
             }
@@ -1361,8 +1366,11 @@ const getCleanTranscript = () => [...transcriptArray].map(({ key, ...rest }) => 
 // meeting start that every export reports; without it the Previous Sessions path fell
 // back to the session's creation time and disagreed with the auto-saved file.
 function sessionMetadataPatch() {
-    return recordingStartTime ? { recordingStartTime: recordingStartTime.toISOString() } : null;
+    const patch = { platform: platformConfig ? platformConfig.name : undefined };
+    if (recordingStartTime) patch.recordingStartTime = recordingStartTime.toISOString();
+    return patch;
 }
+
 
 // Sanitize attendee/speaker names from DOM to prevent XSS and normalize whitespace
 function sanitizeNameFromDOM(rawName) {
@@ -3883,15 +3891,18 @@ async function stopCaptureSession() {
                 status: 'ended'
             };
             let finalSaved = false;
+            let lastFailureDetail = '';
             for (let attempt = 1; attempt <= 3 && !finalSaved; attempt++) {
                 try {
                     const response = await safeSendMessageAsync({ action: 'updateSession', sessionId: currentSessionId, data: finalData });
                     finalSaved = !!(response && response.success);
+                    if (!finalSaved) lastFailureDetail = lastSendFailure || (response ? `service worker answered ${JSON.stringify(response)}` : 'no response');
                 } catch (e) {
                     finalSaved = false;
+                    lastFailureDetail = e.message;
                 }
                 if (!finalSaved) {
-                    Logger.warn(Logger.Category.SESSION, `Final session save attempt ${attempt} failed${attempt < 3 ? ', retrying' : ''}`);
+                    Logger.warn(Logger.Category.SESSION, `Final session save attempt ${attempt} failed (${lastFailureDetail})${attempt < 3 ? ', retrying' : ''}`);
                     if (attempt < 3) await delay(1000 * attempt);
                 }
             }
