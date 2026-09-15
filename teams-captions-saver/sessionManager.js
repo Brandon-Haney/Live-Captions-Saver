@@ -388,6 +388,36 @@ class SessionManager {
     // MV3 service worker after ~30 s; a backup or the final save that woke it up
     // used to be dropped with "Session not found" while initialization was still
     // running, which is how exports ended up 30 s stale and mid-caption.
+    // Recreate a session the content script still holds but this worker no longer has:
+    // createSession() defers persisting until content arrives, so a worker stopped in
+    // the first 30 s of a meeting (or a session evicted from storage) leaves the
+    // content script's saves answering "not found". The save message carries
+    // everything needed to stand the session back up.
+    async adoptSession(sessionId, info = {}) {
+        await this.ensureInitialized();
+        if (this.sessions.has(sessionId)) return true;
+        if (!sessionId || typeof sessionId !== 'string') return false;
+        const parsedStart = info.recordingStartTime ? new Date(info.recordingStartTime).getTime() : NaN;
+        const idStart = this.extractTimestampFromSessionId(sessionId);
+        const startMs = !isNaN(parsedStart) ? parsedStart : (idStart || Date.now());
+        this.sessions.set(sessionId, {
+            metadata: {
+                sessionId,
+                tabId: info.tabId ?? null,
+                platform: info.platform || 'Unknown',
+                url: info.url || null,
+                meetingTitle: info.meetingTitle || 'Untitled Meeting',
+                startTime: new Date(startMs).toISOString(),
+                status: 'active',
+                lastActivity: new Date().toISOString(),
+                adopted: true
+            },
+            stats: { captionCount: 0, attendeeCount: 0, chatCount: 0, duration: 0, speakers: [] }
+        });
+        console.warn(`[SessionManager] Adopted session ${sessionId}: it was in neither memory nor storage`);
+        return true;
+    }
+
     async ensureSessionLoaded(sessionId) {
         await this.ensureInitialized();
         if (this.sessions.has(sessionId)) return true;

@@ -1604,7 +1604,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     return;
 
                 case 'updateSession': {
-                    const updated = await sessionManager.updateSession(message.sessionId, message.data);
+                    let updated = await sessionManager.updateSession(message.sessionId, message.data);
+
+                    // A data-bearing save must never fail for "session not found": recreate
+                    // the session from the message and save again
+                    if (!updated && message.data && message.data.transcript) {
+                        const meta = message.data.metadata || {};
+                        await sessionManager.adoptSession(message.sessionId, {
+                            tabId: sender.tab ? sender.tab.id : null,
+                            url: sender.tab ? sender.tab.url : null,
+                            platform: meta.platform || null,
+                            meetingTitle: message.data.meetingTitle,
+                            recordingStartTime: meta.recordingStartTime
+                        });
+                        updated = await sessionManager.updateSession(message.sessionId, message.data);
+                    }
 
                     // If we have transcript data, save it
                     let saved = true;
