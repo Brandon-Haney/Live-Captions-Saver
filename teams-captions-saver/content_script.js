@@ -3277,8 +3277,11 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                 // exports from Previous Sessions lost the meeting's last seconds.
                 console.log(`[Caption Saver] Ending session with ${transcriptArray.length} captions: ${currentSessionId}`);
                 await stopCaptureSession();
+                // Capture may have stopped earlier (captions turned off) with a save that
+                // failed, or stopped with nothing to flush; try once more with what we hold
+                if (!finalSessionSaveDone) await saveFinalSession();
                 if (!finalSessionSaveDone) {
-                    console.warn('[Caption Saver] Final save did not confirm; ending session with the last backup');
+                    console.warn(`[Caption Saver] Final save did not confirm (${finalSessionSaveError || 'no save attempted'}); ending session with the last backup`);
                     chrome.runtime.sendMessage({
                         action: 'endSession',
                         sessionId: currentSessionId
@@ -3674,6 +3677,7 @@ async function startCaptureSession() {
     console.log("New caption session detected. Starting capture.");
     transcriptArray.length = 0;
     finalSessionSaveDone = false;
+    finalSessionSaveError = '';
     kwLastAlerts = {};
     dismissAllKeywordToasts();
 
@@ -3840,7 +3844,58 @@ function startPeriodicBackup() {
     }, 30000); // 30 seconds
 }
 
-async function stopCaptureSession() {
+// Last failure reason from saveFinalSession(), shown when the meeting-end fallback runs
+var finalSessionSaveError = ''; // var: read by functions that can run before this line is evaluated
+
+// Send the complete transcript with status 'ended', awaited and retried. This is the
+// save that Previous Sessions exports read; the service worker ends the session only
+// after it is on disk. Sets finalSessionSaveDone on success.
+async function saveFinalSession() {
+    if (!currentSessionId || transcriptArray.length === 0) return false;
+    if (finalSessionSaveDone) return true;
+    const finalTitle = currentMeetingTitle || 'Untitled Meeting';
+    const sessionId = currentSessionId;
+    console.log(`[Caption Saver] Saving final session data - Session: ${sessionId}, Title: "${finalTitle}", Captions: ${transcriptArray.length}`);
+    const finalData = {
+        transcript: getCleanTranscript(),
+        attendeeReport: buildAttendeeReportSnapshot(),
+        meetingTitle: finalTitle,
+        captionCount: transcriptArray.length,
+        attendeeCount: attendeeData.allAttendees.size,
+        metadata: sessionMetadataPatch(),
+        status: 'ended'
+    };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const response = await safeSendMessageAsync({ action: 'updateSession', sessionId, data: finalData });
+            if (response && response.success) {
+                finalSessionSaveDone = true;
+                finalSessionSaveError = '';
+                Logger.logSession(`Final session data saved (${finalData.transcript.length} entries)`);
+                return true;
+            }
+            finalSessionSaveError = lastSendFailure || (response ? `service worker answered ${JSON.stringify(response)}` : 'no response');
+        } catch (e) {
+            finalSessionSaveError = e.message;
+        }
+        Logger.warn(Logger.Category.SESSION, `Final session save attempt ${attempt} failed (${finalSessionSaveError})${attempt < 3 ? ', retrying' : ''}`);
+        if (attempt < 3) await delay(1000 * attempt);
+    }
+    return false;
+}
+
+// Single-flight: Teams removes the captions area a few seconds before the hang-up
+// button, so the captions-off path starts a stop (and the final save) before the
+// meeting-end handler starts its own. A second caller used to return at once because
+// `capturing` was already false, and treated the still-running save as failed.
+var stopCaptureInFlight = null; // var: stopCaptureSession() is hoisted and may run early
+function stopCaptureSession() {
+    if (stopCaptureInFlight) return stopCaptureInFlight;
+    stopCaptureInFlight = stopCaptureSessionOnce().finally(() => { stopCaptureInFlight = null; });
+    return stopCaptureInFlight;
+}
+
+async function stopCaptureSessionOnce() {
     // Always update badge to off when stopping, even if not currently capturing
     updateBadgeStatus(false);
 
@@ -3879,37 +3934,7 @@ async function stopCaptureSession() {
             // Awaited and retried: this is the save that exports read, and a fire-and-forget
             // message to a service worker that had just been stopped was silently lost,
             // leaving the stored transcript at the last 30 s backup.
-            const finalTitle = currentMeetingTitle || 'Untitled Meeting';
-            console.log(`[Caption Saver] Saving final session data - Session: ${currentSessionId}, Title: "${finalTitle}", Captions: ${transcriptArray.length}`);
-            const finalData = {
-                transcript: getCleanTranscript(),
-                attendeeReport: buildAttendeeReportSnapshot(),
-                meetingTitle: finalTitle,
-                captionCount: transcriptArray.length,
-                attendeeCount: attendeeData.allAttendees.size,
-                metadata: sessionMetadataPatch(),
-                status: 'ended'
-            };
-            let finalSaved = false;
-            let lastFailureDetail = '';
-            for (let attempt = 1; attempt <= 3 && !finalSaved; attempt++) {
-                try {
-                    const response = await safeSendMessageAsync({ action: 'updateSession', sessionId: currentSessionId, data: finalData });
-                    finalSaved = !!(response && response.success);
-                    if (!finalSaved) lastFailureDetail = lastSendFailure || (response ? `service worker answered ${JSON.stringify(response)}` : 'no response');
-                } catch (e) {
-                    finalSaved = false;
-                    lastFailureDetail = e.message;
-                }
-                if (!finalSaved) {
-                    Logger.warn(Logger.Category.SESSION, `Final session save attempt ${attempt} failed (${lastFailureDetail})${attempt < 3 ? ', retrying' : ''}`);
-                    if (attempt < 3) await delay(1000 * attempt);
-                }
-            }
-            if (finalSaved) {
-                finalSessionSaveDone = true;
-                Logger.logSession(`Final session data saved (${transcriptArray.length} entries)`);
-            }
+            await saveFinalSession();
         } else {
             // Fallback to old storage method - check quota first
             const hasSpace = await checkStorageQuota();
