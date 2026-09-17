@@ -1129,8 +1129,10 @@ function showContextInvalidationNotification() {
     notification.innerHTML = `
         <strong>Live Captions Saver</strong><br>
         Extension was updated. Please refresh this page to continue capturing captions.
+        ${transcriptArray.length > 0 ? `<br><br>This page still holds ${transcriptArray.length} captured entries the extension can no longer save. Download them before refreshing.` : ''}
+        <div style="margin-top: 8px; display: flex; gap: 8px;">
+        ${transcriptArray.length > 0 ? `<button id="lcs-download-btn" style="background: white; color: #ff9800; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;">Download transcript</button>` : ''}
         <button id="lcs-refresh-btn" style="
-            margin-top: 8px;
             background: white;
             color: #ff9800;
             border: none;
@@ -1139,6 +1141,7 @@ function showContextInvalidationNotification() {
             cursor: pointer;
             font-weight: bold;
         ">Refresh Page</button>
+        </div>
     `;
     document.body.appendChild(notification);
 
@@ -1147,12 +1150,75 @@ function showContextInvalidationNotification() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => location.reload());
     }
+    const downloadBtn = document.getElementById('lcs-download-btn');
+    if (downloadBtn) {
+        downloadBtn.addEventListener('click', downloadTranscriptFromPage);
+    }
+    // Captured data at risk: keep the notice up until the user acts
+    if (transcriptArray.length > 0) return;
 
     // Auto-remove after 30 seconds
     setTimeout(() => {
         notification.remove();
     }, 30000);
 }
+
+// Plain-text dump built and downloaded inside the page, for when the extension can no
+// longer be reached (its service worker owns every other download path)
+function downloadTranscriptFromPage() {
+    try {
+        const lines = [`${currentMeetingTitle || 'Meeting'}`, `Captured: ${recordingStartTime ? recordingStartTime.toLocaleString() : ''}`, ''];
+        for (const e of transcriptArray) {
+            if (!e) continue;
+            const prefix = e.Type === 'chat' ? '[CHAT] ' : e.Type === 'slide' ? '[SLIDE] ' : '';
+            lines.push(`${prefix}[${e.Time || ''}] ${e.Name || ''}: ${e.Text || ''}`);
+        }
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const safeTitle = String(currentMeetingTitle || 'Meeting').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80);
+        a.href = url;
+        a.download = `${new Date().toISOString().slice(0, 10)}_${safeTitle}_recovered.txt`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) {
+        console.error('[Caption Saver] Recovery download failed:', e);
+    }
+}
+
+// The extension was reloaded or updated while this tab stayed open. This copy of the
+// script can no longer reach any chrome.* API, and every timer that touches one throws
+// "Extension context invalidated". Stop everything once, tell the user, and offer the
+// captured entries as a download.
+var contextInvalidatedHandled = false;
+function isExtensionContextValid() {
+    try { return !!(chrome && chrome.runtime && chrome.runtime.id); } catch (e) { return false; }
+}
+function handleContextInvalidated() {
+    if (contextInvalidatedHandled) return;
+    contextInvalidatedHandled = true;
+    capturing = false;
+    try { if (typeof SlideCapture !== 'undefined') SlideCapture.stop(); } catch (e) { /* ignore */ }
+    try { if (chatCaptureState.panelCheckInterval) clearInterval(chatCaptureState.panelCheckInterval); } catch (e) { /* ignore */ }
+    try { cleanupObservers(); } catch (e) { /* chrome.* calls inside cleanup throw now; the timers are already cleared */ }
+    try { showContextInvalidationNotification(); } catch (e) { /* ignore */ }
+    console.warn('[Caption Saver] Extension context invalidated (extension reloaded or updated); this page\'s capture is stopped until refresh');
+}
+window.addEventListener('unhandledrejection', (event) => {
+    const msg = event && event.reason && (event.reason.message || String(event.reason));
+    if (msg && msg.includes('Extension context invalidated')) {
+        event.preventDefault();
+        handleContextInvalidated();
+    }
+});
+const contextWatchdog = setInterval(() => {
+    if (!isExtensionContextValid()) {
+        clearInterval(contextWatchdog);
+        handleContextInvalidated();
+    }
+}, 2000);
 
 function safeSendMessage(message, callback) {
     try {
