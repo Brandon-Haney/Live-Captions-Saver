@@ -348,6 +348,7 @@ const TIMING = {
 // --- State ---
 const transcriptArray = [];
 let capturing = false;
+let finalSessionSaveDone = false; // set once the meeting-end save is confirmed on disk; pagehide re-sends otherwise
 let currentMeetingTitle = ''; // Current meeting title
 let recordingStartTime = null;
 let observer = null;
@@ -361,42 +362,332 @@ let cachedElements = new Map();
 let autoEnableInProgress = false;
 let autoEnableLastAttempt = 0;
 
-// --- Silent AudioContext for Background Tab Throttle Prevention ---
-// Chrome applies intensive throttling to background tabs after 5 minutes,
-// but exempts tabs that are playing audio. This silent AudioContext keeps
-// the tab in Chrome's "minimal throttling" tier so MutationObserver-based
-// caption capture continues working when the tab is hidden.
-let antiThrottleAudioCtx = null;
-let antiThrottleOscillator = null;
+// --- Background Capture (visibility shim) ---
+// Meeting apps stop rendering captions into the DOM while the tab is hidden
+// and flush them when it regains focus. visibility_shim.js (injected into the
+// page's main world below) makes the page believe the tab is always visible
+// and focused while capture is active. Controlled by the `backgroundCapture`
+// sync setting (default on).
+let visibilityShimActive = false;
 
-function startAntiThrottle() {
-    if (antiThrottleAudioCtx) return; // Already running
+function setVisibilityShim(active) {
+    active = !!active;
+    if (active === visibilityShimActive) return;
+    visibilityShimActive = active;
     try {
-        antiThrottleAudioCtx = new AudioContext();
-        antiThrottleOscillator = antiThrottleAudioCtx.createOscillator();
-        const gain = antiThrottleAudioCtx.createGain();
-        // Inaudible: 1Hz frequency at near-zero volume
-        antiThrottleOscillator.frequency.setValueAtTime(1, antiThrottleAudioCtx.currentTime);
-        gain.gain.setValueAtTime(0.0001, antiThrottleAudioCtx.currentTime);
-        antiThrottleOscillator.connect(gain);
-        gain.connect(antiThrottleAudioCtx.destination);
-        antiThrottleOscillator.start();
-        Logger.info('[Caption Saver] Anti-throttle audio started (background tab protection)');
+        window.postMessage({ type: 'LCS_VISIBILITY_SHIM', active }, window.location.origin);
+        Logger.info(Logger.Category.CAPTION, `Background capture shim ${active ? "enabled" : "disabled"}`);
     } catch (e) {
-        Logger.warn('[Caption Saver] Failed to start anti-throttle audio:', e.message);
+        Logger.warn(Logger.Category.CAPTION, "Failed to toggle background capture shim:", e.message);
     }
 }
 
-function stopAntiThrottle() {
-    if (antiThrottleOscillator) {
-        try { antiThrottleOscillator.stop(); } catch (e) { /* already stopped */ }
-        antiThrottleOscillator = null;
+async function applyBackgroundCaptureSetting() {
+    if (!capturing) {
+        setVisibilityShim(false);
+        return;
     }
-    if (antiThrottleAudioCtx) {
-        try { antiThrottleAudioCtx.close(); } catch (e) { /* already closed */ }
-        antiThrottleAudioCtx = null;
+    const { backgroundCapture } = await chrome.storage.sync.get('backgroundCapture');
+    setVisibilityShim(backgroundCapture !== false);
+}
+
+// --- Image embedding & shared content (slide) capture ---
+// Pixels never go into the transcript: they are sent to the service worker,
+// which stores them in IndexedDB (imageStore.js). Transcript entries carry an
+// imageId. The live viewer gets the data URL in the broadcast for instant display.
+const IMAGE_EMBED = {
+    MAX_WIDTH: 1280,
+    JPEG_QUALITY: 0.85,
+    KEEP_ORIGINAL_BYTES: 400 * 1024,   // small PNG/GIF stay lossless, keep animation
+    MAX_ORIGINAL_BYTES: 4 * 1024 * 1024 // refuse anything bigger before decoding
+};
+
+function hashString(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+    return h.toString(36);
+}
+
+function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function fetchImageBlob(url) {
+    if (!url) return null;
+    // blob:/data: URLs and same-origin/authenticated resources: try a plain fetch first
+    try {
+        const response = await fetch(url, { credentials: 'include' });
+        if (response.ok) {
+            const blob = await response.blob();
+            if (blob.type.startsWith('image/') && blob.size <= IMAGE_EMBED.MAX_ORIGINAL_BYTES) return blob;
+        }
+    } catch (e) { /* fall through to the DOM copy */ }
+
+    // Fallback: the page already decoded this image; copy it off the <img> element
+    const img = [...document.images].find(el =>
+        el.src === url || el.currentSrc === url || el.getAttribute('data-orig-src') === url);
+    if (img && img.complete && img.naturalWidth > 0) {
+        try {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            canvas.getContext('2d').drawImage(img, 0, 0);
+            return await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        } catch (e) {
+            // Cross-origin image without CORS taints the canvas; nothing more we can do
+        }
     }
-    Logger.info('[Caption Saver] Anti-throttle audio stopped');
+    return null;
+}
+
+// Returns { dataUrl, width, height, bytes } or null.
+async function imageBlobToEmbeddable(blob) {
+    if (!blob) return null;
+    let bitmap;
+    try {
+        bitmap = await createImageBitmap(blob);
+    } catch (e) {
+        return null;
+    }
+    try {
+        const keepOriginal = blob.size <= IMAGE_EMBED.KEEP_ORIGINAL_BYTES &&
+            (blob.type === 'image/gif' || blob.type === 'image/png' || blob.type === 'image/webp') &&
+            bitmap.width <= IMAGE_EMBED.MAX_WIDTH;
+        if (keepOriginal) {
+            return { dataUrl: await blobToDataUrl(blob), width: bitmap.width, height: bitmap.height, bytes: blob.size };
+        }
+        const scale = Math.min(1, IMAGE_EMBED.MAX_WIDTH / bitmap.width);
+        const w = Math.max(1, Math.round(bitmap.width * scale));
+        const h = Math.max(1, Math.round(bitmap.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', IMAGE_EMBED.JPEG_QUALITY);
+        return { dataUrl, width: w, height: h, bytes: Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75) };
+    } finally {
+        bitmap.close();
+    }
+}
+
+function storeImage(record) {
+    if (!record || !record.id || !record.dataUrl) return;
+    safeSendMessage({
+        message: 'store_image',
+        sessionId: currentSessionId,
+        image: { sessionId: currentSessionId, createdAt: Date.now(), ...record }
+    });
+}
+
+const embeddedAttachmentIds = new Map(); // url -> imageId, so repeated images are stored once per session
+
+async function embedChatAttachments(chatMessage) {
+    const attachments = chatMessage.attachments || [];
+    let changed = false;
+    const liveImages = {};
+    for (const att of attachments) {
+        if (att.imageId || att.type !== 'image' || !att.url) continue;
+        const cached = embeddedAttachmentIds.get(att.url);
+        if (cached) {
+            att.imageId = cached;
+            changed = true;
+            continue;
+        }
+        const embeddable = await imageBlobToEmbeddable(await fetchImageBlob(att.url));
+        if (!embeddable) continue;
+        const imageId = `att_${currentSessionId || 'nosession'}_${hashString(att.url)}`;
+        storeImage({ id: imageId, kind: 'attachment', hash: null, ...embeddable });
+        embeddedAttachmentIds.set(att.url, imageId);
+        att.imageId = imageId;
+        liveImages[imageId] = embeddable.dataUrl;
+        changed = true;
+        Logger.logChat(`Embedded attachment ${att.filename || ''} (${Math.round(embeddable.bytes / 1024)} KB)`);
+    }
+    if (changed) {
+        broadcastCaptionUpdate({ type: 'update', caption: chatMessage, images: liveImages });
+    }
+}
+
+// Session-level slide registry. Frames arrive from two samplers: the Teams
+// share <video> (SlideCapture in this script) and the PowerPoint Live iframe
+// (pptLiveCapture.js, relayed by the service worker as 'shared_content_frame').
+// Both funnel through registerSlide() so numbering, "seen earlier" dedupe and
+// the storage budget are shared.
+const slideRegistry = { slides: [], bytes: 0, last: null, currentImageId: null };
+const SLIDE_RETRACT_MS = 3000;          // a slide replaced this soon after appearing was a transition or loading state
+const SLIDE_SAME_AREA_FRACTION = 0.04;  // change confined to under 4% of the thumbnail (cursor, caret, cell selection) = same slide
+const SLIDE_PIXEL_DELTA = 24;           // per-pixel gray difference that counts as "changed"
+let sharedContentEnabled = false;
+
+function resetSlideRegistry() {
+    slideRegistry.slides.length = 0;
+    slideRegistry.bytes = 0;
+    slideRegistry.last = null;
+    slideRegistry.currentImageId = null;
+}
+
+// Fraction of thumbnail pixels that differ between two frames (0..1)
+function changedAreaFraction(a, b) {
+    if (!a || !b || a.length !== b.length || a.length === 0) return 1;
+    let changed = 0;
+    for (let i = 0; i < a.length; i++) {
+        if (Math.abs(a[i] - b[i]) > SLIDE_PIXEL_DELTA) changed++;
+    }
+    return changed / a.length;
+}
+
+// Withdraw the most recently registered slide: drop the transcript entry, tell the
+// viewer to remove it, and delete its pixels if this entry was the one that stored them
+function retractLastSlide(reason) {
+    const last = slideRegistry.last;
+    if (!last) return;
+    const idx = transcriptArray.findIndex(e => e && e.key === last.key);
+    if (idx !== -1) transcriptArray.splice(idx, 1);
+    if (last.isNew) {
+        const sIdx = slideRegistry.slides.findIndex(s => s.imageId === last.imageId);
+        if (sIdx !== -1) {
+            slideRegistry.bytes -= slideRegistry.slides[sIdx].bytes || 0;
+            slideRegistry.slides.splice(sIdx, 1);
+        }
+        safeSendMessage({ message: 'delete_image', id: last.imageId });
+    }
+    broadcastCaptionUpdate({ type: 'remove', key: last.key, imageId: last.isNew ? last.imageId : undefined });
+    Logger.logCaption(`[Slide Capture] Retracted slide ${last.slideNumber} (${reason})`);
+    slideRegistry.last = null;
+    slideRegistry.currentImageId = last.previousImageId || null;
+}
+
+function registerSlide(frame, sourceLabel) {
+    if (!frame || !frame.dataUrl || !frame.hash) return;
+    const cfg = SlideCapture.CONFIG;
+    const now = new Date();
+    const thumb = Array.isArray(frame.thumb) ? frame.thumb : null;
+
+    // A slide replaced within SLIDE_RETRACT_MS was a transition or loading state, not content
+    if (slideRegistry.last && (now.getTime() - slideRegistry.last.at) < SLIDE_RETRACT_MS) {
+        retractLastSlide(`replaced after ${now.getTime() - slideRegistry.last.at} ms`);
+    }
+
+    // Match against slides already kept: by hash, or when the change is confined to a
+    // sliver of the image (cursor moved, cell selected) rather than the whole slide
+    let earlier = null;
+    for (const s of slideRegistry.slides) {
+        if (SlideCapture.hammingHex(s.hash, frame.hash) <= cfg.HASH_DISTANCE ||
+            (thumb && s.thumb && changedAreaFraction(thumb, s.thumb) < SLIDE_SAME_AREA_FRACTION)) {
+            earlier = s;
+            break;
+        }
+    }
+
+    // Same slide that is already on screen: nothing to record
+    if (earlier && earlier.imageId === slideRegistry.currentImageId) {
+        Logger.logCaption(`[Slide Capture] Ignored cursor-only change on slide ${earlier.slideNumber}`);
+        return;
+    }
+
+    let slide;
+    if (earlier) {
+        slide = { ...earlier, thumb: undefined, dataUrl: null, bytes: 0, seenEarlier: true };
+        Logger.logCaption(`[Slide Capture] Slide ${earlier.slideNumber} shown again${sourceLabel ? ' (' + sourceLabel + ')' : ''}`);
+    } else {
+        if (slideRegistry.slides.length >= cfg.MAX_SLIDES_PER_SESSION) {
+            Logger.logCaption(`[Slide Capture] ${cfg.MAX_SLIDES_PER_SESSION} slides in one meeting, not storing more (runaway guard)`);
+            return;
+        }
+        const slideNumber = slideRegistry.slides.length + 1;
+        const imageId = `slide_${currentSessionId || 'nosession'}_${Date.now()}_${slideNumber}`;
+        const rec = { imageId, hash: frame.hash, width: frame.width, height: frame.height, slideNumber, bytes: frame.bytes || 0, thumb };
+        slideRegistry.slides.push(rec);
+        slideRegistry.bytes += frame.bytes || 0;
+        slide = { ...rec, thumb: undefined, dataUrl: frame.dataUrl, seenEarlier: false };
+        Logger.logCaption(`[Slide Capture] Kept slide ${slideNumber} (${frame.width}x${frame.height}, ${Math.round((frame.bytes || 0) / 1024)} KB)${sourceLabel ? ' from ' + sourceLabel : ''}`);
+    }
+
+    const presenter = (typeof normalizeDisplayName === 'function' ? normalizeDisplayName(frame.presenter) : frame.presenter)
+        || resolveSharedContentPresenter() || 'Presenter';
+    const label = slide.seenEarlier
+        ? `Shared content (slide ${slide.slideNumber}, seen earlier)`
+        : `Shared content (slide ${slide.slideNumber})`;
+    const entry = {
+        Name: presenter,
+        Text: label,
+        Time: formatTimestamp(now),
+        timestamp: now.toISOString(),
+        Type: 'slide',
+        key: `slide_${slide.imageId}_${now.getTime()}`,
+        imageId: slide.imageId,
+        imageHash: slide.hash,
+        slideNumber: slide.slideNumber,
+        seenEarlier: !!slide.seenEarlier
+    };
+    transcriptArray.push(entry);
+    if (slide.dataUrl) {
+        storeImage({ id: slide.imageId, kind: 'slide', hash: slide.hash, dataUrl: slide.dataUrl, width: slide.width, height: slide.height, bytes: slide.bytes });
+    }
+    broadcastCaptionUpdate({
+        type: 'new',
+        caption: entry,
+        images: slide.dataUrl ? { [slide.imageId]: slide.dataUrl } : undefined
+    });
+    slideRegistry.last = {
+        key: entry.key,
+        imageId: slide.imageId,
+        slideNumber: slide.slideNumber,
+        isNew: !slide.seenEarlier,
+        at: now.getTime(),
+        previousImageId: slideRegistry.currentImageId
+    };
+    slideRegistry.currentImageId = slide.imageId;
+}
+
+// Presenter name when the frame itself carries none (PowerPoint Live): ask the
+// platform config to read it from the stage, if it can.
+function resolveSharedContentPresenter() {
+    try {
+        const cfg = platformConfig && platformConfig.sharedContent;
+        const name = cfg && cfg.getPresenter ? cfg.getPresenter(null) : null;
+        return (name && String(name).trim()) || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Frames relayed from the PowerPoint Live iframe (see pptLiveCapture.js)
+function handleSharedContentFrame(request) {
+    if (window.top !== window.self) return;
+    if (!capturing || !sharedContentEnabled) return;
+    if (typeof SlideCapture === 'undefined') return;
+    registerSlide(request.frame, request.source === 'powerpoint-live' ? 'PowerPoint Live' : request.source);
+}
+
+async function applySharedContentSetting() {
+    if (typeof SlideCapture === 'undefined') return;
+    if (!capturing) {
+        SlideCapture.stop();
+        return;
+    }
+    const { captureSharedContent } = await chrome.storage.sync.get('captureSharedContent');
+    sharedContentEnabled = !!captureSharedContent;
+    const config = platformConfig && platformConfig.sharedContent;
+    if (sharedContentEnabled && config && config.videoSelector) {
+        if (!SlideCapture.isActive()) {
+            SlideCapture.start({
+                getFrame: SlideCapture.videoFrameSource(config),
+                onSlide: (frame) => registerSlide(frame, 'screen share'),
+                log: (...args) => Logger.info(Logger.Category.CAPTION, ...args)
+            });
+        }
+    } else {
+        if (sharedContentEnabled && !config) {
+            Logger.info(Logger.Category.PLATFORM, 'Shared content capture is not supported on this platform yet');
+        }
+        SlideCapture.stop();
+    }
 }
 let autoEnableDebounceTimer = null;
 let autoSaveTriggered = false;
@@ -838,8 +1129,10 @@ function showContextInvalidationNotification() {
     notification.innerHTML = `
         <strong>Live Captions Saver</strong><br>
         Extension was updated. Please refresh this page to continue capturing captions.
+        ${transcriptArray.length > 0 ? `<br><br>This page still holds ${transcriptArray.length} captured entries the extension can no longer save. Download them before refreshing.` : ''}
+        <div style="margin-top: 8px; display: flex; gap: 8px;">
+        ${transcriptArray.length > 0 ? `<button id="lcs-download-btn" style="background: white; color: #ff9800; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;">Download transcript</button>` : ''}
         <button id="lcs-refresh-btn" style="
-            margin-top: 8px;
             background: white;
             color: #ff9800;
             border: none;
@@ -848,6 +1141,7 @@ function showContextInvalidationNotification() {
             cursor: pointer;
             font-weight: bold;
         ">Refresh Page</button>
+        </div>
     `;
     document.body.appendChild(notification);
 
@@ -856,12 +1150,75 @@ function showContextInvalidationNotification() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => location.reload());
     }
+    const downloadBtn = document.getElementById('lcs-download-btn');
+    if (downloadBtn) {
+        downloadBtn.addEventListener('click', downloadTranscriptFromPage);
+    }
+    // Captured data at risk: keep the notice up until the user acts
+    if (transcriptArray.length > 0) return;
 
     // Auto-remove after 30 seconds
     setTimeout(() => {
         notification.remove();
     }, 30000);
 }
+
+// Plain-text dump built and downloaded inside the page, for when the extension can no
+// longer be reached (its service worker owns every other download path)
+function downloadTranscriptFromPage() {
+    try {
+        const lines = [`${currentMeetingTitle || 'Meeting'}`, `Captured: ${recordingStartTime ? recordingStartTime.toLocaleString() : ''}`, ''];
+        for (const e of transcriptArray) {
+            if (!e) continue;
+            const prefix = e.Type === 'chat' ? '[CHAT] ' : e.Type === 'slide' ? '[SLIDE] ' : '';
+            lines.push(`${prefix}[${e.Time || ''}] ${e.Name || ''}: ${e.Text || ''}`);
+        }
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const safeTitle = String(currentMeetingTitle || 'Meeting').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80);
+        a.href = url;
+        a.download = `${new Date().toISOString().slice(0, 10)}_${safeTitle}_recovered.txt`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) {
+        console.error('[Caption Saver] Recovery download failed:', e);
+    }
+}
+
+// The extension was reloaded or updated while this tab stayed open. This copy of the
+// script can no longer reach any chrome.* API, and every timer that touches one throws
+// "Extension context invalidated". Stop everything once, tell the user, and offer the
+// captured entries as a download.
+var contextInvalidatedHandled = false;
+function isExtensionContextValid() {
+    try { return !!(chrome && chrome.runtime && chrome.runtime.id); } catch (e) { return false; }
+}
+function handleContextInvalidated() {
+    if (contextInvalidatedHandled) return;
+    contextInvalidatedHandled = true;
+    capturing = false;
+    try { if (typeof SlideCapture !== 'undefined') SlideCapture.stop(); } catch (e) { /* ignore */ }
+    try { if (chatCaptureState.panelCheckInterval) clearInterval(chatCaptureState.panelCheckInterval); } catch (e) { /* ignore */ }
+    try { cleanupObservers(); } catch (e) { /* chrome.* calls inside cleanup throw now; the timers are already cleared */ }
+    try { showContextInvalidationNotification(); } catch (e) { /* ignore */ }
+    console.warn('[Caption Saver] Extension context invalidated (extension reloaded or updated); this page\'s capture is stopped until refresh');
+}
+window.addEventListener('unhandledrejection', (event) => {
+    const msg = event && event.reason && (event.reason.message || String(event.reason));
+    if (msg && msg.includes('Extension context invalidated')) {
+        event.preventDefault();
+        handleContextInvalidated();
+    }
+});
+const contextWatchdog = setInterval(() => {
+    if (!isExtensionContextValid()) {
+        clearInterval(contextWatchdog);
+        handleContextInvalidated();
+    }
+}, 2000);
 
 function safeSendMessage(message, callback) {
     try {
@@ -892,6 +1249,8 @@ function safeSendMessage(message, callback) {
     }
 }
 
+// Reason the most recent safeSendMessageAsync() call got no usable reply, for log lines
+let lastSendFailure = null;
 async function safeSendMessageAsync(message) {
     return new Promise((resolve) => {
         try {
@@ -903,16 +1262,19 @@ async function safeSendMessageAsync(message) {
 
             chrome.runtime.sendMessage(message, (response) => {
                 if (chrome.runtime.lastError) {
+                    lastSendFailure = chrome.runtime.lastError.message || 'unknown runtime error';
                     // Check for context invalidation
                     if (chrome.runtime.lastError.message?.includes('Extension context invalidated')) {
                         showContextInvalidationNotification();
                     }
                     resolve(null);
                 } else {
+                    lastSendFailure = response === undefined ? 'no response from service worker' : null;
                     resolve(response);
                 }
             });
         } catch (error) {
+            lastSendFailure = error.message || String(error);
             if (error.message?.includes('Extension context invalidated')) {
                 showContextInvalidationNotification();
             }
@@ -1066,6 +1428,16 @@ function waitForElement(selector, context = document, timeout = 5000) {
 // Create shallow copy before mapping to prevent issues from concurrent mutation
 const getCleanTranscript = () => [...transcriptArray].map(({ key, ...rest }) => rest);
 
+// Session metadata sent with every save. recordingStartTime (when capture began) is the
+// meeting start that every export reports; without it the Previous Sessions path fell
+// back to the session's creation time and disagreed with the auto-saved file.
+function sessionMetadataPatch() {
+    const patch = { platform: platformConfig ? platformConfig.name : undefined };
+    if (recordingStartTime) patch.recordingStartTime = recordingStartTime.toISOString();
+    return patch;
+}
+
+
 // Sanitize attendee/speaker names from DOM to prevent XSS and normalize whitespace
 function sanitizeNameFromDOM(rawName) {
     if (!rawName || typeof rawName !== 'string') return '';
@@ -1102,6 +1474,12 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
         }
         if (changes.hotKeywordSettings) {
             kwSettings = { ...kwSettings, ...(changes.hotKeywordSettings.newValue || {}) };
+        }
+        if (changes.backgroundCapture) {
+            applyBackgroundCaptureSetting();
+        }
+        if (changes.captureSharedContent) {
+            applySharedContentSetting();
         }
     }
 });
@@ -1518,7 +1896,9 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
             if (!captionData) return;
 
             // Use the formatted timestamp if Time is not provided correctly
-            const { Name: name, Text: text } = captionData;
+            const { Name: rawName, Text: text } = captionData;
+            // Same person, same name everywhere (roster tags like "[C]" stripped)
+            const name = typeof normalizeDisplayName === 'function' ? (normalizeDisplayName(rawName) || rawName) : rawName;
             const time = getFormattedTimestamp(); // Always use our formatted timestamp
             if (text.length === 0) return;
 
@@ -1686,10 +2066,11 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                         // Update the element ID for next comparison
                         element.setAttribute('data-caption-id', newCaptionId);
                     } else {
-                        // Same speaker - just update the existing caption in place
+                        // Same speaker - just update the existing caption in place.
+                        // Time stays at first-seen: it is what exports sort on (via `timestamp`),
+                        // so moving it to the latest edit made entries display out of order.
                         if (existingEntry.Text !== text) {
                             existingEntry.Text = text;
-                            existingEntry.Time = time;
                             debouncedKeywordCheck(existingEntry);
 
                             // Broadcast update to viewer
@@ -1700,10 +2081,9 @@ const processCaptionUpdates = ErrorHandler.wrap(function() {
                         }
                     }
                 } else {
-                    // For other platforms, use original logic
+                    // For other platforms, use original logic (Time stays at first-seen, see above)
                     if (existingEntry.Text !== text) {
                         existingEntry.Text = text;
-                        existingEntry.Time = time;
                         debouncedKeywordCheck(existingEntry);
                         // Broadcast update to viewer
                         broadcastCaptionUpdate({
@@ -1763,17 +2143,14 @@ function updateAttendeesFromTranscript() {
             }
         }
         
+        if (isPlaceholderSpeaker(name)) return;
+
         if (!attendeeData.allAttendees.has(name)) {
             attendeeData.allAttendees.add(name);
             attendeeData.currentAttendees.set(name, 'Speaker');
-            
-            attendeeData.attendeeHistory.push({
-                name,
-                role: 'Speaker',
-                action: 'detected from transcript',
-                time: currentTime
-            });
-            
+            // Not pushed to attendeeHistory: that list is join/leave events only. Exporters
+            // rendered any non-"joined" action as "left the meeting", which is where the
+            // phantom departures of people who were mid-sentence came from.
             console.log(`Speaker detected from transcript: ${name}`);
         }
     });
@@ -1807,9 +2184,20 @@ function updateAttendeeList() {
         const currentTime = new Date().toLocaleTimeString();
         const currentTimestamp = Date.now(); // Use numeric timestamp for reliable comparison
 
-        // Clear current attendees for fresh update
+        // Only a complete scan may produce "left" events. The roster is virtualized and
+        // is torn down during chat-pane rotation, so a hidden pane or a row count below
+        // the header count means we are looking at a partial list, not at departures.
+        const paneVisible = attendeeTree.offsetParent !== null;
+        const headerCount = getRosterHeaderCount();
+        const scanComplete = paneVisible && attendeeItems.length > 0 &&
+            (headerCount === null || attendeeItems.length >= headerCount);
+        if (!attendeeData.pendingLeaves) attendeeData.pendingLeaves = new Map();
+
+        // Clear current attendees for a fresh update only when the scan is trustworthy;
+        // a partial scan may add newcomers but must not make anyone disappear.
         const previousAttendees = new Set(attendeeData.currentAttendees.keys());
-        attendeeData.currentAttendees.clear();
+        const previousRoles = new Map(attendeeData.currentAttendees);
+        if (scanComplete) attendeeData.currentAttendees.clear();
         
         // Process each attendee
         attendeeItems.forEach(item => {
@@ -1842,8 +2230,8 @@ function updateAttendeeList() {
             if (attendeeInfo && attendeeInfo.name) {
                 const { name, role, isCurrentUser } = attendeeInfo;
                 
-                // Skip "(You)" suffix for Google Meet
-                const cleanName = name.replace(/\s*\(You\)\s*$/, '');
+                // Strip "(You)" and tenant tags such as "[C]" so roster and captions agree on one name
+                const cleanName = (typeof normalizeDisplayName === 'function' ? normalizeDisplayName(name) : name.replace(/\s*\(You\)\s*$/, '')) || name;
                 
                 // If this is the current user on Google Meet, store their name
                 if (isCurrentUser && platformConfig && platformConfig.name === 'Google Meet') {
@@ -1910,9 +2298,35 @@ function updateAttendeeList() {
             }
         });
         
-        // Check for attendees who left
+        // Check for attendees who left. A departure is recorded only when:
+        //   - this scan was complete (pane visible, row count matches the header),
+        //   - the person was missing from two complete scans at least LEAVE_CONFIRM_MS apart,
+        //   - they are not the local user and have not produced a caption in the last minute.
+        // Until confirmed, the person stays in currentAttendees so no rejoin is faked either.
+        const LEAVE_CONFIRM_MS = 20000;
+        const localUser = getLocalUserName();
         previousAttendees.forEach(name => {
-            if (!attendeeData.currentAttendees.has(name)) {
+            if (!scanComplete) return;
+            if (attendeeData.currentAttendees.has(name)) {
+                attendeeData.pendingLeaves.delete(name);
+                return;
+            }
+            // Transcript-derived entries (role "Speaker") were never on the roster, so their
+            // absence from it means nothing; drop them quietly rather than record a departure
+            if (previousRoles.get(name) === 'Speaker' || isPlaceholderSpeaker(name)) {
+                attendeeData.pendingLeaves.delete(name);
+                return;
+            }
+            const stillHere = (localUser && name === localUser) || spokeRecently(name, 60000);
+            const firstMissing = attendeeData.pendingLeaves.get(name);
+            if (stillHere || !firstMissing || (currentTimestamp - firstMissing) < LEAVE_CONFIRM_MS) {
+                if (stillHere) attendeeData.pendingLeaves.delete(name);
+                else if (!firstMissing) attendeeData.pendingLeaves.set(name, currentTimestamp);
+                attendeeData.currentAttendees.set(name, previousRoles.get(name) || 'Attendee');
+                return;
+            }
+            attendeeData.pendingLeaves.delete(name);
+            {
                 // Check for duplicate leave event in recent history (within last 5 seconds)
                 // Use numeric timestamp for reliable comparison
                 const recentLeave = attendeeData.attendeeHistory
@@ -1968,6 +2382,41 @@ function updateAttendeeList() {
     } catch (error) {
         ErrorHandler.log(error, 'Updating attendee list', true);
     }
+}
+
+// Participant count from the roster header ("People (12)"), or null when unavailable
+function getRosterHeaderCount() {
+    try {
+        const selector = SELECTORS.ATTENDEE_COUNT || SELECTORS.attendeeCount;
+        if (!selector) return null;
+        const el = document.querySelector(selector);
+        const match = el && (el.textContent || '').match(/\((\d+)\)/);
+        return match ? parseInt(match[1], 10) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// The signed-in user's display name (never recorded as leaving while we are capturing)
+function getLocalUserName() {
+    try {
+        const name = platformConfig && platformConfig.getCurrentUserName ? platformConfig.getCurrentUserName() : null;
+        if (name && name !== 'You') return name;
+    } catch (e) { /* fall through */ }
+    return (window.currentUserName && window.currentUserName !== 'You') ? window.currentUserName : null;
+}
+
+// True when this person produced a caption within the last `withinMs`
+function spokeRecently(name, withinMs) {
+    const cutoff = Date.now() - withinMs;
+    for (let i = transcriptArray.length - 1; i >= 0; i--) {
+        const e = transcriptArray[i];
+        if (!e || !e.timestamp) continue;
+        const t = new Date(e.timestamp).getTime();
+        if (t < cutoff) return false;
+        if ((!e.Type || e.Type === 'caption') && e.Name === name) return true;
+    }
+    return false;
 }
 
 async function tryOpenParticipantPanel() {
@@ -2029,6 +2478,7 @@ async function startAttendeeTracking() {
         allAttendees: new Set(),
         currentAttendees: new Map(),
         attendeeHistory: [],
+        pendingLeaves: new Map(), // name -> first complete scan (ms) where they were missing
         lastUpdated: null,
         meetingStartTime: startTime,
     };
@@ -2100,6 +2550,8 @@ async function startAttendeeTracking() {
     }, TIMING.INITIAL_ATTENDEE_DELAY);
 }
 
+let attendeeScanDebounce = null;
+
 function setupAttendeeObserver() {
     // Disconnect existing observer if any
     if (attendeeObserver) {
@@ -2143,8 +2595,13 @@ function setupAttendeeObserver() {
         });
 
         if (hasRelevantChanges) {
-            console.log('[Attendee Observer] Detected attendee list change, updating...');
-            updateAttendeeList();
+            // Debounce: pane teardown and virtualized scrolling fire dozens of mutations in a
+            // burst; one scan after the DOM settles avoids reading a half-dismantled roster
+            clearTimeout(attendeeScanDebounce);
+            attendeeScanDebounce = setTimeout(() => {
+                console.log('[Attendee Observer] Detected attendee list change, updating...');
+                updateAttendeeList();
+            }, 1500);
         }
     });
 
@@ -2171,6 +2628,27 @@ function stopAttendeeTracking() {
         attendeeObserver = null;
         console.log("Stopped attendee observer");
     }
+}
+
+// Serializable snapshot of attendeeData for session backups. attendeeData holds a
+// Set and a Map, which chrome.runtime messaging turns into empty objects; sessions
+// saved that way lost their attendee list and only kept the join/leave history.
+function buildAttendeeReportSnapshot() {
+    if (!attendeeData) return null;
+    return {
+        meetingStartTime: attendeeData.meetingStartTime,
+        lastUpdated: attendeeData.lastUpdated,
+        totalUniqueAttendees: attendeeData.allAttendees.size,
+        currentAttendeeCount: attendeeData.currentAttendees.size,
+        attendeeList: Array.from(attendeeData.allAttendees),
+        currentAttendees: Array.from(attendeeData.currentAttendees.entries()).map(([name, role]) => ({ name, role })),
+        attendeeHistory: attendeeData.attendeeHistory
+    };
+}
+
+// Teams labels unattributed captions "Unknown user"; that is not a participant
+function isPlaceholderSpeaker(name) {
+    return /^unknown\s*(user|speaker)?$/i.test(String(name || '').trim());
 }
 
 async function getAttendeeReport() {
@@ -2321,7 +2799,7 @@ function captureChatMessages(skipInitialMessages = false) {
         }
 
         const chatMessage = {
-            Name: messageData.author,
+            Name: (typeof normalizeDisplayName === 'function' ? normalizeDisplayName(messageData.author) : '') || messageData.author,
             Text: messageData.text,
             Time: formatTimestamp(messageTime), // Format the message's actual timestamp
             timestamp: messageTime.toISOString(), // ISO format for sorting in service worker
@@ -2359,6 +2837,12 @@ function captureChatMessages(skipInitialMessages = false) {
             type: 'new',
             caption: chatMessage
         });
+
+        // Embed image attachments so they survive in exports and history (async, re-broadcasts when done)
+        if (chatMessage.attachments) {
+            embedChatAttachments(chatMessage).catch(err =>
+                Logger.warn(Logger.Category.CHAT, 'Attachment embedding failed:', err.message));
+        }
     });
     
     if (skipInitialMessages && skippedCount > 0) {
@@ -2557,6 +3041,15 @@ let captionsStateDebounceTimer = null;
 let leaveButtonListener = null;
 let visibilityChangeHandler = null;
 
+// Registered once, at load time, on window in the capture phase. The background
+// capture shim (visibility_shim.js) swallows trusted visibilitychange events at
+// the same point for the page, and the stop flag is shared across JS worlds, so
+// this must be registered before the shim to keep receiving the event.
+window.addEventListener('visibilitychange', (e) => {
+    if (!e.isTrusted) return; // Ignore the shim's synthetic re-dispatches
+    if (visibilityChangeHandler) visibilityChangeHandler(e);
+}, true);
+
 function setupMeetingObserver() {
     if (meetingObserver) return;
     
@@ -2575,7 +3068,7 @@ function setupMeetingObserver() {
                 }, 500);
             }
         };
-        document.addEventListener('visibilitychange', visibilityChangeHandler);
+        // Dispatched via the load-time window capture listener above
     }
     
     meetingObserver = new MutationObserver((mutations) => {
@@ -2842,12 +3335,24 @@ const handleMeetingStateChange = ErrorHandler.wrap(async function() {
                     sessionId: currentSessionId
                 });
             } else {
-                // End session with content (this adds it to history)
+                // Flush the transcript before the session is ended. stopCaptureSession()
+                // sends the awaited final save with status 'ended', and the service
+                // worker ends the session only after that data is on disk. Ending the
+                // session here first (and clearing currentSessionId) left the final save
+                // with no session to write to, so storage kept the last 30 s backup and
+                // exports from Previous Sessions lost the meeting's last seconds.
                 console.log(`[Caption Saver] Ending session with ${transcriptArray.length} captions: ${currentSessionId}`);
-                chrome.runtime.sendMessage({
-                    action: 'endSession',
-                    sessionId: currentSessionId
-                });
+                await stopCaptureSession();
+                // Capture may have stopped earlier (captions turned off) with a save that
+                // failed, or stopped with nothing to flush; try once more with what we hold
+                if (!finalSessionSaveDone) await saveFinalSession();
+                if (!finalSessionSaveDone) {
+                    console.warn(`[Caption Saver] Final save did not confirm (${finalSessionSaveError || 'no save attempted'}); ending session with the last backup`);
+                    chrome.runtime.sendMessage({
+                        action: 'endSession',
+                        sessionId: currentSessionId
+                    });
+                }
             }
             currentSessionId = null;
         }
@@ -3237,6 +3742,8 @@ async function startCaptureSession() {
 
     console.log("New caption session detected. Starting capture.");
     transcriptArray.length = 0;
+    finalSessionSaveDone = false;
+    finalSessionSaveError = '';
     kwLastAlerts = {};
     dismissAllKeywordToasts();
 
@@ -3248,9 +3755,9 @@ async function startCaptureSession() {
     currentMeetingTitle = extractMeetingTitle();
     recordingStartTime = new Date();
 
-    // Start silent audio to prevent Chrome from throttling this tab in the background
-    startAntiThrottle();
-    
+    // Keep the meeting app rendering captions while this tab is in the background
+    applyBackgroundCaptureSetting();
+
     console.log(`Capture started. Title: "${currentMeetingTitle}", Time: ${recordingStartTime.toLocaleString()}`);
     
     // Create a session if we don't have one yet
@@ -3272,9 +3779,13 @@ async function startCaptureSession() {
     
     // Start periodic backup
     startPeriodicBackup();
-    
+
     // Start attendee tracking
     startAttendeeTracking();
+
+    // Start shared content (slide) capture if enabled and supported (needs the session id for image ids)
+    resetSlideRegistry();
+    applySharedContentSetting();
     
     // For Google Meet, try to capture the user's name early
     if (platformConfig && platformConfig.name === 'Google Meet' && platformConfig.getCurrentUserName) {
@@ -3338,10 +3849,11 @@ function startPeriodicBackup() {
                             sessionId: currentSessionId,
                             data: {
                                 transcript: transcriptArray,
-                                attendeeReport: attendeeData,
+                                attendeeReport: buildAttendeeReportSnapshot(),
                                 meetingTitle: currentMeetingTitle || 'Untitled Meeting',
                                 captionCount: transcriptArray.length,
-                                attendeeCount: attendeeData.allAttendees.size
+                                attendeeCount: attendeeData.allAttendees.size,
+                                metadata: sessionMetadataPatch()
                             }
                         });
                     } else {
@@ -3398,7 +3910,58 @@ function startPeriodicBackup() {
     }, 30000); // 30 seconds
 }
 
-async function stopCaptureSession() {
+// Last failure reason from saveFinalSession(), shown when the meeting-end fallback runs
+var finalSessionSaveError = ''; // var: read by functions that can run before this line is evaluated
+
+// Send the complete transcript with status 'ended', awaited and retried. This is the
+// save that Previous Sessions exports read; the service worker ends the session only
+// after it is on disk. Sets finalSessionSaveDone on success.
+async function saveFinalSession() {
+    if (!currentSessionId || transcriptArray.length === 0) return false;
+    if (finalSessionSaveDone) return true;
+    const finalTitle = currentMeetingTitle || 'Untitled Meeting';
+    const sessionId = currentSessionId;
+    console.log(`[Caption Saver] Saving final session data - Session: ${sessionId}, Title: "${finalTitle}", Captions: ${transcriptArray.length}`);
+    const finalData = {
+        transcript: getCleanTranscript(),
+        attendeeReport: buildAttendeeReportSnapshot(),
+        meetingTitle: finalTitle,
+        captionCount: transcriptArray.length,
+        attendeeCount: attendeeData.allAttendees.size,
+        metadata: sessionMetadataPatch(),
+        status: 'ended'
+    };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const response = await safeSendMessageAsync({ action: 'updateSession', sessionId, data: finalData });
+            if (response && response.success) {
+                finalSessionSaveDone = true;
+                finalSessionSaveError = '';
+                Logger.logSession(`Final session data saved (${finalData.transcript.length} entries)`);
+                return true;
+            }
+            finalSessionSaveError = lastSendFailure || (response ? `service worker answered ${JSON.stringify(response)}` : 'no response');
+        } catch (e) {
+            finalSessionSaveError = e.message;
+        }
+        Logger.warn(Logger.Category.SESSION, `Final session save attempt ${attempt} failed (${finalSessionSaveError})${attempt < 3 ? ', retrying' : ''}`);
+        if (attempt < 3) await delay(1000 * attempt);
+    }
+    return false;
+}
+
+// Single-flight: Teams removes the captions area a few seconds before the hang-up
+// button, so the captions-off path starts a stop (and the final save) before the
+// meeting-end handler starts its own. A second caller used to return at once because
+// `capturing` was already false, and treated the still-running save as failed.
+var stopCaptureInFlight = null; // var: stopCaptureSession() is hoisted and may run early
+function stopCaptureSession() {
+    if (stopCaptureInFlight) return stopCaptureInFlight;
+    stopCaptureInFlight = stopCaptureSessionOnce().finally(() => { stopCaptureInFlight = null; });
+    return stopCaptureInFlight;
+}
+
+async function stopCaptureSessionOnce() {
     // Always update badge to off when stopping, even if not currently capturing
     updateBadgeStatus(false);
 
@@ -3406,7 +3969,10 @@ async function stopCaptureSession() {
 
     console.log("Captions turned off or meeting ended. Capture stopped. Data preserved.");
     capturing = false;
-    stopAntiThrottle();
+    setVisibilityShim(false);
+    if (typeof SlideCapture !== 'undefined') SlideCapture.stop();
+    sharedContentEnabled = false;
+    embeddedAttachmentIds.clear();
     if (observer) {
         observer.disconnect();
         observer = null;
@@ -3430,21 +3996,11 @@ async function stopCaptureSession() {
     // Final backup before stopping
     if (transcriptArray.length > 0) {
         if (currentSessionId) {
-            // Update session with final data - use cached title (don't extract as page may have changed)
-            const finalTitle = currentMeetingTitle || 'Untitled Meeting';
-            console.log(`[Caption Saver] Saving final session data - Session: ${currentSessionId}, Title: "${finalTitle}", Captions: ${transcriptArray.length}`);
-            chrome.runtime.sendMessage({
-                action: 'updateSession',
-                sessionId: currentSessionId,
-                data: {
-                    transcript: transcriptArray,
-                    attendeeReport: attendeeData,
-                    meetingTitle: finalTitle,
-                    captionCount: transcriptArray.length,
-                    attendeeCount: attendeeData.allAttendees.size,
-                    status: 'ended'
-                }
-            });
+            // Update session with final data - use cached title (don't extract as page may have changed).
+            // Awaited and retried: this is the save that exports read, and a fire-and-forget
+            // message to a service worker that had just been stopped was silently lost,
+            // leaving the stored transcript at the last 30 s backup.
+            await saveFinalSession();
         } else {
             // Fallback to old storage method - check quota first
             const hasSpace = await checkStorageQuota();
@@ -3692,11 +4248,8 @@ function cleanupObservers() {
         leaveButtonListener = null;
     }
 
-    // Remove visibility change handler
-    if (visibilityChangeHandler) {
-        document.removeEventListener('visibilitychange', visibilityChangeHandler);
-        visibilityChangeHandler = null;
-    }
+    // Detach visibility change handler (the window listener stays, but does nothing)
+    visibilityChangeHandler = null;
 
     // Clear all intervals (memory leak prevention)
     if (observerCheckInterval) {
@@ -3754,6 +4307,32 @@ function cleanupObservers() {
 }
 
 // Cleanup on page unload
+// Last line of defence: if the tab is closed or navigated away before the awaited
+// meeting-end save confirmed (its retries span ~4 s), push the current transcript
+// once more. Fire-and-forget by necessity; the service worker reloads the session
+// from storage if it was cold-started, so this usually lands.
+window.addEventListener('pagehide', () => {
+    try {
+        if (window.top !== window.self) return;
+        if (!currentSessionId || transcriptArray.length === 0 || finalSessionSaveDone) return;
+        chrome.runtime.sendMessage({
+            action: 'updateSession',
+            sessionId: currentSessionId,
+            data: {
+                transcript: getCleanTranscript(),
+                attendeeReport: buildAttendeeReportSnapshot(),
+                meetingTitle: currentMeetingTitle || 'Untitled Meeting',
+                captionCount: transcriptArray.length,
+                attendeeCount: attendeeData.allAttendees.size,
+                metadata: sessionMetadataPatch(),
+                status: capturing ? undefined : 'ended'
+            }
+        }, () => { void chrome.runtime.lastError; });
+    } catch (e) {
+        // Page is going away; nothing else we can do
+    }
+});
+
 window.addEventListener('beforeunload', () => {
     // For Zoom iframe, save data before unload
     if (platformConfig && platformConfig.name === 'Zoom' && transcriptArray.length > 0) {
@@ -3810,6 +4389,12 @@ if (initializePlatform()) {
 // --- Message Handling ---
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.message) {
+        case 'shared_content_frame':
+            // Slide frame relayed from the PowerPoint Live iframe via the service worker
+            handleSharedContentFrame(request);
+            sendResponse({ received: true });
+            break;
+
         case 'viewer_ready':
             // Viewer is ready to receive live updates
             sendResponse({
@@ -4051,23 +4636,26 @@ function showToastNotification(meetingTitle) {
     }, 5000);
 }
 
-// --- Recording Transcript Interceptor ---
-// Inject external script to intercept Teams recording transcript requests
-// Using external file to avoid CSP inline script violations
-(function injectTranscriptInterceptor() {
+// --- Main-world script injection ---
+// External files are used to avoid CSP inline script violations.
+function injectPageScript(file, label) {
     const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('transcript_interceptor.js');
+    script.src = chrome.runtime.getURL(file);
     script.onload = function() {
-        console.log('[Recording Transcript] Interceptor script loaded');
+        console.log(`[${label}] Script loaded`);
         this.remove();
     };
     script.onerror = function() {
-        console.error('[Recording Transcript] Failed to load interceptor script');
+        console.error(`[${label}] Failed to load ${file}`);
         this.remove();
     };
-
     (document.head || document.documentElement).appendChild(script);
-})();
+}
+
+// Intercepts Teams recording transcript requests
+injectPageScript('transcript_interceptor.js', 'Recording Transcript');
+// Keeps the meeting app rendering captions while the tab is hidden (idle until capture starts)
+injectPageScript('visibility_shim.js', 'Background Capture');
 
 // Listen for transcript data from injected script
 window.addEventListener('message', (event) => {

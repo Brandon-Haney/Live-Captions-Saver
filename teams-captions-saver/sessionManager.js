@@ -9,11 +9,21 @@
     }
 
 class SessionManager {
+    // How many chunk keys past the recorded chunkCount loadSessionData probes (a count can
+    // lag a write) and saveSessionTranscript clears (a write can shrink)
+    static CHUNK_PROBE_BEYOND = 20;
+
     constructor() {
         this.sessions = new Map(); // Active sessions in memory
-        this.MAX_SESSIONS = 20; // Support up to 20 concurrent meetings
-        this.MAX_CHUNK_SIZE = 7000; // Stay under 8KB limit per key
-        this.STORAGE_QUOTA = 8 * 1024 * 1024; // Reserve 8MB for sessions
+        this.MAX_SESSIONS = 20; // Legacy constant (no longer enforced; retention is size-based, see getStorageBudgetBytes)
+        this.MAX_CHUNK_SIZE = 7000; // Transcript chunk size per key
+        // The manifest requests "unlimitedStorage", so chrome.storage.local and IndexedDB are
+        // limited only by disk. The user-facing limit is the storage budget setting
+        // (storageBudgetMB, default 250, 0 = unlimited) covering transcripts + images.
+        // 250 MB: real usage showed image-heavy meetings at 5-60 MB each, so 100 MB
+        // evicted history after only a few of them.
+        this.DEFAULT_BUDGET_MB = 250;
+        this.STORAGE_QUOTA = this.DEFAULT_BUDGET_MB * 1024 * 1024; // Legacy alias used by getStorageStats
         this._initialized = false; // Track initialization state
         this._initPromise = this.initializeFromStorage(); // Store promise for awaiting
         this._sessionLocks = new Map(); // Per-session locks to prevent read/write conflicts
@@ -373,8 +383,59 @@ class SessionManager {
     }
 
     // Update session with new data (transcript, attendees, etc.)
+    // Make sure a session is in memory, reloading it from storage if this service
+    // worker instance started after the session was created. Chrome stops an idle
+    // MV3 service worker after ~30 s; a backup or the final save that woke it up
+    // used to be dropped with "Session not found" while initialization was still
+    // running, which is how exports ended up 30 s stale and mid-caption.
+    // Recreate a session the content script still holds but this worker no longer has:
+    // createSession() defers persisting until content arrives, so a worker stopped in
+    // the first 30 s of a meeting (or a session evicted from storage) leaves the
+    // content script's saves answering "not found". The save message carries
+    // everything needed to stand the session back up.
+    async adoptSession(sessionId, info = {}) {
+        await this.ensureInitialized();
+        if (this.sessions.has(sessionId)) return true;
+        if (!sessionId || typeof sessionId !== 'string') return false;
+        const parsedStart = info.recordingStartTime ? new Date(info.recordingStartTime).getTime() : NaN;
+        const idStart = this.extractTimestampFromSessionId(sessionId);
+        const startMs = !isNaN(parsedStart) ? parsedStart : (idStart || Date.now());
+        this.sessions.set(sessionId, {
+            metadata: {
+                sessionId,
+                tabId: info.tabId ?? null,
+                platform: info.platform || 'Unknown',
+                url: info.url || null,
+                meetingTitle: info.meetingTitle || 'Untitled Meeting',
+                startTime: new Date(startMs).toISOString(),
+                status: 'active',
+                lastActivity: new Date().toISOString(),
+                adopted: true
+            },
+            stats: { captionCount: 0, attendeeCount: 0, chatCount: 0, duration: 0, speakers: [] }
+        });
+        console.warn(`[SessionManager] Adopted session ${sessionId}: it was in neither memory nor storage`);
+        return true;
+    }
+
+    async ensureSessionLoaded(sessionId) {
+        await this.ensureInitialized();
+        if (this.sessions.has(sessionId)) return true;
+        try {
+            const stored = await chrome.storage.local.get([`${sessionId}_metadata`, `${sessionId}_stats`]);
+            const metadata = stored[`${sessionId}_metadata`];
+            if (!metadata) return false;
+            this.sessions.set(sessionId, { metadata, stats: stored[`${sessionId}_stats`] || {} });
+            console.log(`[SessionManager] Reloaded session ${sessionId} from storage`);
+            return true;
+        } catch (error) {
+            console.error(`[SessionManager] Failed to reload session ${sessionId}:`, error);
+            return false;
+        }
+    }
+
     async updateSession(sessionId, data) {
-        if (!this.sessions.has(sessionId)) {
+        if (!(await this.ensureSessionLoaded(sessionId))) {
             console.warn(`[SessionManager] Session ${sessionId} not found`);
             return false;
         }
@@ -474,40 +535,27 @@ class SessionManager {
         }
 
         try {
-            if (!this.sessions.has(sessionId)) {
+            if (!(await this.ensureSessionLoaded(sessionId))) {
                 console.warn(`[SessionManager] Session ${sessionId} not found`);
                 return false;
             }
 
-            // Check storage quota BEFORE chunking to avoid wasted memory
-            let currentUsage = 0;
-            if (chrome.storage.local.getBytesInUse) {
-                try {
-                    currentUsage = await chrome.storage.local.getBytesInUse(null);
-                } catch (error) {
-                    currentUsage = await this.getStorageUsage();
-                }
-            } else {
-                currentUsage = await this.getStorageUsage();
-            }
-
-            // Estimate new data size before chunking (rough estimate based on JSON size)
+            // Keep the storage budget honoured before writing: evict the oldest ended
+            // meetings (never active ones) if this save would push usage over it.
+            // Storage itself is unlimited (unlimitedStorage permission), so this is the
+            // only limit that applies.
             const estimatedTranscriptSize = this.calculateSize(transcriptArray);
             const estimatedAttendeeSize = attendeeReport ? this.calculateSize(attendeeReport) : 0;
             const estimatedChatSize = chatMessages ? this.calculateSize(chatMessages) : 0;
             const estimatedNewDataSize = estimatedTranscriptSize + estimatedAttendeeSize + estimatedChatSize;
-
-            // Use 7MB as safe limit to leave room for other data
-            const SAFE_QUOTA = 7 * 1024 * 1024;
-
-            if (currentUsage + estimatedNewDataSize > SAFE_QUOTA) {
-                console.log(`[SessionManager] Storage cleanup needed. Current: ${(currentUsage / 1024 / 1024).toFixed(2)}MB, Estimated new data: ${(estimatedNewDataSize / 1024 / 1024).toFixed(2)}MB`);
-                // Need to clean up old sessions - free up enough space plus 1MB buffer
-                await this.cleanupOldSessions(estimatedNewDataSize + 1024 * 1024);
+            try {
+                await this.enforceBudget({ reserveBytes: estimatedNewDataSize, protectSessionId: sessionId });
+            } catch (error) {
+                console.warn('[SessionManager] Budget check failed, saving anyway:', error);
             }
 
-            // Now chunk the transcript after quota check passes
             const chunks = this.chunkTranscript(transcriptArray);
+            const previousChunkCount = Number(this.sessions.get(sessionId)?.metadata?.chunkCount) || 0;
 
             // Save transcript chunks using Promise.allSettled to handle partial failures
             const chunkPromises = chunks.map((chunk, index) =>
@@ -536,6 +584,22 @@ class SessionManager {
                 // If ALL chunks failed, this is a critical error
                 if (successfulChunks.length === 0) {
                     throw new Error(`All ${chunks.length} chunks failed to save`);
+                }
+            }
+
+            // Drop chunks left over from a larger earlier write. The 30 s backups carry
+            // each entry's `key`, the meeting-end save does not, so the final write can
+            // need fewer chunks than the one before it; loadSessionData probes past the
+            // recorded count and would otherwise append the stale tail as duplicates.
+            if (failedChunks.length === 0) {
+                const staleKeys = [];
+                for (let i = chunks.length; i < Math.max(previousChunkCount, chunks.length) + SessionManager.CHUNK_PROBE_BEYOND; i++) {
+                    staleKeys.push(`${sessionId}_chunk_${i}`);
+                }
+                try {
+                    await chrome.storage.local.remove(staleKeys);
+                } catch (error) {
+                    console.warn(`[SessionManager] Could not remove stale chunks for ${sessionId}:`, error);
                 }
             }
 
@@ -594,22 +658,21 @@ class SessionManager {
         }
 
         try {
-            const session = this.sessions.get(sessionId);
+            // Always read metadata fresh from storage. The popup and the service worker each
+            // hold their own SessionManager; an in-memory copy can carry a chunkCount from an
+            // earlier backup, and reading with a stale count silently drops the end of the
+            // meeting (viewer showed 28 s less than the export of the same session).
             let metadata = null;
             let stats = {};
-
-            if (session) {
-                metadata = session.metadata;
-                stats = session.stats;
-            } else {
-                // Try loading from storage
-                const metadataKey = `${sessionId}_metadata`;
-                const stored = await chrome.storage.local.get(metadataKey);
-                if (stored[metadataKey]) {
-                    metadata = stored[metadataKey];
-                    const statsData = await chrome.storage.local.get(`${sessionId}_stats`);
-                    stats = statsData[`${sessionId}_stats`] || {};
-                }
+            const stored = await chrome.storage.local.get([`${sessionId}_metadata`, `${sessionId}_stats`]);
+            if (stored[`${sessionId}_metadata`]) {
+                metadata = stored[`${sessionId}_metadata`];
+                stats = stored[`${sessionId}_stats`] || {};
+                const inMemory = this.sessions.get(sessionId);
+                if (inMemory) { inMemory.metadata = metadata; inMemory.stats = stats; }
+            } else if (this.sessions.get(sessionId)) {
+                metadata = this.sessions.get(sessionId).metadata;
+                stats = this.sessions.get(sessionId).stats;
             }
 
             // If no metadata found, check if this is an orphaned migrated session
@@ -658,24 +721,49 @@ class SessionManager {
                 throw new Error('Corrupted session metadata: invalid chunkCount');
             }
 
-            for (let i = 0; i < chunkCount; i++) {
+            // Chunks are written before the count is; if the count lags, probe past it so a
+            // reader never loses the tail of a meeting to a stale metadata write
+            // An ended session's count was recorded after its final save, so only active
+            // sessions (where a write may still be in flight) are probed
+            const PROBE_BEYOND = metadata.status === 'ended' ? 0 : SessionManager.CHUNK_PROBE_BEYOND;
+            for (let i = 0; i < chunkCount + PROBE_BEYOND; i++) {
                 chunkKeys.push(`${sessionId}_chunk_${i}`);
             }
 
             const chunks = await chrome.storage.local.get(chunkKeys);
             const transcriptArray = [];
+            const seenKeys = new Set();
+            let duplicateEntries = 0;
             let missingChunks = [];
+            let loadedCount = 0;
 
-            for (let i = 0; i < chunkCount; i++) {
+            for (let i = 0; i < chunkCount + PROBE_BEYOND; i++) {
                 const chunk = chunks[`${sessionId}_chunk_${i}`];
+                if (i >= chunkCount && !chunk) break; // past the recorded count and nothing more on disk
                 // Validate chunk is array before spreading
                 if (chunk && Array.isArray(chunk)) {
-                    transcriptArray.push(...chunk);
+                    // A probed chunk can be a leftover from an earlier, larger write; entries
+                    // that carry a key are dropped when that key was already loaded
+                    for (const entry of chunk) {
+                        const key = entry && entry.key;
+                        if (key) {
+                            if (seenKeys.has(key)) { duplicateEntries++; continue; }
+                            seenKeys.add(key);
+                        }
+                        transcriptArray.push(entry);
+                    }
+                    loadedCount = i + 1;
                 } else if (chunk) {
                     console.warn(`[SessionManager] Chunk ${i} is not an array:`, typeof chunk);
                 } else {
                     missingChunks.push(i);
                 }
+            }
+            if (loadedCount > chunkCount) {
+                console.warn(`[SessionManager] Session ${sessionId}: metadata said ${chunkCount} chunk(s) but ${loadedCount} were on disk; using all of them`);
+            }
+            if (duplicateEntries > 0) {
+                console.warn(`[SessionManager] Session ${sessionId}: skipped ${duplicateEntries} duplicate entr${duplicateEntries === 1 ? 'y' : 'ies'} from stale chunks`);
             }
 
             // Warn about missing chunks but don't fail - return partial data
@@ -755,14 +843,151 @@ class SessionManager {
         }
         
         console.log(`[SessionManager] Ended session ${sessionId} with ${session.stats.captionCount} captions`);
-        
+
+        // Apply the storage budget now that this meeting's data is final; never touches active
+        // sessions, and never the one that just ended
+        this.enforceBudget({ protectSessionId: sessionId }).catch(err => console.warn('[SessionManager] Budget cleanup failed:', err));
+
         return true;
+    }
+
+    // Storage budget in bytes from settings (storageBudgetMB; 0 = unlimited). Default 250 MB.
+    async getStorageBudgetBytes() {
+        try {
+            const { storageBudgetMB } = await chrome.storage.sync.get('storageBudgetMB');
+            if (storageBudgetMB === 0 || storageBudgetMB === '0') return 0;
+            const mb = parseInt(storageBudgetMB, 10);
+            if (Number.isFinite(mb) && mb > 0) return mb * 1024 * 1024;
+        } catch (e) { /* fall through */ }
+        return this.DEFAULT_BUDGET_MB * 1024 * 1024;
+    }
+
+    // Transcript bytes in chrome.storage.local plus image bytes in IndexedDB
+    async getCombinedUsage() {
+        let transcriptBytes = 0;
+        try {
+            transcriptBytes = chrome.storage.local.getBytesInUse
+                ? await chrome.storage.local.getBytesInUse(null)
+                : await this.getStorageUsage();
+        } catch (e) {
+            transcriptBytes = await this.getStorageUsage();
+        }
+        let images = { total: { count: 0, bytes: 0 }, bySession: {} };
+        if (typeof ImageStore !== 'undefined' && ImageStore.usageBySession) {
+            try { images = await ImageStore.usageBySession(); } catch (e) { /* IndexedDB unavailable */ }
+        }
+        return { transcriptBytes, images, totalBytes: transcriptBytes + images.total.bytes };
+    }
+
+    /**
+     * Delete the oldest ended sessions (with their images) until combined usage,
+     * plus `reserveBytes` about to be written, fits the budget. Active sessions
+     * and `protectSessionId` are never deleted. Returns { deleted, freedBytes }.
+     */
+    async enforceBudget(opts = {}) {
+        const budget = await this.getStorageBudgetBytes();
+        const result = { deleted: 0, freedBytes: 0 };
+        if (!budget) return result; // unlimited
+
+        const usage = await this.getCombinedUsage();
+        let total = usage.totalBytes + (opts.reserveBytes || 0);
+        if (total <= budget) return result;
+
+        const candidates = (await this.getAllSessions())
+            .filter(s => s.status !== 'active' && s.sessionId !== opts.protectSessionId)
+            .sort((a, b) => new Date(a.startTime || 0) - new Date(b.startTime || 0)); // oldest first
+
+        for (const session of candidates) {
+            if (total <= budget) break;
+            try {
+                const size = await this.getSessionSize(session.sessionId)
+                    + ((usage.images.bySession[session.sessionId] || {}).bytes || 0);
+                await this.deleteSession(session.sessionId);
+                total -= size;
+                result.freedBytes += size;
+                result.deleted++;
+                console.log(`[SessionManager] Budget: removed "${session.meetingTitle || session.sessionId}" (${(size / 1024 / 1024).toFixed(2)} MB)`);
+            } catch (error) {
+                console.error(`[SessionManager] Budget delete failed for ${session.sessionId}:`, error);
+            }
+        }
+        if (total > budget) {
+            console.warn(`[SessionManager] Still over budget after cleanup: ${(total / 1024 / 1024).toFixed(1)} MB of ${(budget / 1024 / 1024).toFixed(0)} MB (remaining sessions are active)`);
+        }
+        return result;
+    }
+
+    /**
+     * Storage overview for the popup. Pure read: no cleanup side effects.
+     * Transcripts live in chrome.storage.local, images in IndexedDB; both are
+     * unlimited by Chrome (unlimitedStorage) and governed by the budget setting.
+     */
+    async getStorageOverview() {
+        const usage = await this.getCombinedUsage();
+
+        let disk = null;
+        try {
+            if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.estimate) {
+                const est = await navigator.storage.estimate();
+                disk = { usageBytes: est.usage || 0, quotaBytes: est.quota || 0 };
+            }
+        } catch (e) { /* not available */ }
+
+        const all = await this.getAllSessions();
+        const sessions = [];
+        for (const s of all) {
+            const img = usage.images.bySession[s.sessionId] || { count: 0, bytes: 0 };
+            sessions.push({
+                sessionId: s.sessionId,
+                meetingTitle: s.meetingTitle,
+                startTime: s.startTime,
+                status: s.status,
+                transcriptBytes: await this.getSessionSize(s.sessionId),
+                imageBytes: img.bytes,
+                imageCount: img.count
+            });
+        }
+
+        return {
+            transcriptBytes: usage.transcriptBytes,
+            images: { count: usage.images.total.count, bytes: usage.images.total.bytes },
+            totalBytes: usage.totalBytes,
+            budgetBytes: await this.getStorageBudgetBytes(), // 0 = unlimited
+            disk,
+            sessions
+        };
+    }
+
+    /**
+     * On-demand cleanup from the popup: orphaned transcript keys, orphaned
+     * images, then the storage budget. Returns { deletedSessions, freedBytes, orphanImages }.
+     */
+    async freeUpSpace() {
+        let freedBytes = 0;
+        try { freedBytes += await this.cleanupOrphanedData(); } catch (e) { console.warn('[SessionManager] Orphan cleanup failed:', e); }
+        let orphanImages = 0;
+        if (typeof ImageStore !== 'undefined' && ImageStore.pruneOrphans) {
+            try {
+                const known = (await this.getAllSessions()).map(s => s.sessionId);
+                orphanImages = await ImageStore.pruneOrphans(known);
+            } catch (e) { console.warn('[SessionManager] Image prune failed:', e); }
+        }
+        const budget = await this.enforceBudget();
+        freedBytes += budget.freedBytes;
+        return { deletedSessions: budget.deleted, freedBytes, orphanImages };
     }
 
     // Delete a session
     async deleteSession(sessionId) {
         try {
             console.log(`[SessionManager] Deleting session: ${sessionId}`);
+
+            // Images (slides, embedded chat attachments) live in IndexedDB; drop them with the session
+            if (typeof ImageStore !== 'undefined' && ImageStore.deleteBySession) {
+                ImageStore.deleteBySession(sessionId)
+                    .then(n => { if (n) console.log(`[SessionManager] Removed ${n} image(s) for session ${sessionId}`); })
+                    .catch(err => console.warn('[SessionManager] Image cleanup failed:', err));
+            }
 
             // Get metadata from memory or storage
             let metadata = this.sessions.get(sessionId)?.metadata;
@@ -1300,8 +1525,13 @@ class SessionManager {
     async getSessionSize(sessionId) {
         try {
             const session = this.sessions.get(sessionId);
-            const chunkCount = session?.metadata?.chunkCount || 0;
-            
+            let chunkCount = session?.metadata?.chunkCount || 0;
+            if (!session) {
+                // Not in this instance's memory (e.g. popup, or an ended session): read chunkCount from storage
+                const stored = await chrome.storage.local.get(`${sessionId}_metadata`);
+                chunkCount = stored[`${sessionId}_metadata`]?.chunkCount || 0;
+            }
+
             const keys = [
                 `${sessionId}_metadata`,
                 `${sessionId}_stats`,

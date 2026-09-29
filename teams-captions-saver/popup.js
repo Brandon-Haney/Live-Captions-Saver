@@ -42,6 +42,11 @@ const UI_ELEMENTS = {
     trackCaptionsToggle: document.getElementById('trackCaptionsToggle'),
     trackAttendeesToggle: document.getElementById('trackAttendeesToggle'),
     chatCaptureToggle: document.getElementById('chatCaptureToggle'),
+    backgroundCaptureToggle: document.getElementById('backgroundCaptureToggle'),
+    captureSharedContentToggle: document.getElementById('captureSharedContentToggle'),
+    exportImagesToggle: document.getElementById('exportImagesToggle'),
+    storageBudgetSelect: document.getElementById('storageBudgetSelect'),
+    freeUpSpaceBtn: document.getElementById('freeUpSpaceBtn'),
     timestampFormat: document.getElementById('timestampFormat'),
     filenamePattern: document.getElementById('filenamePattern'),
     meetingType: document.getElementById('meetingType'),
@@ -516,7 +521,8 @@ async function loadSettings() {
     const settings = await chrome.storage.sync.get([
         'autoEnableCaptions', 'autoSaveOnEnd', 'aiInstructions', 'defaultSaveFormat',
         'trackCaptions', 'trackAttendees', 'timestampFormat',
-        'filenamePattern', 'chatCapture', 'm365KeepAlive'
+        'filenamePattern', 'chatCapture', 'm365KeepAlive', 'backgroundCapture', 'captureSharedContent', 'exportImages',
+        'storageBudgetMB'
     ]);
 
     UI_ELEMENTS.autoEnableCaptionsToggle.checked = !!settings.autoEnableCaptions;
@@ -524,6 +530,10 @@ async function loadSettings() {
     UI_ELEMENTS.trackCaptionsToggle.checked = settings.trackCaptions !== false;
     UI_ELEMENTS.trackAttendeesToggle.checked = settings.trackAttendees !== false;
     UI_ELEMENTS.chatCaptureToggle.checked = settings.chatCapture !== false;
+    UI_ELEMENTS.backgroundCaptureToggle.checked = settings.backgroundCapture !== false;
+    UI_ELEMENTS.captureSharedContentToggle.checked = !!settings.captureSharedContent;
+    UI_ELEMENTS.exportImagesToggle.checked = !!settings.exportImages;
+    UI_ELEMENTS.storageBudgetSelect.value = settings.storageBudgetMB === undefined ? '250' : String(settings.storageBudgetMB);
     UI_ELEMENTS.timestampFormat.value = settings.timestampFormat || '12hr';
     UI_ELEMENTS.filenamePattern.value = settings.filenamePattern || '{date}_{title}_{format}';
     UI_ELEMENTS.aiInstructions.value = settings.aiInstructions || '';
@@ -571,6 +581,29 @@ function setupEventListeners() {
     UI_ELEMENTS.trackAttendeesToggle.addEventListener('change', (e) => {
         chrome.storage.sync.set({ trackAttendees: e.target.checked });
     });
+
+    UI_ELEMENTS.backgroundCaptureToggle.addEventListener('change', (e) => {
+        // Content script reacts via chrome.storage.onChanged, even mid-capture
+        chrome.storage.sync.set({ backgroundCapture: e.target.checked });
+    });
+
+    UI_ELEMENTS.captureSharedContentToggle.addEventListener('change', (e) => {
+        // Content script starts/stops the slide sampler via chrome.storage.onChanged
+        chrome.storage.sync.set({ captureSharedContent: e.target.checked });
+    });
+
+    UI_ELEMENTS.exportImagesToggle.addEventListener('change', (e) => {
+        // Read by the service worker and viewer at export time
+        chrome.storage.sync.set({ exportImages: e.target.checked });
+    });
+
+    UI_ELEMENTS.storageBudgetSelect.addEventListener('change', async (e) => {
+        // Applied before each save, when a meeting ends, and by "Free up space"; refresh the bar now
+        await chrome.storage.sync.set({ storageBudgetMB: parseInt(e.target.value, 10) });
+        loadStorageOverview();
+    });
+
+    UI_ELEMENTS.freeUpSpaceBtn.addEventListener('click', freeUpSpace);
 
     UI_ELEMENTS.chatCaptureToggle.addEventListener('change', (e) => {
         chrome.storage.sync.set({ chatCapture: e.target.checked });
@@ -894,7 +927,7 @@ async function handleSave(target) {
                     action: 'getSessionData',
                     sessionId: capturedSessionId
                 });
-                meetingStartTime = response?.sessionData?.metadata?.startTime;
+                meetingStartTime = response?.sessionData?.metadata?.recordingStartTime || response?.sessionData?.attendeeReport?.meetingStartTime || response?.sessionData?.metadata?.startTime;
             } catch (e) {
                 // Ignore - will use current time as fallback
             }
@@ -917,12 +950,15 @@ async function handleSave(target) {
             if (response?.sessionData) {
                 const { transcript, attendeeReport, metadata } = response.sessionData;
                 const meetingTitle = metadata?.meetingTitle || 'Meeting';
-                const recordingStartTime = metadata?.startTime || new Date().toISOString();
+                // Capture start (stored by the content script), not the session's creation
+                // time, so Previous Sessions exports match the auto-saved file
+                const recordingStartTime = metadata?.recordingStartTime || attendeeReport?.meetingStartTime || metadata?.startTime || null;
 
                 const saveResponse = await chrome.runtime.sendMessage({
                     message: "save_from_session",
                     transcriptArray: transcript,
                     meetingTitle: meetingTitle,
+                    platform: metadata?.platform || null,
                     format: format,
                     recordingStartTime: recordingStartTime,
                     attendeeReport: attendeeReport,
@@ -1046,6 +1082,10 @@ async function loadPreviousSessions() {
             const timeAgo = getTimeAgo(date);
             const captionCount = session.captionCount || 0;
             const platform = session.platform || 'unknown';
+            const size = sessionSizeCache[sessionId];
+            const sizeMeta = size
+                ? `<span>•</span><span title="${formatBytes(size.transcriptBytes)} transcript${size.imageCount ? ` + ${size.imageCount} image${size.imageCount === 1 ? '' : 's'} (${formatBytes(size.imageBytes)})` : ''}">${formatBytes(size.transcriptBytes + size.imageBytes)}${size.imageCount ? ` · ${size.imageCount} img` : ''}</span>`
+                : '';
 
             let platformColor = '#6c757d';
             let platformDisplay = 'UNKNOWN';
@@ -1070,6 +1110,7 @@ async function loadPreviousSessions() {
                         <span>${timeAgo}</span>
                         <span>•</span>
                         <span>${captionCount} captions</span>
+                        ${sizeMeta}
                     </div>
                     <div class="session-item-actions">
                         <button class="session-item-btn view-session" data-id="${sessionId}">View</button>
@@ -1209,7 +1250,7 @@ async function exportPreviousSession(sessionId) {
         }
 
         // Get meeting start time for SRT default
-        const meetingStartTime = sessionData.metadata?.startTime;
+        const meetingStartTime = sessionData.metadata?.recordingStartTime || sessionData.attendeeReport?.meetingStartTime || sessionData.metadata?.startTime;
 
         // Show format selection dialog with meeting start time for SRT
         const result = await showExportFormatDialog(meetingStartTime);
@@ -1220,8 +1261,9 @@ async function exportPreviousSession(sessionId) {
             transcriptArray: sessionData.transcript,
             format: result.format,
             meetingTitle: sessionData.metadata?.meetingTitle || 'Meeting',
+            platform: sessionData.metadata?.platform || null,
             attendeeReport: sessionData.attendeeReport,
-            recordingStartTime: sessionData.metadata?.startTime || new Date().toISOString(),
+            recordingStartTime: sessionData.metadata?.recordingStartTime || sessionData.attendeeReport?.meetingStartTime || sessionData.metadata?.startTime || null,
             userRecordingStartTime: result.userRecordingStartTime
         });
 
@@ -1233,12 +1275,94 @@ async function exportPreviousSession(sessionId) {
     }
 }
 
+// --- Storage overview (bottom of the main tab) ---
+let sessionSizeCache = {}; // sessionId -> { transcriptBytes, imageBytes, imageCount }
+
+function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return '0 KB';
+    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+async function loadStorageOverview() {
+    const section = document.getElementById('storage-section');
+    if (!section) return;
+    try {
+        const sessionManager = new SessionManager();
+        const overview = await sessionManager.getStorageOverview();
+
+        sessionSizeCache = {};
+        overview.sessions.forEach(s => { sessionSizeCache[s.sessionId] = s; });
+
+        const { totalBytes, budgetBytes, transcriptBytes, images, disk } = overview;
+        const unlimited = !budgetBytes;
+        // Bar denominator: the budget, or free disk when unlimited
+        const denominator = unlimited ? (disk && disk.quotaBytes ? disk.quotaBytes : 0) : budgetBytes;
+        const pct = denominator ? Math.min(100, (totalBytes / denominator) * 100) : 0;
+
+        const fill = document.getElementById('storage-total-fill');
+        fill.style.width = `${totalBytes > 0 ? Math.max(1.5, pct) : 0}%`;
+        fill.classList.toggle('warn', !unlimited && pct >= 60 && pct < 85);
+        fill.classList.toggle('danger', !unlimited && pct >= 85);
+
+        const sessionsCount = overview.sessions.length;
+        document.getElementById('storage-total-label').textContent =
+            `${sessionsCount} meeting${sessionsCount === 1 ? '' : 's'}`;
+        document.getElementById('storage-total-text').textContent = unlimited
+            ? `${formatBytes(totalBytes)} used${disk && disk.quotaBytes ? ` · ${formatBytes(Math.max(0, disk.quotaBytes - disk.usageBytes))} free` : ''}`
+            : `${formatBytes(totalBytes)} of ${formatBytes(budgetBytes)} (${pct.toFixed(pct < 10 ? 1 : 0)}%)`;
+
+        document.getElementById('storage-breakdown-text').textContent =
+            `${formatBytes(transcriptBytes)} · ${images.count ? `${images.count} image${images.count === 1 ? '' : 's'}, ${formatBytes(images.bytes)}` : 'no images'}`;
+
+        const hint = unlimited
+            ? 'No storage budget set: nothing is deleted automatically. Set one under Settings > Storage.'
+            : (pct >= 85
+                ? 'Near the budget: the oldest ended meetings (with their images) are deleted as new meetings are saved.'
+                : `Oldest ended meetings are deleted automatically once ${formatBytes(budgetBytes)} is reached. Active meetings are never removed.`);
+        document.getElementById('storage-hint').textContent = hint;
+        section.style.display = 'block';
+    } catch (error) {
+        console.error('[Storage] Failed to load overview:', error);
+        section.style.display = 'none';
+    }
+}
+
+async function freeUpSpace() {
+    const btn = UI_ELEMENTS.freeUpSpaceBtn;
+    const budgetMB = UI_ELEMENTS.storageBudgetSelect ? parseInt(UI_ELEMENTS.storageBudgetSelect.value, 10) : 250;
+    const budgetText = budgetMB ? `and, if usage is over the ${budgetMB >= 1024 ? (budgetMB / 1024) + ' GB' : budgetMB + ' MB'} budget, the oldest ended meetings` : '(no budget is set, so no meetings are removed)';
+    if (!confirm(`Remove orphaned data ${budgetText}? Active meetings are kept. This cannot be undone.`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Cleaning…';
+    try {
+        const sessionManager = new SessionManager();
+        const result = await sessionManager.freeUpSpace();
+        const parts = [];
+        if (result.deletedSessions) parts.push(`${result.deletedSessions} meeting${result.deletedSessions === 1 ? '' : 's'} removed`);
+        if (result.orphanImages) parts.push(`${result.orphanImages} orphaned image${result.orphanImages === 1 ? '' : 's'} removed`);
+        if (result.freedBytes) parts.push(`${formatBytes(result.freedBytes)} freed`);
+        UI_ELEMENTS.statusMessage.textContent = parts.length ? parts.join(', ') : 'Nothing to clean up';
+        UI_ELEMENTS.statusMessage.style.color = '#28a745';
+        await loadStorageOverview();
+        await loadPreviousSessions();
+    } catch (error) {
+        console.error('[Storage] Free up space failed:', error);
+        UI_ELEMENTS.statusMessage.textContent = `Cleanup failed: ${error.message}`;
+        UI_ELEMENTS.statusMessage.style.color = '#dc3545';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Free up space';
+    }
+}
+
 async function deletePreviousSession(sessionId) {
     if (!confirm('Delete this session? This cannot be undone.')) return;
 
     try {
         const sessionManager = new SessionManager();
         await sessionManager.deleteSession(sessionId);
+        await loadStorageOverview();
         await loadPreviousSessions(); // Reload the list
         UI_ELEMENTS.statusMessage.textContent = 'Session deleted';
         UI_ELEMENTS.statusMessage.style.color = '#28a745';
@@ -1288,6 +1412,9 @@ function showExportFormatDialog(meetingStartTime = null) {
                 </button>
                 <button data-format="md" style="padding: 12px; background: #6f42c1; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                     Markdown (Formatted)
+                </button>
+                <button data-format="html" style="padding: 12px; background: #e34c26; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                    HTML (Viewer page)
                 </button>
                 <button data-format="ai" style="padding: 12px; background: #ff6b6b; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                     AI Analysis (with Instructions)
@@ -1450,6 +1577,7 @@ async function initializePopup() {
     await loadCustomTemplates();
     setupEventListeners();
     await loadActiveSessions();
+    await loadStorageOverview(); // Fills sessionSizeCache used by the sessions list
     await loadPreviousSessions();
 
     const tab = await getActiveMeetingTab();

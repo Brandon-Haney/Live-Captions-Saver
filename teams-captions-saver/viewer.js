@@ -114,8 +114,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const modalCaption = document.getElementById('modalCaption');
     const imageModalClose = document.getElementById('imageModalClose');
 
+    // Size the enlarged image to fill the viewport (within 90vw x 85vh) even when
+    // the source is small, e.g. a slide captured from PowerPoint Live presenter view
+    function fitModalImage() {
+        const nw = modalImage.naturalWidth;
+        const nh = modalImage.naturalHeight;
+        if (!nw || !nh) return;
+        const scale = Math.min((window.innerWidth * 0.9) / nw, (window.innerHeight * 0.85) / nh);
+        modalImage.style.width = Math.round(nw * scale) + 'px';
+        modalImage.style.height = Math.round(nh * scale) + 'px';
+    }
+
     function openImageModal(imageUrl, caption) {
+        modalImage.style.width = '';
+        modalImage.style.height = '';
+        modalImage.onload = fitModalImage;
         modalImage.src = imageUrl;
+        if (modalImage.complete) fitModalImage();
         modalCaption.textContent = caption || '';
         imageModal.classList.add('active');
 
@@ -125,7 +140,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function closeImageModal() {
         imageModal.classList.remove('active');
+        modalImage.onload = null;
         modalImage.src = ''; // Clear the image source
+        modalImage.style.width = '';
+        modalImage.style.height = '';
 
         // Remove keyboard handler
         document.removeEventListener('keydown', handleModalEscape);
@@ -150,6 +168,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (imageModalClose) {
             imageModalClose.addEventListener('click', closeImageModal);
         }
+
+        window.addEventListener('resize', () => {
+            if (imageModal.classList.contains('active')) fitModalImage();
+        });
     }
 
     // Event delegation for attachment thumbnails
@@ -217,6 +239,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let searchDebounceTimer = null;
     let meetingStartTime = null;
     let meetingEndTime = null;
+    let sessionRecordingStartTime = null; // capture start stored with the session (historical view)
     const SEARCH_DEBOUNCE_DELAY = 300;
 
     // Live streaming state
@@ -230,6 +253,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let speakerAliases = {};  // Session-specific speaker aliases
     let isNearBottom = true;  // Track if user is near bottom of scroll
     let captionElementsCache = [];  // Performance: Cache caption elements to avoid repeated DOM queries
+    let imageCache = {};  // imageId -> data URL (slides, embedded chat attachments)
+    let showSlides = true;  // "Slides" toggle in the filter bar
 
     // Hot Keyword Detection state
     let hotKeywords = {};           // Global keywords (from chrome.storage.sync)
@@ -1190,6 +1215,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // 3. New caption text is similar to (contained in or extends) existing text
         const existingCaption = recentCaptionIndex !== -1 ? allCaptions[recentCaptionIndex] : null;
         const isLikelyFragment = existingCaption &&
+            caption.Type !== 'slide' && existingCaption.Type !== 'slide' &&
             caption.Text.length < 50 &&
             (existingCaption.Text.includes(caption.Text) || caption.Text.includes(existingCaption.Text));
 
@@ -1216,10 +1242,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = newCaptionHTML;
         const newCaptionElement = tempDiv.firstElementChild;
+        if (caption.key) newCaptionElement.dataset.key = caption.key; // lets a later 'remove' update find it
         captionsContainer.appendChild(newCaptionElement);
 
         // Performance: Add element to cache
         captionElementsCache.push(newCaptionElement);
+
+        // Shared content slides: reveal the toggle, respect its state
+        if (caption.Type === 'slide') {
+            updateSlidesToggleVisibility(true);
+            if (!showSlides) newCaptionElement.style.display = 'none';
+        }
 
         // Apply search filter if active
         if (activeSearch) {
@@ -1301,7 +1334,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Update in DOM
             const captionElement = captionsContainer.querySelector(`[data-index="${index}"]`);
-            if (captionElement) {
+            if (captionElement && (caption.attachments || caption.imageId)) {
+                // Attachments were embedded (or a slide image arrived): re-render the whole entry
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = createCaptionHTML(allCaptions[index], index);
+                const fresh = tempDiv.firstElementChild;
+                if (fresh) {
+                    fresh.style.display = captionElement.style.display;
+                    captionElement.replaceWith(fresh);
+                    const cacheIdx = captionElementsCache.indexOf(captionElement);
+                    if (cacheIdx !== -1) captionElementsCache[cacheIdx] = fresh;
+                }
+            } else if (captionElement) {
                 const textElement = captionElement.querySelector('.text');
                 if (textElement) {
                     debug.log('[Viewer] Updating text from:', textElement.textContent, 'to:', caption.Text);
@@ -1354,6 +1398,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 appendNewCaption(update.caption);
             } else if (update.type === 'update') {
                 updateExistingCaption(update.caption);
+            } else if (update.type === 'remove') {
+                removeCaptionByKey(update.key, update.imageId);
             }
         });
         
@@ -1361,6 +1407,28 @@ document.addEventListener('DOMContentLoaded', () => {
         updateTimer = null;
     }
     
+    // A retracted entry (e.g. a slide that turned out to be a loading screen): drop it
+    // from the data, the DOM, the element cache and, if nothing else uses it, the image cache
+    function removeCaptionByKey(key, imageId) {
+        if (!key) return;
+        const index = allCaptions.findIndex(c => c && c.key === key);
+        if (index !== -1) allCaptions.splice(index, 1);
+        let el = null;
+        try { el = captionsContainer.querySelector(`[data-key="${CSS.escape(key)}"]`); } catch (e) { el = null; }
+        if (el) {
+            const ci = captionElementsCache.indexOf(el);
+            if (ci !== -1) captionElementsCache.splice(ci, 1);
+            el.remove();
+        }
+        if (imageId && !allCaptions.some(c => c && (c.imageId === imageId || (c.attachments || []).some(a => a && a.imageId === imageId)))) {
+            delete imageCache[imageId];
+        }
+        updateSlidesToggleVisibility(allCaptions.some(c => c && c.Type === 'slide'));
+        const analytics = calculateAnalytics(allCaptions);
+        if (analytics) displayAnalytics(analytics);
+        debug.log('[Viewer] Removed retracted entry:', key);
+    }
+
     function queueUpdate(update) {
         debug.log('[Viewer] Queuing update:', update.type, update.caption?.Name);
         pendingUpdates.push(update);
@@ -1407,109 +1475,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Rendering Functions ---
+    // Entry rendering is shared with the HTML export (transcriptRenderer.js).
+    // Images (slides, embedded attachments) resolve through the viewer's cache,
+    // which is filled from live broadcasts and hydrated from the image store.
+    function resolveViewerImage(ref) {
+        if (ref && ref.imageId && imageCache[ref.imageId]) return imageCache[ref.imageId];
+        return ref && ref.url ? sanitizeUrl(ref.url) : '';
+    }
+
     function createCaptionHTML(item, index) {
-        const copyIconSVG = `
-            <svg viewBox="0 0 24 24" fill="currentColor">
-                <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
-            </svg>`;
-        
-        // Professional SVG icons instead of emojis
-        const chatIconSVG = `
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-            </svg>`;
-        
-        // Microphone icon for spoken captions
-        const captionIconSVG = `
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                <line x1="12" y1="19" x2="12" y2="23"></line>
-                <line x1="8" y1="23" x2="16" y2="23"></line>
-            </svg>`;
-        
-        // Handle attendance events differently
-        if (item.Type === 'attendance') {
-            const actionClass = item.action || (item.Text.includes('joined') ? 'joined' : 'left');
-            const displayName = (item.Name && speakerAliases[item.Name]) || item.Name || 'Unknown';
-            return `
-                <div class="attendance-event ${actionClass}" data-type="attendance" data-action="${actionClass}">
-                    <span class="attendance-icon">●</span>
-                    <span class="name">${escapeHtml(displayName)}</span>
-                    <span class="attendance-text">${escapeHtml(item.Text)}</span>
-                    <span class="time">${escapeHtml(item.Time)}</span>
-                </div>
-            `;
-        }
-
-        // Determine if this is a chat message
-        const isChat = item.Type === 'chat';
-        const typeClass = isChat ? 'chat-message' : 'caption-message';
-        const typeIcon = isChat ? chatIconSVG : captionIconSVG;
-        const typeLabel = isChat ? 'Chat' : 'Caption';
-
-        // Apply speaker alias if exists
-        const displayName = (item.Name && speakerAliases[item.Name]) || item.Name || 'Unknown';
-        const hasAlias = !!(item.Name && speakerAliases[item.Name]);
-
-        // Check for attachments and remove [Image:] text from display
-        let displayText = item.Text;
-        let attachmentsHTML = '';
-
-        if (item.attachments && item.attachments.length > 0) {
-            console.log(`[Viewer] Rendering ${item.attachments.length} attachments for message:`, item.attachments);
-            // Remove [Image:] indicators from text for cleaner display
-            displayText = displayText.replace(/\[Image:[^\]]*\]/g, '').trim();
-
-            // Create attachment thumbnails with data attributes instead of onclick
-            attachmentsHTML = `
-                <div class="attachment-container">
-                    ${item.attachments.map((att, attIndex) => {
-                        const safeUrl = sanitizeUrl(att.url);
-                        if (!safeUrl) {
-                            console.warn('[Viewer] Blocked unsafe attachment URL:', att.url);
-                            return '';
-                        }
-                        return `
-                        <div class="attachment-thumbnail"
-                             data-image-url="${escapeHtml(safeUrl)}"
-                             data-image-caption="${escapeHtml(att.filename || att.alt)}"
-                             title="${escapeHtml(att.filename || att.alt)}">
-                            <img src="${escapeHtml(safeUrl)}"
-                                 alt="${escapeHtml(att.alt || 'Image attachment')}"
-                                 class="attachment-image">
-                        </div>`;
-                    }).join('')}
-                </div>
-            `;
-        }
-
-        // Add attachment icon if there are attachments
-        const attachmentIcon = item.attachments && item.attachments.length > 0 ?
-            '<span class="attachment-icon" title="Has attachments">📎</span>' : '';
-
-        return `
-            <div class="caption ${typeClass}" data-speaker="${escapeHtml(item.Name)}" data-original-speaker="${escapeHtml(item.Name)}" data-index="${index}" data-type="${item.Type || 'caption'}">
-                <button class="copy-btn" title="Copy this line" aria-label="Copy this line">
-                    ${copyIconSVG}
-                    <span class="tooltip-text">Copy</span>
-                </button>
-                <span class="time">${escapeHtml(item.Time)}</span>
-                <div class="caption-content">
-                    <span class="message-type" title="${typeLabel}">${typeIcon}</span>
-                    <span class="caption-header">
-                        <span class="name ${hasAlias ? 'has-alias' : ''}"
-                              data-original="${escapeHtml(item.Name)}"
-                              title="${hasAlias ? 'Original: ' + escapeHtml(item.Name) : ''}">
-                            ${escapeHtml(displayName)}
-                        </span>
-                        ${attachmentIcon}
-                    </span>
-                    <span class="text">${escapeHtml(displayText)}</span>
-                    ${attachmentsHTML}
-                </div>
-            </div>
-        `;
+        return TranscriptRenderer.renderEntryHTML(item, index, {
+            aliases: speakerAliases,
+            interactive: true,
+            resolveImage: resolveViewerImage
+        });
     }
 
     // Merge attendance events with transcript chronologically
@@ -1520,22 +1499,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const combinedEvents = [...transcript];
 
-        // Add attendance events
+        // Add attendance events (join/leave only; numeric timestamps, locale time strings
+        // resolved against the meeting date since new Date("10:00 AM") is NaN)
+        const meetingStart = currentAttendeeReport && currentAttendeeReport.meetingStartTime;
+        const sortKeyFor = (event) => {
+            if (typeof event.timestamp === 'number' && event.timestamp > 0) return event.timestamp;
+            if (event.timestamp) { const t = new Date(event.timestamp).getTime(); if (!isNaN(t)) return t; }
+            const direct = new Date(event.time).getTime();
+            if (!isNaN(direct)) return direct;
+            const m = String(event.time || '').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)?/i);
+            if (m) {
+                const base = meetingStart ? new Date(meetingStart) : new Date();
+                if (!isNaN(base.getTime())) {
+                    let h = parseInt(m[1], 10);
+                    if (m[4]) { if (/pm/i.test(m[4]) && h < 12) h += 12; if (/am/i.test(m[4]) && h === 12) h = 0; }
+                    base.setHours(h, parseInt(m[2], 10), parseInt(m[3] || '0', 10), 0);
+                    return base.getTime();
+                }
+            }
+            return 0;
+        };
         attendeeHistory.forEach(event => {
+            if (!event || (event.action !== 'joined' && event.action !== 'left')) return;
             combinedEvents.push({
                 Time: event.time,
                 Name: event.name,
                 Text: event.action === 'joined' ? `joined the meeting${event.role ? ' (' + event.role + ')' : ''}` : 'left the meeting',
                 Type: 'attendance',
                 action: event.action,
-                sortKey: new Date(event.time).getTime()
+                sortKey: sortKeyFor(event)
             });
         });
 
-        // Sort by time
+        // Sort by time (ISO timestamp for captions/slides, sortKey for attendance)
         combinedEvents.sort((a, b) => {
-            const timeA = a.sortKey || new Date(a.Time).getTime() || 0;
-            const timeB = b.sortKey || new Date(b.Time).getTime() || 0;
+            const timeA = a.sortKey || (a.timestamp ? new Date(a.timestamp).getTime() : 0) || new Date(a.Time).getTime() || 0;
+            const timeB = b.sortKey || (b.timestamp ? new Date(b.timestamp).getTime() : 0) || new Date(b.Time).getTime() || 0;
             return timeA - timeB;
         });
 
@@ -1551,7 +1550,31 @@ document.addEventListener('DOMContentLoaded', () => {
         // Performance: Rebuild cache after rendering
         captionElementsCache = Array.from(captionsContainer.querySelectorAll('.caption'));
 
+        updateSlidesToggleVisibility(transcriptArray.some(item => item && item.Type === 'slide'));
         updateExportButtonStates();
+    }
+
+    // Load pixels for every imageId referenced by the transcript into imageCache
+    async function hydrateImages(transcriptArray) {
+        if (typeof ImageStore === 'undefined' || typeof TranscriptRenderer === 'undefined') return;
+        try {
+            const ids = TranscriptRenderer.collectImageIds(transcriptArray).filter(id => !imageCache[id]);
+            if (ids.length === 0) return;
+            const found = await ImageStore.getDataUrls(ids);
+            Object.assign(imageCache, found);
+            debug.log(`[Viewer] Hydrated ${Object.keys(found).length}/${ids.length} image(s) from store`);
+        } catch (error) {
+            console.warn('[Viewer] Failed to load images from store:', error);
+        }
+    }
+
+    // "Slides" toggle button: only shown once the transcript contains shared content
+    function updateSlidesToggleVisibility(hasSlides) {
+        const btn = document.getElementById('toggle-slides-btn');
+        if (!btn) return;
+        if (hasSlides) btn.style.display = '';
+        btn.classList.toggle('active', showSlides);
+        btn.setAttribute('aria-pressed', showSlides ? 'true' : 'false');
     }
 
     function populateSpeakerFilters(transcriptArray) {
@@ -1631,6 +1654,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Performance: Use cached elements instead of querying DOM
         captionElementsCache.forEach(captionDiv => {
+            // Shared content slides have their own toggle
+            if (captionDiv.dataset.type === 'slide' && !showSlides) {
+                captionDiv.style.display = 'none';
+                return;
+            }
+
             const textElement = captionDiv.querySelector('.text');
             // Handle attendance events (joins/leaves) which don't have .text element
             if (!textElement) {
@@ -1780,7 +1809,17 @@ document.addEventListener('DOMContentLoaded', () => {
         return visibleCaptions;
     }
     
-    function formatTranscriptForExport(captions, format = 'txt', userRecordingStartTime = null) {
+    // Relative paths of packaged image files for an entry (zip export), "" when none
+    function imageRefsFor(entry, imagePaths) {
+        if (!imagePaths) return '';
+        const refs = [];
+        if (entry.Type === 'slide' && entry.imageId && imagePaths[entry.imageId]) refs.push(imagePaths[entry.imageId]);
+        (entry.attachments || []).forEach(att => { if (att && att.imageId && imagePaths[att.imageId]) refs.push(imagePaths[att.imageId]); });
+        return refs.length ? ` -> ${refs.join(', ')}` : '';
+    }
+
+    // imagePaths: imageId -> relative file path inside the zip (only when images are packaged)
+    function formatTranscriptForExport(captions, format = 'txt', userRecordingStartTime = null, imagePaths = {}) {
         if (!captions || captions.length === 0) {
             return format === 'json' ? '[]' : 'No captions to export.';
         }
@@ -1788,7 +1827,17 @@ document.addEventListener('DOMContentLoaded', () => {
         if (format === 'srt') {
             return formatAsSrt(captions, userRecordingStartTime);
         } else if (format === 'json') {
-            return JSON.stringify(captions, null, 2);
+            const hasPaths = imagePaths && Object.keys(imagePaths).length > 0;
+            const data = !hasPaths ? captions : captions.map(entry => {
+                const copy = { ...entry };
+                if (entry.imageId && imagePaths[entry.imageId]) copy.imageFile = imagePaths[entry.imageId];
+                if (Array.isArray(entry.attachments)) {
+                    copy.attachments = entry.attachments.map(att => (att && att.imageId && imagePaths[att.imageId])
+                        ? { ...att, imageFile: imagePaths[att.imageId] } : att);
+                }
+                return copy;
+            });
+            return JSON.stringify(data, null, 2);
         } else if (format === 'md') {
             // Build Markdown with metadata header
             let content = '';
@@ -1820,11 +1869,21 @@ document.addEventListener('DOMContentLoaded', () => {
             // Group by speaker for better readability
             let lastSpeaker = null;
             captions.forEach(entry => {
+                const typeIndicator = entry.Type === 'chat' ? '[CHAT] ' : (entry.Type === 'slide' ? '[SLIDE] ' : '');
                 if (entry.Name !== lastSpeaker) {
                     lastSpeaker = entry.Name;
-                    content += `\n### ${entry.Name}\n\n`;
+                    content += `\n### ${typeIndicator}${entry.Name}\n\n`;
                 }
                 content += `> **[${entry.Time}]** ${entry.Text}\n\n`;
+                // Packaged images (zip export) as Markdown images
+                if (entry.Type === 'slide' && entry.imageId && imagePaths[entry.imageId]) {
+                    content += `![Slide ${entry.slideNumber || ''}](${imagePaths[entry.imageId]})\n\n`;
+                }
+                (entry.attachments || []).forEach(att => {
+                    if (att && att.imageId && imagePaths[att.imageId]) {
+                        content += `![${att.filename || 'attachment'}](${imagePaths[att.imageId]})\n\n`;
+                    }
+                });
             });
 
             return content;
@@ -1862,7 +1921,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     captions
                         .filter(entry => entry.Type !== 'attendance') // Exclude join/leave events
                         .map(entry => entry.Name)
-                        .filter(name => name && name.trim())
+                        .filter(name => name && name.trim() && !/^unknown\s*(user|speaker)?$/i.test(name.trim()))
                 )];
                 if (speakers.length > 0) {
                     attendeeList = speakers.sort();
@@ -1893,7 +1952,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (entry.Type === 'attendance') {
                     return `[${entry.Time}] ● ${entry.Name} ${entry.Text}`;
                 } else if (entry.Type === 'chat') {
-                    return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}`;
+                    return `[CHAT] [${entry.Time}] ${entry.Name}: ${entry.Text}${imageRefsFor(entry, imagePaths)}`;
+                } else if (entry.Type === 'slide') {
+                    return `[SLIDE] [${entry.Time}] ${entry.Name}: ${entry.Text}${imageRefsFor(entry, imagePaths)}`;
                 } else {
                     return `[${entry.Time}] ${entry.Name}: ${entry.Text}`;
                 }
@@ -1932,7 +1993,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Get meeting start time for SRT default (from attendee report or first caption)
-        let meetingStartTime = currentAttendeeReport?.meetingStartTime;
+        let meetingStartTime = sessionRecordingStartTime || currentAttendeeReport?.meetingStartTime;
         if (!meetingStartTime && allCaptions.length > 0 && allCaptions[0].timestamp) {
             meetingStartTime = allCaptions[0].timestamp;
         }
@@ -1943,8 +2004,44 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const { format, userRecordingStartTime } = result;
 
+        // "Include images with exports": package text formats with their images as a zip
+        let imageFiles = [];
+        let imagePaths = {};
+        if (typeof ExportPackage !== 'undefined' && ExportPackage.TEXT_FORMATS.includes(format) && ExportPackage.hasImages(visibleCaptions)) {
+            try {
+                const { exportImages } = await chrome.storage.sync.get('exportImages');
+                if (exportImages) {
+                    await hydrateImages(visibleCaptions);
+                    const images = {};
+                    TranscriptRenderer.collectImageIds(visibleCaptions).forEach(id => { if (imageCache[id]) images[id] = imageCache[id]; });
+                    ({ files: imageFiles, paths: imagePaths } = await ExportPackage.collectImageFiles(visibleCaptions, images));
+                }
+            } catch (err) {
+                console.warn('[Viewer] Could not prepare images for export, saving text only:', err);
+                imageFiles = [];
+                imagePaths = {};
+            }
+        }
+
         // Create download
-        const content = formatTranscriptForExport(visibleCaptions, format, userRecordingStartTime);
+        let content;
+        if (format === 'html') {
+            await hydrateImages(visibleCaptions);
+            const images = {};
+            TranscriptRenderer.collectImageIds(visibleCaptions).forEach(id => { if (imageCache[id]) images[id] = imageCache[id]; });
+            content = TranscriptRenderer.buildStandaloneDocument({
+                meetingTitle: currentMeetingTitle,
+                platform: currentPlatform,
+                entries: visibleCaptions,
+                attendeeReport: currentAttendeeReport,
+                images,
+                aliases: speakerAliases,
+                recordingStartTime: meetingStartTime,
+                includeAttendance: false // visible list already contains merged join/leave rows
+            });
+        } else {
+            content = formatTranscriptForExport(visibleCaptions, format, userRecordingStartTime, imagePaths);
+        }
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
         const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
@@ -1962,7 +2059,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const filterSuffix = currentFilteredSpeaker ? `-filtered-${currentFilteredSpeaker.replace(/[^a-z0-9]/gi, '_')}` : '';
 
         // Build filename: {date}_{title}{filterSuffix}_{time}.{extension}
-        const filename = `${dateStr}_${cleanTitle}${filterSuffix}_${timeStr}.${format}`;
+        const baseName = `${dateStr}_${cleanTitle}${filterSuffix}_${timeStr}`;
+        let filename = `${baseName}.${format}`;
 
         try {
             let mimeType;
@@ -1970,11 +2068,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 mimeType = 'application/json';
             } else if (format === 'md') {
                 mimeType = 'text/markdown';
+            } else if (format === 'html') {
+                mimeType = 'text/html';
             } else {
                 // txt and srt both use text/plain
                 mimeType = 'text/plain';
             }
-            const blob = new Blob([content], { type: mimeType });
+            let blob;
+            if (imageFiles.length > 0) {
+                // Transcript + images travel together as <name>.zip
+                const zip = ExportPackage.buildZip([{ name: filename, data: content }, ...imageFiles]);
+                blob = new Blob([zip], { type: 'application/zip' });
+                filename = `${baseName}.zip`;
+            } else {
+                blob = new Blob([content], { type: mimeType });
+            }
             const url = URL.createObjectURL(blob);
 
             try {
@@ -2041,6 +2149,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     </button>
                     <button data-format="md" style="padding: 12px; background: #6f42c1; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                         Markdown (Formatted)
+                    </button>
+                    <button data-format="html" style="padding: 12px; background: #e34c26; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                        HTML (Viewer page)
                     </button>
                     <button data-format="srt" style="padding: 12px; background: #fd7e14; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">
                         SRT (Subtitles for Video)
@@ -2256,6 +2367,16 @@ document.addEventListener('DOMContentLoaded', () => {
         copyAllBtn.addEventListener('click', handleCopyAllClick);
         saveAllBtn.addEventListener('click', handleSaveAllClick);
 
+        // Shared content slides toggle
+        const slidesToggle = document.getElementById('toggle-slides-btn');
+        if (slidesToggle) {
+            slidesToggle.addEventListener('click', () => {
+                showSlides = !showSlides;
+                updateSlidesToggleVisibility(true);
+                applyFilters();
+            });
+        }
+
         // Handle image load errors using event delegation (CSP-compliant)
         captionsContainer.addEventListener('error', (event) => {
             if (event.target.classList.contains('attachment-image')) {
@@ -2328,6 +2449,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currentMeetingTitle = meetingTitle;
             currentPlatform = platform;
             currentAttendeeReport = sessionData.attendeeReport || null;
+            sessionRecordingStartTime = sessionData.metadata?.recordingStartTime || null;
 
             h1.innerHTML = `${createPlatformBadge(platform)}Live Transcript <span style="font-size: 0.5em; color: #666;">(Historical)</span><span class="meeting-title">${escapeHtml(meetingTitle)}</span>`;
 
@@ -2559,6 +2681,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     transcript = mergeAttendanceEvents(transcript, viewerData.attendeeData.attendeeHistory);
                 }
 
+                // Pull slide/attachment pixels from the image store before rendering
+                await hydrateImages(transcript);
+
                 renderCaptions(transcript);
                 populateSpeakerFilters(transcript);
                 setupEventListeners();
@@ -2712,6 +2837,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     isLiveStreaming = true;
                     lastUpdateTime = Date.now(); // Update timestamp when receiving messages
+                    // Slides and embedded attachments travel with the update for instant display
+                    if (request.images && typeof request.images === 'object') {
+                        Object.assign(imageCache, request.images);
+                    }
                     queueUpdate(request);
 
                     // Remove "Meeting Ended" message if we're receiving updates again
@@ -2929,121 +3058,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Analytics Functions ---
+    // Analytics are shared with the HTML export (transcriptRenderer.js)
     function calculateAnalytics(captions) {
-        if (!captions || captions.length === 0) return null;
-
-        // Filter out attendance events (join/leave) and chat messages for accurate stats
-        const captionEntries = captions.filter(caption =>
-            caption.Type !== 'attendance' && caption.Type !== 'chat'
-        );
-
-        if (captionEntries.length === 0) return null;
-
-        const speakerStats = {};
-        let totalWords = 0;
-
-        // Calculate speaker statistics (captions only)
-        captionEntries.forEach(caption => {
-            const speaker = caption.Name;
-            if (!speaker) return; // Skip entries without speaker name
-
-            const text = caption.Text || '';
-            const words = text.split(/\s+/).filter(w => w.length > 0).length;
-
-            if (!speakerStats[speaker]) {
-                speakerStats[speaker] = {
-                    messageCount: 0,
-                    wordCount: 0,
-                    firstMessage: caption.Time,
-                    lastMessage: caption.Time
-                };
-            }
-
-            speakerStats[speaker].messageCount++;
-            speakerStats[speaker].wordCount += words;
-            speakerStats[speaker].lastMessage = caption.Time;
-            totalWords += words;
-        });
-
-        // Calculate percentages
-        Object.keys(speakerStats).forEach(speaker => {
-            speakerStats[speaker].wordPercentage = totalWords > 0
-                ? ((speakerStats[speaker].wordCount / totalWords) * 100).toFixed(1)
-                : '0.0';
-        });
-
-        return {
-            totalMessages: captionEntries.length,
-            totalWords: totalWords,
-            uniqueSpeakers: Object.keys(speakerStats).length,
-            speakerStats: speakerStats
-        };
+        return TranscriptRenderer.calculateAnalytics(captions);
     }
-    
+
     function displayAnalytics(analytics) {
         if (!analytics) return;
-        
-        // Check if analytics container already exists
+
+        const analyticsHTML = TranscriptRenderer.renderAnalyticsHTML(analytics, speakerAliases);
         let analyticsContainer = document.getElementById('meeting-analytics');
-        
-        // Sort speakers by word count
-        const sortedSpeakers = Object.entries(analytics.speakerStats)
-            .sort((a, b) => b[1].wordCount - a[1].wordCount);
-        
-        let analyticsHTML = `
-                <h3 style="margin-top: 0; color: #495057;">Meeting Analytics</h3>
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 15px;">
-                    <div>
-                        <div style="font-size: 24px; font-weight: bold; color: #17a2b8;">${analytics.totalMessages}</div>
-                        <div style="font-size: 12px; color: #6c757d;">Total Messages</div>
-                    </div>
-                    <div>
-                        <div style="font-size: 24px; font-weight: bold; color: #28a745;">${analytics.totalWords}</div>
-                        <div style="font-size: 12px; color: #6c757d;">Total Words</div>
-                    </div>
-                    <div>
-                        <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${analytics.uniqueSpeakers}</div>
-                        <div style="font-size: 12px; color: #6c757d;">Speakers</div>
-                    </div>
-                </div>
-                <h4 style="margin-top: 15px; margin-bottom: 10px; color: #495057;">Speaker Participation</h4>
-                <div style="space-y: 8px;">
-        `;
-        
-        sortedSpeakers.slice(0, 5).forEach(([speaker, stats]) => {
-            const percentage = stats.wordPercentage;
-            analyticsHTML += `
-                <div style="margin-bottom: 8px;">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-                        <span style="font-size: 14px; color: #495057;">${escapeHtml(speaker)}</span>
-                        <span style="font-size: 12px; color: #6c757d;">${stats.wordCount} words (${percentage}%)</span>
-                    </div>
-                    <div style="background: #e9ecef; border-radius: 4px; height: 20px; overflow: hidden;">
-                        <div style="background: linear-gradient(90deg, #17a2b8, #28a745); height: 100%; width: ${percentage}%; transition: width 0.3s ease;"></div>
-                    </div>
-                </div>
-            `;
-        });
-        
-        if (sortedSpeakers.length > 5) {
-            analyticsHTML += `<div style="font-size: 12px; color: #6c757d; margin-top: 8px;">...and ${sortedSpeakers.length - 5} more speakers</div>`;
-        }
-        
-        analyticsHTML += `
-                </div>
-        `;
-        
-        // Update existing analytics or create new one
         const container = document.getElementById('captions-container');
-        
+
         if (analyticsContainer) {
-            // Update existing analytics
             analyticsContainer.innerHTML = analyticsHTML;
         } else {
-            // Create new analytics container
             analyticsContainer = document.createElement('div');
             analyticsContainer.id = 'meeting-analytics';
-            analyticsContainer.style.cssText = 'background: #f8f9fa; padding: 15px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #dee2e6;';
             analyticsContainer.innerHTML = analyticsHTML;
             container.parentNode.insertBefore(analyticsContainer, container);
         }
